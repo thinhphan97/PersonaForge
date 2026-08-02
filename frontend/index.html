@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Avatar WebRTC Chat</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="layout">
+      <section class="avatar-panel">
+        <div class="video-shell">
+          <video id="avatar" autoplay playsinline muted></video>
+          <span id="state" class="state">đang khởi tạo</span>
+          <button id="audio-toggle" class="audio-toggle" type="button">
+            Bật âm thanh kiểm tra
+          </button>
+        </div>
+        <p id="connection" class="connection">Đang kết nối…</p>
+      </section>
+
+      <section class="chat-panel">
+        <header>
+          <h1>Nhân vật ảo</h1>
+          <p>Video được truyền từ Python server qua WebRTC.</p>
+        </header>
+        <div id="messages" class="messages" aria-live="polite"></div>
+        <form id="chat-form">
+          <input
+            id="message-input"
+            autocomplete="off"
+            maxlength="10000"
+            placeholder="Nhập tin nhắn…"
+            disabled
+          />
+          <button type="submit" disabled>Gửi</button>
+        </form>
+      </section>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,39 @@
+from datetime import datetime, timezone
+
+import pytest
+
+from avatar_chat.adapters.outbound.memory import (
+    InMemoryConversationRepository,
+    InMemorySessionRepository,
+)
+from avatar_chat.domain.models import AvatarSession, AvatarState, ChatMessage, ChatRole
+
+
+@pytest.mark.asyncio
+async def test_session_repository_does_not_leak_mutable_entities() -> None:
+    repository = InMemorySessionRepository()
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    original = AvatarSession("s1", "default", AvatarState.CREATED, now, now)
+    await repository.save(original)
+
+    loaded = await repository.get("s1")
+    assert loaded is not None
+    loaded.state = AvatarState.CLOSED
+
+    loaded_again = await repository.get("s1")
+    assert loaded_again is not None
+    assert loaded_again.state is AvatarState.CREATED
+
+
+@pytest.mark.asyncio
+async def test_conversation_repository_returns_recent_messages_in_order() -> None:
+    repository = InMemoryConversationRepository()
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index in range(3):
+        await repository.append(
+            ChatMessage(str(index), "s1", ChatRole.USER, str(index), now)
+        )
+
+    messages = await repository.list_recent("s1", 2)
+
+    assert [message.content for message in messages] == ["1", "2"]
