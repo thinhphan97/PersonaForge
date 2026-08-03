@@ -8,7 +8,7 @@ button.secondary { background: #27324e; }
 button.is-active, .session-card.is-active { background: #5d78ee; box-shadow: 0 0 0 2px #91a4ff55; }
 button.danger { background: #9f3d50; }
 button.small { padding: 5px 8px; font-size: 12px; }
-button:disabled, input:disabled { opacity: .5; cursor: not-allowed; }
+button:disabled, input:disabled, select:disabled { opacity: .5; cursor: not-allowed; }
 input, select { padding: 11px 12px; border: 1px solid #34415f; border-radius: 9px; background: #0c1325; color: inherit; min-width: 0; }
 label { color: #aab5d2; font-size: 13px; }
 .error { min-height: 22px; color: #ff8fa3; }
@@ -39,6 +39,8 @@ label { color: #aab5d2; font-size: 13px; }
 .session-list { display: grid; gap: 8px; }
 .session-card { display: grid; gap: 4px; text-align: left; background: #18213a; }
 .session-card:hover { background: #27365d; }
+.session-card.is-closed { border: 1px solid #6d3d4a; background: #211824; }
+.session-card.is-closed span { color: #d49cab; }
 .session-card span { color: #9faaca; font-size: 12px; }
 
 .workspace { min-width: 0; display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(350px, .85fr); gap: 18px; padding: 18px; }
@@ -46,7 +48,12 @@ label { color: #aab5d2; font-size: 13px; }
 .avatar-panel { display: grid; align-content: center; padding: 20px; }
 .video-shell { position: relative; width: 100%; }
 video { display: block; width: 100%; border-radius: 14px; background: #050812; }
+.video-shell.is-closed video { min-height: 240px; opacity: .12; filter: grayscale(1); }
+.session-closed-overlay { position: absolute; inset: 0; z-index: 2; display: grid; place-content: center; gap: 8px; padding: 28px; border: 1px solid #6d3d4a; border-radius: 14px; background: #160f19e8; text-align: center; }
+.session-closed-overlay strong { color: #ffacbd; font-size: clamp(20px, 3vw, 30px); }
+.session-closed-overlay span { max-width: 460px; color: #d6bdc5; line-height: 1.5; }
 .state { position: absolute; right: 12px; bottom: 12px; padding: 6px 10px; border-radius: 999px; background: #10172ccc; }
+.video-shell.is-closed .state { z-index: 3; background: #7a3042; }
 .audio-toggle { position: absolute; left: 12px; bottom: 12px; }
 .connection { text-align: center; color: #9faaca; }
 .chat-panel { display: grid; grid-template-rows: auto auto minmax(180px, 1fr) auto; min-height: 0; }

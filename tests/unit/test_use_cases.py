@@ -19,6 +19,7 @@ from avatar_chat.application.dto import (
 )
 from avatar_chat.application.session_access import SessionAccessPolicy
 from avatar_chat.application.use_cases import (
+    CloseSession,
     CreateSession,
     GetConversation,
     GetPublicConversation,
@@ -27,7 +28,7 @@ from avatar_chat.application.use_cases import (
     ProvisionMedia,
     ProvisionPublicMedia,
 )
-from avatar_chat.domain.errors import CharacterNotFound, SessionNotFound
+from avatar_chat.domain.errors import CharacterNotFound, SessionClosed, SessionNotFound
 from avatar_chat.domain.models import (
     AvatarState,
     ChatMessage,
@@ -241,6 +242,7 @@ async def test_message_flow_changes_avatar_and_persists_history() -> None:
         AvatarState.SPEAKING,
         AvatarState.IDLE,
     ]
+
     assert [event.type for event in events] == [
         ChatEventType.USER_MESSAGE,
         ChatEventType.AVATAR_STATE,
@@ -278,6 +280,43 @@ async def test_message_flow_changes_avatar_and_persists_history() -> None:
     assert session is not None
     assert session.status is SessionStatus.READY
     assert session.avatar_state is AvatarState.IDLE
+
+
+@pytest.mark.asyncio
+async def test_closed_session_is_read_only_and_rejects_new_chat() -> None:
+    sessions = InMemorySessionRepository()
+    conversations = InMemoryConversationRepository()
+    ids = SequentialIds()
+    clock = FixedClock()
+    avatar = FakeAvatarStream()
+    access = access_policy()
+    created = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
+        USER_ID,
+        "default",
+    )
+    await NegotiateStream(sessions, avatar, clock, access).execute(
+        USER_ID,
+        created.session_id,
+        WebRtcOffer("offer", "offer"),
+    )
+    await CloseSession(sessions, avatar, clock, access=access).execute(
+        USER_ID,
+        created.session_id,
+    )
+    stream = HandleMessage(
+        sessions,
+        conversations,
+        avatar,
+        FakeReplies(),
+        ids,
+        clock,
+        access,
+    ).execute(USER_ID, created.session_id, "Hello")
+
+    with pytest.raises(SessionClosed):
+        await anext(stream)
+
+    assert await conversations.list_recent(created.session_id, 10) == ()
 
 
 @pytest.mark.asyncio

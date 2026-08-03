@@ -28,6 +28,7 @@ from avatar_chat.domain.errors import (
     CharacterNotFound,
     ConcurrentSessionUpdate,
     SessionBusy,
+    SessionClosed,
     SessionNotFound,
 )
 from avatar_chat.domain.models import (
@@ -97,6 +98,7 @@ class NegotiateStream:
     ) -> WebRtcAnswer:
         session = await _require_session(self.sessions, session_id)
         await self.access.require(actor_user_id, session, SessionAction.MANAGE)
+        _require_open_session(session)
         if session.status is SessionStatus.READY:
             return await self.avatar.negotiate(session_id, session.character_id, offer)
         if session.status is SessionStatus.MEDIA_STARTING:
@@ -141,6 +143,7 @@ class ProvisionMedia:
     async def execute(self, actor_user_id: str, session_id: str) -> MediaAccess:
         session = await _require_session(self.sessions, session_id)
         await self.access.require(actor_user_id, session, SessionAction.VIEW)
+        _require_open_session(session)
         if session.status is SessionStatus.READY:
             return await self.rooms.issue_access(session_id, actor_user_id)
         if session.status is SessionStatus.MEDIA_STARTING:
@@ -202,6 +205,7 @@ class ProvisionPublicMedia:
         session = await _require_session(self.sessions, session_id)
         if session.visibility is not SessionVisibility.PUBLIC:
             raise SessionNotFound(session_id)
+        _require_open_session(session)
         if session.status is not SessionStatus.READY:
             raise SessionBusy(session_id)
         return await self.rooms.issue_public_access(session_id, self.ids.new_id())
@@ -238,6 +242,7 @@ class HandleMessage:
             async with lock:
                 session = await _require_session(self.sessions, session_id)
                 await self.access.require(actor_user_id, session, SessionAction.CHAT)
+                _require_open_session(session)
                 owns_avatar_state = False
                 assistant_message: ChatMessage | None = None
                 try:
@@ -585,3 +590,8 @@ async def _require_session(
     if session is None:
         raise SessionNotFound(session_id)
     return session
+
+
+def _require_open_session(session: AvatarSession) -> None:
+    if session.status is SessionStatus.CLOSED:
+        raise SessionClosed(session.session_id)

@@ -2,6 +2,8 @@ const $ = (selector) => document.querySelector(selector);
 const authView = $("#auth-view");
 const appView = $("#app-view");
 const video = $("#avatar");
+const videoShell = video.closest(".video-shell");
+const closedOverlay = $("#session-closed-overlay");
 const stateLabel = $("#state");
 const connectionLabel = $("#connection");
 const messages = $("#messages");
@@ -15,11 +17,13 @@ let accessToken;
 let refreshPromise;
 let refreshTimer;
 let currentSession;
+let activeSessionList = "mine";
 let peer;
 let livekitRoom;
 let chatSocket;
 let chatReconnectTimer;
 let chatReconnectAttempt = 0;
+let sessionClosePromise;
 let chatReady = false;
 let mediaReady = false;
 let messageCursor = { sequence: 0, revision: 0 };
@@ -198,6 +202,7 @@ document.querySelectorAll("[data-list]").forEach((button) => {
 });
 
 async function loadSessions(kind) {
+  activeSessionList = kind;
   document.querySelectorAll("[data-list]").forEach((button) => {
     const active = button.dataset.list === kind;
     button.classList.toggle("is-active", active);
@@ -217,6 +222,7 @@ async function loadSessions(kind) {
     button.className = "session-card";
     button.dataset.sessionId = session.session_id;
     button.classList.toggle("is-active", session.session_id === currentSession?.session_id);
+    button.classList.toggle("is-closed", session.status === "closed");
     button.innerHTML = `<strong>${escapeHtml(session.character_id)}</strong><span>${escapeHtml(session.access_role)} · ${escapeHtml(session.visibility)} · ${escapeHtml(session.status)}</span>`;
     button.addEventListener("click", () => openSession(session));
     list.append(button);
@@ -226,6 +232,7 @@ async function loadSessions(kind) {
 async function openSession(session) {
   await disconnectCurrent();
   currentSession = session;
+  renderSessionActive();
   document.querySelectorAll(".session-card").forEach((card) => {
     card.classList.toggle("is-active", card.dataset.sessionId === session.session_id);
   });
@@ -240,8 +247,12 @@ async function openSession(session) {
   $("#session-visibility").value = session.visibility;
   showPublicLink(session.public_url);
   if (isOwner) await loadShares();
-  connectionLabel.textContent = "Đang kết nối media…";
   await loadHistory(session.session_id);
+  if (session.status === "closed") {
+    renderSessionClosed();
+    return;
+  }
+  connectionLabel.textContent = "Đang kết nối media…";
   connectChat(`/api/sessions/${session.session_id}/chat`);
   try {
     const mediaProvider = await detectMediaProvider(session);
@@ -402,12 +413,18 @@ async function catchUpHistory() {
 }
 
 function updateControls() {
-  const ready = Boolean(currentSession?.can_chat && chatReady);
+  const ready = Boolean(
+    currentSession?.status !== "closed" && currentSession?.can_chat && chatReady,
+  );
   input.disabled = !ready;
   submit.disabled = !ready;
 }
 
 function handleChatEvent(event) {
+  if (event.type === "session_closed") {
+    markCurrentSessionClosed().catch((error) => console.warn(error));
+    return;
+  }
   if (event.type === "avatar_state") return setAvatarState(event.avatar_state);
   if (event.type === "user_message") {
     reconcileMessage({ ...event, role: "user", status: "complete" });
@@ -466,6 +483,64 @@ function placeMessageInOrder(element, sequence) {
 
 function setAvatarState(state) {
   stateLabel.textContent = state;
+}
+
+function renderSessionActive() {
+  videoShell.classList.remove("is-closed");
+  closedOverlay.hidden = true;
+  video.hidden = false;
+  video.muted = true;
+  $("#audio-toggle").hidden = false;
+  $("#session-visibility").disabled = false;
+  $("#close-session").disabled = false;
+  $("#close-session").textContent = "Đóng session";
+  $("#share-username").disabled = false;
+  $("#share-permission").disabled = false;
+  $("#share-session").disabled = false;
+  input.placeholder = "Nhập tin nhắn…";
+}
+
+function renderSessionClosed() {
+  if (!currentSession) return;
+  currentSession.status = "closed";
+  currentSession.can_chat = false;
+  videoShell.classList.add("is-closed");
+  closedOverlay.hidden = false;
+  $("#audio-toggle").hidden = true;
+  setAvatarState("closed");
+  connectionLabel.textContent = "Session đã đóng — stream và mọi thao tác đã dừng.";
+  $("#session-access").textContent = `${currentSession.access_role} · ${currentSession.visibility} · closed`;
+  $("#session-visibility").disabled = true;
+  $("#close-session").disabled = true;
+  $("#close-session").textContent = "Đã đóng";
+  $("#share-username").disabled = true;
+  $("#share-permission").disabled = true;
+  $("#share-session").disabled = true;
+  document.querySelectorAll("#share-list button").forEach((button) => {
+    button.disabled = true;
+  });
+  showPublicLink(undefined);
+  input.value = "";
+  input.placeholder = "Session đã đóng — chỉ có thể xem lại hội thoại";
+  updateControls();
+}
+
+async function markCurrentSessionClosed() {
+  if (sessionClosePromise) return sessionClosePromise;
+  sessionClosePromise = (async () => {
+    if (!currentSession) return;
+    const sessionId = currentSession.session_id;
+    currentSession = { ...currentSession, status: "closed", can_chat: false };
+    await disconnectCurrent();
+    if (currentSession?.session_id !== sessionId) return;
+    renderSessionClosed();
+    await loadSessions(activeSessionList);
+  })();
+  try {
+    await sessionClosePromise;
+  } finally {
+    sessionClosePromise = undefined;
+  }
 }
 
 form.addEventListener("submit", (event) => {
@@ -548,9 +623,7 @@ async function loadShares() {
 
 $("#close-session").addEventListener("click", async () => {
   await api(`/api/sessions/${currentSession.session_id}`, { method: "DELETE" }, true);
-  await disconnectCurrent();
-  currentSession = undefined;
-  await loadSessions("mine");
+  await markCurrentSessionClosed();
 });
 
 $("#audio-toggle").addEventListener("click", async () => {

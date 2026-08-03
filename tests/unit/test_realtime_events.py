@@ -90,6 +90,8 @@ async def test_in_memory_event_bus_fans_out_and_event_serialization_round_trips(
     await bus.subscribe(receive)
     await bus.publish("session-1", event)
     restored = _event_from_payload(_event_payload(event))
+    closed = ChatOutputEvent(ChatEventType.SESSION_CLOSED)
 
     assert received == [("session-1", event)]
     assert restored == event
+    assert _event_from_payload(_event_payload(closed)) == closed

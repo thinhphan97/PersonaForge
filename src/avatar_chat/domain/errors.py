@@ -61,6 +61,12 @@ class SessionBusy(DomainError):
         self.session_id = session_id
 
 
+class SessionClosed(DomainError):
+    def __init__(self, session_id: str) -> None:
+        super().__init__(f"Session '{session_id}' is closed and read-only")
+        self.session_id = session_id
+
+
 class ConcurrentSessionUpdate(DomainError):
     def __init__(self, session_id: str) -> None:
         super().__init__(f"Session '{session_id}' was changed by another operation")

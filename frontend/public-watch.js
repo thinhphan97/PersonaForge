@@ -3,6 +3,7 @@ const status = document.querySelector("#public-status");
 const sessionId = decodeURIComponent(location.pathname.split("/").filter(Boolean).at(-1));
 let room;
 let conversationActive = true;
+let sessionClosed = false;
 let messageCursor = { sequence: 0, revision: 0 };
 const messageStates = new Map();
 
@@ -18,10 +19,15 @@ async function loadLiveKitClient() {
 }
 
 async function connect() {
+  if (sessionClosed) return;
   const infoResponse = await fetch(`/api/public/sessions/${encodeURIComponent(sessionId)}`);
   if (!infoResponse.ok) throw new Error("Session không tồn tại hoặc không còn public");
   const info = await infoResponse.json();
   document.querySelector("#public-title").textContent = `Nhân vật: ${info.character_id}`;
+  if (info.status === "closed") {
+    showPublicClosed();
+    return;
+  }
   if (info.media_provider !== "livekit") {
     throw new Error("Public viewer yêu cầu server chạy MEDIA_PROVIDER=livekit");
   }
@@ -49,9 +55,39 @@ async function connect() {
     status.textContent = `LiveKit: ${state}`;
   });
   room.on(RoomEvent.Disconnected, () => {
-    status.textContent = "Stream đã ngắt hoặc session không còn public.";
+    status.textContent = sessionClosed
+      ? "Session đã đóng — stream đã kết thúc."
+      : "Stream đã ngắt hoặc session không còn public.";
   });
   await room.connect(access.server_url, access.access_token);
+}
+
+function showPublicClosed() {
+  if (sessionClosed) return;
+  sessionClosed = true;
+  document.querySelector("#public-avatar").closest(".video-shell").classList.add("is-closed");
+  document.querySelector("#public-closed-overlay").hidden = false;
+  document.querySelector("#public-audio").hidden = true;
+  status.textContent = "Session đã đóng — stream đã kết thúc.";
+  room?.disconnect();
+}
+
+async function monitorSession() {
+  if (sessionClosed) return;
+  try {
+    const response = await fetch(`/api/public/sessions/${encodeURIComponent(sessionId)}`);
+    if (response.status === 404) {
+      status.textContent = "Session không còn public.";
+      return;
+    }
+    if (response.ok && (await response.json()).status === "closed") {
+      showPublicClosed();
+      return;
+    }
+  } catch (error) {
+    console.warn(error);
+  }
+  setTimeout(monitorSession, 2000);
 }
 
 function showError(error) {
@@ -102,6 +138,7 @@ async function syncConversation() {
   } catch (error) {
     console.warn(error);
   } finally {
+    if (sessionClosed) conversationActive = false;
     if (conversationActive) setTimeout(syncConversation, 1000);
   }
 }
@@ -118,3 +155,4 @@ window.addEventListener("beforeunload", () => {
 });
 connect().catch(showError);
 syncConversation();
+monitorSession();

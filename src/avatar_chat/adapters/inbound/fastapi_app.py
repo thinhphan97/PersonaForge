@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -22,6 +23,7 @@ from avatar_chat.application.auth_use_cases import require_csrf
 from avatar_chat.application.dto import (
     AuthContext,
     AuthResult,
+    ChatEventType,
     ChatOutputEvent,
     SessionSummary,
     ShareSummary,
@@ -38,6 +40,7 @@ from avatar_chat.domain.errors import (
     InvalidInput,
     RateLimitExceeded,
     SessionBusy,
+    SessionClosed,
     SessionNotFound,
     UserAlreadyExists,
     UserNotFound,
@@ -48,6 +51,8 @@ from avatar_chat.domain.models import (
     SessionVisibility,
     SharePermission,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class RegisterRequest(BaseModel):
@@ -323,7 +328,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             status = 404
         elif isinstance(
             exc,
-            (SessionBusy, ConcurrentSessionUpdate, UserAlreadyExists),
+            (SessionBusy, SessionClosed, ConcurrentSessionUpdate, UserAlreadyExists),
         ):
             status = 409
         else:
@@ -681,6 +686,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         container: ContainerDependency,
     ) -> None:
         await container.close_session.execute(auth.user.user_id, session_id)
+        try:
+            await container.realtime_events.publish(
+                session_id,
+                ChatOutputEvent(type=ChatEventType.SESSION_CLOSED),
+            )
+        except Exception:
+            logger.exception("Could not publish session closed event session=%s", session_id)
 
     @app.websocket("/api/sessions/{session_id}/chat")
     async def chat(websocket: WebSocket, session_id: str) -> None:

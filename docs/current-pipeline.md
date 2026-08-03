@@ -792,6 +792,8 @@ kiểm tra** để bỏ mute và nghe beep.
 4. Chỉ enable input khi actor có `can_chat` và WebSocket đang ready.
 5. Khi WebSocket đứt: disable input, reconnect backoff 0,5–10 giây và catch-up theo cursor.
 6. Khi access JWT được rotate: đóng socket cũ và kết nối lại bằng token mới.
+7. Khi nhận `session_closed` hoặc mở card có `status=closed`: ngắt media/socket, khóa toàn bộ
+   session controls, giữ transcript read-only và hiện thông báo thay cho avatar.
 
 Trong aiortc mode:
 
@@ -816,7 +818,8 @@ LiveKit room. Đóng socket phía browser không đóng server session.
 
 Trang `/watch/{session_id}` không tự refresh/login vào account owner. Nó gọi các endpoint
 public không credential, subscribe LiveKit bằng anonymous token, poll transcript theo cursor
-mỗi giây và không render form chat.
+mỗi giây và không render form chat. Trang đồng thời poll session status; khi session closed,
+video được thay bằng thông báo kết thúc và không retry cấp media token.
 
 ## 13. Reply/model pipeline
 
@@ -918,8 +921,12 @@ nhiều API replica có thể đồng thời nhận chat cho cùng session.
 | `APP_HOST` | `0.0.0.0` | Bind address khi chạy entrypoint |
 | `APP_PORT` | `8000` | Port Uvicorn trong process |
 | `APP_HTTP_PORT` | `8000` | Port publish ra host trong Compose |
-| `DATABASE_URL` | rỗng | Rỗng dùng memory; có giá trị dùng SQLAlchemy |
-| `AUTO_CREATE_SCHEMA` | `true` | Chỉ nên dùng local/fresh DB; production dùng Alembic |
+| `DATABASE_URL` | Compose: PostgreSQL nội bộ | Rỗng chỉ khi chạy ngoài Compose và muốn memory |
+| `AUTO_CREATE_SCHEMA` | Compose: `false` | Compose chạy Alembic trước Uvicorn |
+| `POSTGRES_DB` | `avatar` | Database local Compose |
+| `POSTGRES_USER` | `avatar` | User PostgreSQL local Compose |
+| `POSTGRES_PASSWORD` | `avatar` | Password local, phải đổi ngoài development |
+| `POSTGRES_PORT` | `5432` | Port PostgreSQL publish ra host |
 
 ### 15.2. Authentication và browser security
 
@@ -1023,9 +1030,15 @@ LIVEKIT_RTC_UDP_PORT=17882
 REDIS_URL=redis://redis:6379/0
 REALTIME_EVENT_BUS=auto
 RENDER_WORKER_ID=avatar-worker-1
+POSTGRES_DB=avatar
+POSTGRES_USER=avatar
+POSTGRES_PASSWORD=avatar
+POSTGRES_PORT=5432
+DATABASE_URL=postgresql+asyncpg://avatar:avatar@postgres:5432/avatar
+AUTO_CREATE_SCHEMA=false
 ```
 
-Nếu dùng database persistent, migrate trước khi start API:
+Compose tự chạy migration. Lệnh sau chỉ dùng khi cần migrate riêng mà không start Uvicorn:
 
 ```bash
 docker compose --profile livekit run --rm avatar-chat alembic upgrade head
@@ -1053,6 +1066,10 @@ nội bộ của LiveKit.
 docker compose --profile livekit up --build -d
 ```
 
+Compose start `postgres` trước, đợi `pg_isready`, sau đó container API tự chạy
+`alembic upgrade head` rồi mới chạy Uvicorn. Không cần chạy migration thủ công cho luồng start
+thông thường.
+
 ### 16.3. Kiểm tra service
 
 ```bash
@@ -1060,9 +1077,10 @@ docker compose --profile livekit ps
 curl http://localhost:18000/api/health
 ```
 
-Mong đợi bốn service running:
+Mong đợi năm service running:
 
 - `avatar-chat`
+- `postgres` — healthy
 - `avatar-worker`
 - `redis` — healthy
 - `livekit`
@@ -1486,7 +1504,7 @@ Smoke test end-to-end cần xác nhận thêm ngoài automated test:
 
 ### Sau khi start
 
-- [ ] Bốn container running, Redis healthy.
+- [ ] Năm container running, PostgreSQL và Redis healthy.
 - [ ] `/api/health` trả 200.
 - [ ] Worker heartbeat tồn tại.
 - [ ] Browser connection state là connected.

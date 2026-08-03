@@ -93,6 +93,31 @@ async def test_auth_ownership_sharing_and_frontend() -> None:
                 f"/api/public/sessions/{session_id}/messages?after=invalid"
             )
             public_watch = await guest.get(f"/watch/{session_id}")
+            closed = await owner.delete(
+                f"/api/sessions/{session_id}",
+                headers=owner_headers,
+            )
+            closed_public_view = await guest.get(
+                f"/api/public/sessions/{session_id}"
+            )
+            closed_sessions = await owner.get(
+                "/api/sessions/mine",
+                headers=owner_headers,
+            )
+            closed_visibility_change = await owner.patch(
+                f"/api/sessions/{session_id}/visibility",
+                headers=owner_headers,
+                json={"visibility": "private"},
+            )
+            closed_share_change = await owner.post(
+                f"/api/sessions/{session_id}/shares",
+                headers=owner_headers,
+                json={"username": "guest", "permission": "viewer"},
+            )
+            closed_history = await guest.get(
+                f"/api/sessions/{session_id}/messages",
+                headers=guest_headers,
+            )
             logout = await guest.post("/api/auth/logout", headers=guest_headers)
             logged_out_me = await guest.get("/api/auth/me", headers=guest_headers)
             frontend = await owner.get("/")
@@ -123,6 +148,13 @@ async def test_auth_ownership_sharing_and_frontend() -> None:
     assert public_watch.status_code == 200
     assert "không cần đăng nhập" in public_watch.text
     assert 'href="/?login=1"' in public_watch.text
+    assert "session-closed-overlay" in frontend.text
+    assert closed.status_code == 204
+    assert closed_public_view.json()["status"] == "closed"
+    assert closed_sessions.json()[0]["can_chat"] is False
+    assert closed_visibility_change.status_code == 409
+    assert closed_share_change.status_code == 409
+    assert closed_history.status_code == 200
     assert any(item["session_id"] == session_id for item in public_sessions.json())
     assert next(
         item for item in public_sessions.json() if item["session_id"] == session_id

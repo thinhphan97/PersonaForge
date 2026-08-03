@@ -275,14 +275,28 @@ sequenceDiagram
     participant DB as SessionRepository
     participant Media as aiortc / Redis worker adapter
     participant Room as LiveKit
+    participant Events as RealtimeEventBus
+    participant V as Connected viewers
 
     O->>API: DELETE /api/sessions/{id} + Bearer + CSRF
     API->>C: require MANAGE
     C->>DB: status -> closed, avatar -> idle
     C->>Media: close / avatar.session.stop
     C->>Room: close room nếu có
+    API->>Events: publish session_closed
+    Events-->>O: chuyển sang read-only
+    Events-->>V: chuyển sang read-only
     API-->>O: 204
 ```
+
+Frontend giữ transcript nhưng ngắt WebSocket/media, khóa chat, visibility và share controls,
+đồng thời phủ vùng avatar bằng thông báo “Session đã đóng”. Card session được đánh dấu closed;
+mở lại card không tạo WebSocket hay WebRTC mới. Public Watch theo dõi session status và chuyển
+sang thông báo kết thúc thay vì retry provision vô hạn.
+
+Core cũng xem closed session là immutable: chat, negotiate/provision, đổi visibility và thay
+đổi share trả `409 SessionClosed`. Các API xem session và transcript vẫn hoạt động để người có
+quyền xem lại lịch sử.
 
 Khi application shutdown, container dừng realtime event bus, media adapter và database theo
 thứ tự. Worker process và LiveKit có lifecycle container riêng.

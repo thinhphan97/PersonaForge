@@ -32,14 +32,15 @@ uvicorn avatar_chat.main:app --reload
 
 Mở <http://localhost:8000>. Trên máy khác cần HTTPS và cấu hình STUN/TURN trong `.env`.
 
-Mặc định dữ liệu nằm trong memory. Để lưu bằng PostgreSQL:
+Khi chạy Python trực tiếp, nếu không đặt `DATABASE_URL` thì dữ liệu nằm trong memory. Để kết
+nối PostgreSQL đang được Docker publish ra localhost:
 
 ```env
 DATABASE_URL=postgresql+asyncpg://avatar:avatar@localhost:5432/avatar
 ```
 
-SQLAlchemy adapter tự tạo schema khi ứng dụng khởi động. Có thể dùng
-`sqlite+aiosqlite:///./avatar.db` để phát triển local.
+Khi chạy Python local với `AUTO_CREATE_SCHEMA=true`, SQLAlchemy adapter tự tạo schema lúc ứng
+dụng khởi động. Có thể dùng `sqlite+aiosqlite:///./avatar.db` để phát triển local.
 
 Với database lâu dài, nên tắt `AUTO_CREATE_SCHEMA` và chạy migration:
 
@@ -47,7 +48,8 @@ Với database lâu dài, nên tắt `AUTO_CREATE_SCHEMA` và chạy migration:
 alembic upgrade head
 ```
 
-Trong Docker, image đã chứa cả `alembic.ini` và thư mục migration:
+Trong Docker, image chứa Alembic và Compose tự migrate trước khi start API. Lệnh thủ công sau
+chỉ cần khi muốn chạy migration riêng:
 
 ```bash
 docker compose run --rm avatar-chat alembic upgrade head
@@ -83,11 +85,28 @@ ALLOWED_ORIGINS=https://avatar.example.com
 Giá trị `JWT_SECRET` mặc định chỉ dành cho local. Production bắt buộc dùng HTTPS, secret
 manager và một secret ngẫu nhiên riêng cho từng môi trường.
 
-## Chạy Docker
+## Chạy Docker với PostgreSQL
 
 ```bash
 docker compose up --build
 ```
+
+Docker Compose mặc định chạy PostgreSQL 16, chờ healthcheck, tự chạy `alembic upgrade head`
+rồi mới start Uvicorn. User, refresh session, avatar session, share, audit và chat message được
+lưu trong named volume `postgres_data`, không còn dùng repository in-memory.
+
+```bash
+docker compose ps
+docker compose logs -f postgres avatar-chat
+```
+
+`docker compose down` giữ nguyên database. Chỉ `docker compose down -v` mới xóa volume và
+toàn bộ dữ liệu PostgreSQL. Các credential `avatar/avatar` chỉ dành cho local. PostgreSQL chỉ
+dùng biến khởi tạo user/password khi volume còn trống; đổi credential sau đó cần đổi role trong
+database hoặc tạo lại volume đối với dữ liệu demo có thể xóa.
+
+Dữ liệu từng nằm trong repository in-memory không thể migrate vì nó đã mất khi process cũ
+dừng; từ lần chạy Compose mới, dữ liệu sẽ được giữ trong volume PostgreSQL.
 
 Image tự tạo ba nhân vật demo `default`, `violet`, `coral`; frontend cho chọn nhân vật trước
 khi kết nối. Muốn thêm nhân vật, tạo thư mục `assets/characters/<character_id>/` chứa đủ

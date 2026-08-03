@@ -114,6 +114,7 @@ class ReplyChunk:
 
 
 class ChatEventType(str, Enum):
+    SESSION_CLOSED = "session_closed"
     AVATAR_STATE = "avatar_state"
     USER_MESSAGE = "user_message"
     ASSISTANT_STARTED = "assistant_started"

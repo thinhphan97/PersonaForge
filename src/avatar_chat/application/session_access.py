@@ -11,12 +11,18 @@ from avatar_chat.application.ports import (
     SessionShareRepository,
     UserRepository,
 )
-from avatar_chat.domain.errors import AccessDenied, SessionNotFound, UserNotFound
+from avatar_chat.domain.errors import (
+    AccessDenied,
+    SessionClosed,
+    SessionNotFound,
+    UserNotFound,
+)
 from avatar_chat.domain.models import (
     AuditLog,
     AvatarSession,
     SessionAction,
     SessionShare,
+    SessionStatus,
     SessionVisibility,
     SharePermission,
 )
@@ -127,6 +133,7 @@ class ChangeSessionVisibility:
     ) -> SessionSummary:
         session = await _session(self.sessions, session_id)
         await self.access.require(actor_user_id, session, SessionAction.MANAGE)
+        _require_open_session(session)
         expected_version = session.version
         session.visibility = visibility
         session.updated_at = self.clock.now()
@@ -173,6 +180,7 @@ class ShareSession:
     ) -> ShareSummary:
         session = await _session(self.sessions, session_id)
         await self.access.require(actor_user_id, session, SessionAction.MANAGE)
+        _require_open_session(session)
         user = await self.users.get_by_username(username.strip().casefold())
         if user is None:
             raise UserNotFound(username)
@@ -238,6 +246,7 @@ class RevokeSessionShare:
     ) -> None:
         session = await _session(self.sessions, session_id)
         await self.access.require(actor_user_id, session, SessionAction.MANAGE)
+        _require_open_session(session)
         await self.shares.delete(session_id, user_id)
         if self.rooms is not None:
             try:
@@ -270,7 +279,7 @@ def _summary(
         session.visibility,
         session.status,
         access_role,
-        can_chat,
+        can_chat and session.status is not SessionStatus.CLOSED,
     )
 
 
@@ -279,6 +288,11 @@ async def _session(sessions: SessionRepository, session_id: str) -> AvatarSessio
     if session is None:
         raise SessionNotFound(session_id)
     return session
+
+
+def _require_open_session(session: AvatarSession) -> None:
+    if session.status is SessionStatus.CLOSED:
+        raise SessionClosed(session.session_id)
 
 
 async def _audit(
