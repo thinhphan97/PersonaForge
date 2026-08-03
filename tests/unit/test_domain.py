@@ -3,7 +3,12 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from avatar_chat.domain.errors import InvalidStateTransition
-from avatar_chat.domain.models import AvatarSession, AvatarState, SessionStatus
+from avatar_chat.domain.models import (
+    AvatarSession,
+    AvatarState,
+    SessionStatus,
+    SessionVisibility,
+)
 
 
 def make_session() -> AvatarSession:
@@ -11,6 +16,8 @@ def make_session() -> AvatarSession:
     return AvatarSession(
         "session-1",
         "default",
+        "user-1",
+        SessionVisibility.PRIVATE,
         SessionStatus.CREATED,
         AvatarState.IDLE,
         now,

@@ -13,6 +13,7 @@ from avatar_chat.domain.models import (
     ChatMessage,
     ChatRole,
     SessionStatus,
+    SessionVisibility,
 )
 
 
@@ -23,6 +24,8 @@ async def test_session_repository_does_not_leak_mutable_entities() -> None:
     original = AvatarSession(
         "s1",
         "default",
+        "user-1",
+        SessionVisibility.PRIVATE,
         SessionStatus.CREATED,
         AvatarState.IDLE,
         now,
@@ -60,6 +63,8 @@ async def test_session_repository_rejects_stale_version() -> None:
     original = AvatarSession(
         "s1",
         "default",
+        "user-1",
+        SessionVisibility.PRIVATE,
         SessionStatus.CREATED,
         AvatarState.IDLE,
         now,

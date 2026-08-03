@@ -6,6 +6,7 @@ import pytest
 from avatar_chat.adapters.outbound.memory import (
     InMemoryConversationRepository,
     InMemorySessionRepository,
+    InMemorySessionShareRepository,
 )
 from avatar_chat.application.dto import (
     CharacterSummary,
@@ -16,15 +17,30 @@ from avatar_chat.application.dto import (
     WebRtcAnswer,
     WebRtcOffer,
 )
+from avatar_chat.application.session_access import SessionAccessPolicy
 from avatar_chat.application.use_cases import (
     CreateSession,
     GetConversation,
+    GetPublicConversation,
     HandleMessage,
     NegotiateStream,
     ProvisionMedia,
+    ProvisionPublicMedia,
 )
 from avatar_chat.domain.errors import CharacterNotFound, SessionNotFound
-from avatar_chat.domain.models import AvatarState, ChatMessage, SessionStatus
+from avatar_chat.domain.models import (
+    AvatarState,
+    ChatMessage,
+    ChatRole,
+    SessionStatus,
+    SessionVisibility,
+)
+
+USER_ID = "user-1"
+
+
+def access_policy() -> SessionAccessPolicy:
+    return SessionAccessPolicy(InMemorySessionShareRepository())
 
 
 class FixedClock:
@@ -116,9 +132,16 @@ class FakeReplies:
 class FakeMediaRooms:
     def __init__(self) -> None:
         self.provision_count = 0
+        self.access_count = 0
+        self.public_access_count = 0
         self.closed: list[str] = []
 
-    async def provision(self, session_id: str) -> MediaProvisioning:
+    async def provision(
+        self,
+        session_id: str,
+        viewer_user_id: str,
+    ) -> MediaProvisioning:
+        assert viewer_user_id == USER_ID
         self.provision_count += 1
         return MediaProvisioning(
             client=MediaAccess(
@@ -129,6 +152,40 @@ class FakeMediaRooms:
             ),
             publisher_token="publisher-token",
         )
+
+    async def issue_access(self, session_id: str, user_id: str) -> MediaAccess:
+        assert user_id == USER_ID
+        self.access_count += 1
+        return MediaAccess(
+            provider="livekit",
+            server_url="ws://media.test",
+            access_token="client-token",
+            room_name=f"avatar-{session_id}",
+        )
+
+    async def issue_public_access(
+        self,
+        session_id: str,
+        viewer_id: str,
+    ) -> MediaAccess:
+        assert viewer_id
+        self.public_access_count += 1
+        return MediaAccess(
+            provider="livekit",
+            server_url="ws://media.test",
+            access_token="public-client-token",
+            room_name=f"avatar-{session_id}",
+        )
+
+    async def revoke_participant(self, session_id: str, user_id: str) -> None:
+        del session_id, user_id
+
+    async def revoke_participants_except(
+        self,
+        session_id: str,
+        allowed_user_ids: tuple[str, ...],
+    ) -> None:
+        del session_id, allowed_user_ids
 
     async def close(self, session_id: str) -> None:
         self.closed.append(session_id)
@@ -142,7 +199,7 @@ async def test_create_session_rejects_unknown_character() -> None:
             SequentialIds(),
             FixedClock(),
             FakeCharacters(),
-        ).execute("missing")
+        ).execute(USER_ID, "missing")
 
 
 @pytest.mark.asyncio
@@ -154,9 +211,11 @@ async def test_message_flow_changes_avatar_and_persists_history() -> None:
     avatar = FakeAvatarStream()
 
     created = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
-        "default"
+        USER_ID, "default"
     )
-    answer = await NegotiateStream(sessions, avatar, clock).execute(
+    access = access_policy()
+    answer = await NegotiateStream(sessions, avatar, clock, access).execute(
+        USER_ID,
         created.session_id,
         WebRtcOffer("offer", "offer"),
     )
@@ -167,8 +226,12 @@ async def test_message_flow_changes_avatar_and_persists_history() -> None:
         FakeReplies(),
         ids,
         clock,
+        access,
     )
-    events = [event async for event in handler.execute(created.session_id, "Hello")]
+    events = [
+        event
+        async for event in handler.execute(USER_ID, created.session_id, "Hello")
+    ]
 
     assert answer.type == "answer"
     assert avatar.states == [
@@ -178,6 +241,7 @@ async def test_message_flow_changes_avatar_and_persists_history() -> None:
         AvatarState.IDLE,
     ]
     assert [event.type for event in events] == [
+        ChatEventType.USER_MESSAGE,
         ChatEventType.AVATAR_STATE,
         ChatEventType.AVATAR_STATE,
         ChatEventType.ASSISTANT_CHUNK,
@@ -202,15 +266,18 @@ async def test_livekit_media_provision_starts_worker_and_connects_session() -> N
     clock = FixedClock()
     avatar = FakeAvatarStream()
     created = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
-        "default"
+        USER_ID, "default"
     )
+
+    access_policy_instance = access_policy()
 
     access = await ProvisionMedia(
         sessions,
         avatar,
         FakeMediaRooms(),
         clock,
-    ).execute(created.session_id)
+        access_policy_instance,
+    ).execute(USER_ID, created.session_id)
 
     assert access.provider == "livekit"
     assert avatar.started == [
@@ -236,19 +303,82 @@ async def test_livekit_media_provision_is_idempotent_after_ready() -> None:
     avatar = FakeAvatarStream()
     rooms = FakeMediaRooms()
     created = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
-        "default"
+        USER_ID, "default"
     )
-    provision = ProvisionMedia(sessions, avatar, rooms, clock)
+    provision = ProvisionMedia(sessions, avatar, rooms, clock, access_policy())
 
-    first = await provision.execute(created.session_id)
-    second = await provision.execute(created.session_id)
+    first = await provision.execute(USER_ID, created.session_id)
+    second = await provision.execute(USER_ID, created.session_id)
 
     assert first.room_name == second.room_name
     assert len(avatar.started) == 1
-    assert rooms.provision_count == 2
+    assert rooms.provision_count == 1
+    assert rooms.access_count == 1
     session = await sessions.get(created.session_id)
     assert session is not None
     assert session.status is SessionStatus.READY
+
+
+@pytest.mark.asyncio
+async def test_public_media_requires_public_ready_session() -> None:
+    sessions = InMemorySessionRepository()
+    ids = SequentialIds()
+    clock = FixedClock()
+    avatar = FakeAvatarStream()
+    rooms = FakeMediaRooms()
+    private = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
+        USER_ID, "default"
+    )
+    with pytest.raises(SessionNotFound):
+        await ProvisionPublicMedia(sessions, rooms, ids).execute(private.session_id)
+
+    public = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
+        USER_ID,
+        "default",
+        SessionVisibility.PUBLIC,
+    )
+    await ProvisionMedia(sessions, avatar, rooms, clock, access_policy()).execute(
+        USER_ID,
+        public.session_id,
+    )
+    access = await ProvisionPublicMedia(sessions, rooms, ids).execute(public.session_id)
+
+    assert access.access_token == "public-client-token"
+    assert rooms.public_access_count == 1
+
+
+@pytest.mark.asyncio
+async def test_public_conversation_is_read_only_and_requires_public_session() -> None:
+    sessions = InMemorySessionRepository()
+    conversations = InMemoryConversationRepository()
+    ids = SequentialIds()
+    clock = FixedClock()
+    private = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
+        USER_ID,
+        "default",
+    )
+    with pytest.raises(SessionNotFound):
+        await GetPublicConversation(sessions, conversations).execute(private.session_id)
+
+    public = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
+        USER_ID,
+        "default",
+        SessionVisibility.PUBLIC,
+    )
+    await conversations.append(
+        ChatMessage(
+            "message-1",
+            public.session_id,
+            ChatRole.ASSISTANT,
+            "Xin chào public viewer",
+            clock.now(),
+        )
+    )
+    history = await GetPublicConversation(sessions, conversations).execute(
+        public.session_id
+    )
+
+    assert [message.content for message in history] == ["Xin chào public viewer"]
 
 
 @pytest.mark.asyncio
@@ -260,11 +390,13 @@ async def test_media_start_failure_marks_session_failed_and_cleans_up() -> None:
     avatar.fail_start = True
     rooms = FakeMediaRooms()
     created = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
-        "default"
+        USER_ID, "default"
     )
 
     with pytest.raises(RuntimeError, match="worker failed to start"):
-        await ProvisionMedia(sessions, avatar, rooms, clock).execute(created.session_id)
+        await ProvisionMedia(
+            sessions, avatar, rooms, clock, access_policy()
+        ).execute(USER_ID, created.session_id)
 
     session = await sessions.get(created.session_id)
     assert session is not None
@@ -292,9 +424,11 @@ async def test_provider_failure_restores_idle_state() -> None:
     clock = FixedClock()
     avatar = FakeAvatarStream()
     created = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
-        "default"
+        USER_ID, "default"
     )
-    await NegotiateStream(sessions, avatar, clock).execute(
+    access = access_policy()
+    await NegotiateStream(sessions, avatar, clock, access).execute(
+        USER_ID,
         created.session_id,
         WebRtcOffer("offer", "offer"),
     )
@@ -305,10 +439,14 @@ async def test_provider_failure_restores_idle_state() -> None:
         FailingReplies(),
         ids,
         clock,
+        access,
     )
 
     with pytest.raises(RuntimeError, match="provider failed"):
-        _ = [event async for event in handler.execute(created.session_id, "Hello")]
+        _ = [
+            event
+            async for event in handler.execute(USER_ID, created.session_id, "Hello")
+        ]
 
     session = await sessions.get(created.session_id)
     assert session is not None
@@ -325,9 +463,11 @@ async def test_thinking_render_failure_restores_core_and_renderer_to_idle() -> N
     clock = FixedClock()
     avatar = FakeAvatarStream()
     created = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
-        "default"
+        USER_ID, "default"
     )
-    await NegotiateStream(sessions, avatar, clock).execute(
+    access = access_policy()
+    await NegotiateStream(sessions, avatar, clock, access).execute(
+        USER_ID,
         created.session_id,
         WebRtcOffer("offer", "offer"),
     )
@@ -339,10 +479,14 @@ async def test_thinking_render_failure_restores_core_and_renderer_to_idle() -> N
         FakeReplies(),
         ids,
         clock,
+        access,
     )
 
     with pytest.raises(RuntimeError, match="failed to render thinking"):
-        _ = [event async for event in handler.execute(created.session_id, "Hello")]
+        _ = [
+            event
+            async for event in handler.execute(USER_ID, created.session_id, "Hello")
+        ]
 
     session = await sessions.get(created.session_id)
     assert session is not None
@@ -359,4 +503,6 @@ async def test_get_conversation_rejects_unknown_session() -> None:
     conversations = InMemoryConversationRepository()
 
     with pytest.raises(SessionNotFound):
-        await GetConversation(sessions, conversations).execute("missing")
+        await GetConversation(
+            sessions, conversations, access_policy()
+        ).execute(USER_ID, "missing")

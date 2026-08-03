@@ -24,6 +24,74 @@ class ChatRole(str, Enum):
     ASSISTANT = "assistant"
 
 
+class UserStatus(str, Enum):
+    ACTIVE = "active"
+    DISABLED = "disabled"
+
+
+class SessionVisibility(str, Enum):
+    PRIVATE = "private"
+    PUBLIC = "public"
+
+
+class SharePermission(str, Enum):
+    VIEWER = "viewer"
+    INTERACTOR = "interactor"
+
+
+class SessionAction(str, Enum):
+    VIEW = "view"
+    CHAT = "chat"
+    MANAGE = "manage"
+
+
+@dataclass(slots=True)
+class User:
+    user_id: str
+    email: str
+    normalized_email: str
+    username: str
+    normalized_username: str
+    password_hash: str
+    status: UserStatus
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(slots=True)
+class AuthSession:
+    auth_session_id: str
+    user_id: str
+    family_id: str
+    token_hash: str
+    csrf_token: str
+    expires_at: datetime
+    created_at: datetime
+    last_seen_at: datetime
+    revoked_at: datetime | None = None
+    replaced_by_session_id: str | None = None
+
+
+@dataclass(slots=True)
+class SessionShare:
+    share_id: str
+    session_id: str
+    grantee_user_id: str
+    permission: SharePermission
+    created_by_user_id: str
+    created_at: datetime
+
+
+@dataclass(slots=True)
+class AuditLog:
+    audit_id: str
+    actor_user_id: str
+    action: str
+    resource_type: str
+    resource_id: str
+    created_at: datetime
+
+
 @dataclass(slots=True)
 class ChatMessage:
     message_id: str
@@ -31,12 +99,15 @@ class ChatMessage:
     role: ChatRole
     content: str
     created_at: datetime
+    author_user_id: str | None = None
 
 
 @dataclass(slots=True)
 class AvatarSession:
     session_id: str
     character_id: str
+    owner_user_id: str
+    visibility: SessionVisibility
     status: SessionStatus
     avatar_state: AvatarState
     created_at: datetime

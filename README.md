@@ -4,6 +4,7 @@ Tài liệu kiến trúc:
 
 - Tổng hợp đầy đủ pipeline hiện tại: [docs/current-pipeline.md](docs/current-pipeline.md).
 - Sơ đồ luồng server hiện tại: [docs/server-flow.md](docs/server-flow.md).
+- Xác thực JWT và refresh rotation: [docs/authentication.md](docs/authentication.md).
 - Đề xuất Render Worker stream trực tiếp tới client/SFU:
   [docs/direct-worker-streaming.md](docs/direct-worker-streaming.md).
 
@@ -38,6 +39,42 @@ DATABASE_URL=postgresql+asyncpg://avatar:avatar@localhost:5432/avatar
 
 SQLAlchemy adapter tự tạo schema khi ứng dụng khởi động. Có thể dùng
 `sqlite+aiosqlite:///./avatar.db` để phát triển local.
+
+Với database lâu dài, nên tắt `AUTO_CREATE_SCHEMA` và chạy migration:
+
+```bash
+alembic upgrade head
+```
+
+## Xác thực JWT và refresh token
+
+Frontend hỗ trợ register, login, logout và tự gia hạn đăng nhập. Server phát:
+
+- access JWT mặc định 15 phút, frontend chỉ giữ trong memory và gửi bằng
+  `Authorization: Bearer <token>`;
+- refresh JWT mặc định 7 ngày, chỉ nằm trong cookie `HttpOnly`, `SameSite=Strict`;
+- CSRF token ở cookie đọc được, phải khớp header `X-CSRF-Token` khi refresh hoặc mutation.
+
+Mỗi lần refresh sẽ thu hồi refresh token cũ và phát một cặp token mới. Việc thay token được
+thực hiện atomic ở repository; tái sử dụng token cũ sẽ thu hồi toàn bộ phiên của user. Logout
+thu hồi bản ghi server-side nên access JWT và WebSocket hiện tại mất quyền ngay, không phải
+đợi JWT hết hạn. WebSocket truyền access JWT qua subprotocol, không đưa token vào URL.
+
+Cấu hình production tối thiểu:
+
+```env
+JWT_SECRET=<random-secret-at-least-32-bytes>
+JWT_ISSUER=avatar-chat
+JWT_AUDIENCE=avatar-chat-browser
+ACCESS_TOKEN_TTL_MINUTES=15
+REFRESH_TOKEN_TTL_DAYS=7
+REFRESH_COOKIE_NAME=avatar_refresh
+AUTH_COOKIE_SECURE=true
+ALLOWED_ORIGINS=https://avatar.example.com
+```
+
+Giá trị `JWT_SECRET` mặc định chỉ dành cho local. Production bắt buộc dùng HTTPS, secret
+manager và một secret ngẫu nhiên riêng cho từng môi trường.
 
 ## Chạy Docker
 
@@ -114,6 +151,13 @@ Nó publish một audio track PCM mono 48 kHz theo frame 20 ms và video theo
 `WORKER_VIDEO_FPS`. `rtc.AVSynchronizer`, audio queue 50 ms và video queue hữu hạn giữ
 cadence/A-V sync; log `Media cadence` xuất `fps` và `av_drift_ms` mỗi năm giây.
 
+Khi owner đặt session thành `public`, API trả `public_url=/watch/<session_id>` và frontend
+hiển thị nút copy/mở URL. Trang này không yêu cầu tài khoản, chỉ được cấp LiveKit subscriber
+token khi session vẫn public và media đã sẵn sàng; anonymous viewer không có quyền chat hoặc
+publish. Trang public hiển thị transcript chỉ-đọc và đồng bộ message mới mỗi giây, nhưng không
+render input/nút gửi. `LIVEKIT_API_URL=http://livekit:7880` là endpoint nội bộ dùng để ngắt viewer ngay khi
+owner chuyển session về private.
+
 Chạy worker ngoài Docker, khi Redis và LiveKit đã có sẵn:
 
 ```bash
@@ -128,7 +172,7 @@ Chi tiết thiết kế và hướng tích hợp model thật nằm trong
 
 - Nếu không cấu hình `DATABASE_URL`, session và lịch sử mất khi process restart.
 - Một session thuộc một process; chưa hỗ trợ scale ngang.
-- Chưa có authentication và TURN mặc định.
+- Chưa có TURN mặc định; rate limit đăng nhập hiện lưu trong memory nên cần Redis khi scale.
 - Audio hiện là track im lặng 48 kHz; chưa có nội dung TTS.
 - Chế độ LiveKit hiện dùng một worker tĩnh qua `RENDER_WORKER_ID`; chưa có scheduler động.
 - Redis Streams chưa có pending reclaim/DLQ; readiness đã được xác nhận theo `command_id`

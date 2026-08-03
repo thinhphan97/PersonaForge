@@ -7,6 +7,7 @@ from avatar_chat.adapters.outbound.sqlalchemy_repositories import (
     SqlAlchemyConversationRepository,
     SqlAlchemyDatabase,
     SqlAlchemySessionRepository,
+    SqlAlchemyUserRepository,
 )
 from avatar_chat.domain.errors import ConcurrentSessionUpdate
 from avatar_chat.domain.models import (
@@ -15,7 +16,26 @@ from avatar_chat.domain.models import (
     ChatMessage,
     ChatRole,
     SessionStatus,
+    SessionVisibility,
+    User,
+    UserStatus,
 )
+
+
+async def save_test_user(database: SqlAlchemyDatabase, now: datetime) -> None:
+    await SqlAlchemyUserRepository(database.sessions).save(
+        User(
+            "user-1",
+            "test@example.com",
+            "test@example.com",
+            "tester",
+            "tester",
+            "hash",
+            UserStatus.ACTIVE,
+            now,
+            now,
+        )
+    )
 
 
 @pytest.mark.asyncio
@@ -25,9 +45,12 @@ async def test_sqlalchemy_adapters_persist_session_and_messages(tmp_path: Path) 
     sessions = SqlAlchemySessionRepository(database.sessions)
     conversations = SqlAlchemyConversationRepository(database.sessions)
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    await save_test_user(database, now)
     session = AvatarSession(
         "s1",
         "default",
+        "user-1",
+        SessionVisibility.PRIVATE,
         SessionStatus.READY,
         AvatarState.IDLE,
         now,
@@ -57,9 +80,12 @@ async def test_sqlalchemy_session_repository_uses_optimistic_version(
     await database.startup()
     repository = SqlAlchemySessionRepository(database.sessions)
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    await save_test_user(database, now)
     original = AvatarSession(
         "s1",
         "default",
+        "user-1",
+        SessionVisibility.PRIVATE,
         SessionStatus.READY,
         AvatarState.IDLE,
         now,

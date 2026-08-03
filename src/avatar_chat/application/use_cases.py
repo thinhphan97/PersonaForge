@@ -9,6 +9,7 @@ from avatar_chat.application.dto import (
     ChatOutputEvent,
     CreateSessionResult,
     MediaAccess,
+    PublicSessionInfo,
     WebRtcAnswer,
     WebRtcOffer,
 )
@@ -22,6 +23,7 @@ from avatar_chat.application.ports import (
     ReplyGeneratorPort,
     SessionRepository,
 )
+from avatar_chat.application.session_access import SessionAccessPolicy
 from avatar_chat.domain.errors import (
     CharacterNotFound,
     ConcurrentSessionUpdate,
@@ -33,7 +35,9 @@ from avatar_chat.domain.models import (
     AvatarState,
     ChatMessage,
     ChatRole,
+    SessionAction,
     SessionStatus,
+    SessionVisibility,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,13 +50,20 @@ class CreateSession:
     clock: Clock
     characters: CharacterCatalogPort
 
-    async def execute(self, character_id: str) -> CreateSessionResult:
+    async def execute(
+        self,
+        owner_user_id: str,
+        character_id: str,
+        visibility: SessionVisibility = SessionVisibility.PRIVATE,
+    ) -> CreateSessionResult:
         if self.characters.get(character_id) is None:
             raise CharacterNotFound(character_id)
         now = self.clock.now()
         session = AvatarSession(
             session_id=self.ids.new_id(),
             character_id=character_id,
+            owner_user_id=owner_user_id,
+            visibility=visibility,
             status=SessionStatus.CREATED,
             avatar_state=AvatarState.IDLE,
             created_at=now,
@@ -75,9 +86,16 @@ class NegotiateStream:
     sessions: SessionRepository
     avatar: AvatarStreamPort
     clock: Clock
+    access: SessionAccessPolicy
 
-    async def execute(self, session_id: str, offer: WebRtcOffer) -> WebRtcAnswer:
+    async def execute(
+        self,
+        actor_user_id: str,
+        session_id: str,
+        offer: WebRtcOffer,
+    ) -> WebRtcAnswer:
         session = await _require_session(self.sessions, session_id)
+        await self.access.require(actor_user_id, session, SessionAction.MANAGE)
         if session.status is SessionStatus.READY:
             return await self.avatar.negotiate(session_id, session.character_id, offer)
         if session.status is SessionStatus.MEDIA_STARTING:
@@ -117,13 +135,16 @@ class ProvisionMedia:
     avatar: AvatarStreamPort
     rooms: MediaRoomPort
     clock: Clock
+    access: SessionAccessPolicy
 
-    async def execute(self, session_id: str) -> MediaAccess:
+    async def execute(self, actor_user_id: str, session_id: str) -> MediaAccess:
         session = await _require_session(self.sessions, session_id)
+        await self.access.require(actor_user_id, session, SessionAction.VIEW)
         if session.status is SessionStatus.READY:
-            return (await self.rooms.provision(session_id)).client
+            return await self.rooms.issue_access(session_id, actor_user_id)
         if session.status is SessionStatus.MEDIA_STARTING:
             raise SessionBusy(session_id)
+        await self.access.require(actor_user_id, session, SessionAction.MANAGE)
 
         await _transition_session(
             self.sessions,
@@ -131,7 +152,7 @@ class ProvisionMedia:
             lambda: session.start_media(self.clock.now()),
         )
         try:
-            provisioning = await self.rooms.provision(session_id)
+            provisioning = await self.rooms.provision(session_id, actor_user_id)
             await self.avatar.start(
                 session_id=session.session_id,
                 character_id=session.character_id,
@@ -156,6 +177,36 @@ class ProvisionMedia:
 
 
 @dataclass(slots=True)
+class GetPublicSession:
+    sessions: SessionRepository
+
+    async def execute(self, session_id: str) -> PublicSessionInfo:
+        session = await _require_session(self.sessions, session_id)
+        if session.visibility is not SessionVisibility.PUBLIC:
+            raise SessionNotFound(session_id)
+        return PublicSessionInfo(
+            session.session_id,
+            session.character_id,
+            session.status,
+        )
+
+
+@dataclass(slots=True)
+class ProvisionPublicMedia:
+    sessions: SessionRepository
+    rooms: MediaRoomPort
+    ids: IdGenerator
+
+    async def execute(self, session_id: str) -> MediaAccess:
+        session = await _require_session(self.sessions, session_id)
+        if session.visibility is not SessionVisibility.PUBLIC:
+            raise SessionNotFound(session_id)
+        if session.status is not SessionStatus.READY:
+            raise SessionBusy(session_id)
+        return await self.rooms.issue_public_access(session_id, self.ids.new_id())
+
+
+@dataclass(slots=True)
 class HandleMessage:
     sessions: SessionRepository
     conversations: ConversationRepository
@@ -163,12 +214,14 @@ class HandleMessage:
     replies: ReplyGeneratorPort
     ids: IdGenerator
     clock: Clock
+    access: SessionAccessPolicy
     history_limit: int = 30
     thinking_min_duration_seconds: float = 0
     _locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False)
 
     async def execute(
         self,
+        actor_user_id: str,
         session_id: str,
         content: str,
     ) -> AsyncIterator[ChatOutputEvent]:
@@ -183,6 +236,7 @@ class HandleMessage:
         try:
             async with lock:
                 session = await _require_session(self.sessions, session_id)
+                await self.access.require(actor_user_id, session, SessionAction.CHAT)
                 owns_avatar_state = False
                 try:
                     await _transition_session(
@@ -202,8 +256,13 @@ class HandleMessage:
                         role=ChatRole.USER,
                         content=normalized,
                         created_at=self.clock.now(),
+                        author_user_id=actor_user_id,
                     )
                     await self.conversations.append(user_message)
+                    yield ChatOutputEvent(
+                        type=ChatEventType.USER_MESSAGE,
+                        content=normalized,
+                    )
                     yield ChatOutputEvent(
                         type=ChatEventType.AVATAR_STATE,
                         avatar_state=AvatarState.THINKING,
@@ -294,9 +353,32 @@ class HandleMessage:
 class GetConversation:
     sessions: SessionRepository
     conversations: ConversationRepository
+    access: SessionAccessPolicy
 
-    async def execute(self, session_id: str, limit: int = 50) -> tuple[ChatMessage, ...]:
-        await _require_session(self.sessions, session_id)
+    async def execute(
+        self,
+        actor_user_id: str,
+        session_id: str,
+        limit: int = 50,
+    ) -> tuple[ChatMessage, ...]:
+        session = await _require_session(self.sessions, session_id)
+        await self.access.require(actor_user_id, session, SessionAction.VIEW)
+        return await self.conversations.list_recent(session_id, limit)
+
+
+@dataclass(slots=True)
+class GetPublicConversation:
+    sessions: SessionRepository
+    conversations: ConversationRepository
+
+    async def execute(
+        self,
+        session_id: str,
+        limit: int = 50,
+    ) -> tuple[ChatMessage, ...]:
+        session = await _require_session(self.sessions, session_id)
+        if session.visibility is not SessionVisibility.PUBLIC:
+            raise SessionNotFound(session_id)
         return await self.conversations.list_recent(session_id, limit)
 
 
@@ -306,12 +388,21 @@ class CloseSession:
     avatar: AvatarStreamPort
     clock: Clock
     rooms: MediaRoomPort | None = None
+    access: SessionAccessPolicy | None = None
 
-    async def execute(self, session_id: str) -> None:
+    async def execute(self, actor_user_id: str, session_id: str) -> None:
         try:
             for _attempt in range(3):
                 session = await self.sessions.get(session_id)
-                if session is None or session.status is SessionStatus.CLOSED:
+                if session is None:
+                    break
+                if self.access is not None:
+                    await self.access.require(
+                        actor_user_id,
+                        session,
+                        SessionAction.MANAGE,
+                    )
+                if session.status is SessionStatus.CLOSED:
                     break
                 expected_version = session.version
                 session.close(self.clock.now())

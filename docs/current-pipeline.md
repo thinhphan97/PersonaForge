@@ -1151,6 +1151,10 @@ docker compose exec redis redis-cli XPENDING \
 
 Đã có:
 
+- Register/login/logout, access JWT và refresh JWT rotation.
+- Refresh cookie `HttpOnly`, CSRF double-submit và replay detection.
+- Ownership, public/private session và chia sẻ viewer/interactor.
+- REST và WebSocket kiểm tra quyền; logout thu hồi server-side session ngay.
 - Publisher/subscriber token tách quyền.
 - Token gắn đúng room và identity.
 - Token có TTL.
@@ -1158,8 +1162,7 @@ docker compose exec redis redis-cli XPENDING \
 
 Chưa có và cần bổ sung trước production:
 
-- Authentication/authorization cho REST và WebSocket.
-- Kiểm tra user có quyền truy cập `session_id`.
+- Redis-backed distributed rate limit và token/audit monitoring.
 - API key/secret đủ dài, lưu bằng secret manager.
 - TLS cho API và LiveKit (`https/wss`).
 - TURN credential có TTL.
@@ -1322,7 +1325,7 @@ Smoke test end-to-end cần xác nhận thêm ngoài automated test:
 - In-memory là mặc định và không hỗ trợ multi-replica API.
 - Session lock nằm trong process; optimistic version bảo vệ repository nhưng chưa thay thế
   distributed ownership khi chạy nhiều API replica.
-- Chưa auth, TLS, TURN mặc định, quota hoặc production secret handling.
+- Chưa TLS, TURN mặc định, quota hoặc production secret handling.
 - Frontend LiveKit SDK tải từ CDN và chưa pin/bundle version.
 - Chưa có metrics exporter/dashboard/alert.
 - Chưa có Kubernetes manifests, autoscaling hoặc GPU scheduling.
@@ -1333,7 +1336,7 @@ Smoke test end-to-end cần xác nhận thêm ngoài automated test:
 
 - Hoàn thiện pending reclaim và DLQ (ready/error, timeout và idempotency đã có).
 - Thêm transactional outbox để commit domain state và publish command nguyên tử.
-- Thêm migration chính thức cho schema `status`, `avatar_state`, `version`.
+- Dùng Alembic migration hiện có và bổ sung quy trình rollback/backup production.
 - Bundle/pin LiveKit JS SDK.
 - Thêm readiness check Redis/worker/LiveKit.
 - Bổ sung integration test Redis command → worker session.

@@ -14,6 +14,40 @@ class CharacterNotFound(DomainError):
         self.character_id = character_id
 
 
+class AuthenticationFailed(DomainError):
+    def __init__(self) -> None:
+        super().__init__("Email/username or password is incorrect")
+
+
+class AuthenticationRequired(DomainError):
+    def __init__(self) -> None:
+        super().__init__("Authentication is required")
+
+
+class UserAlreadyExists(DomainError):
+    def __init__(self) -> None:
+        super().__init__("Email or username is already registered")
+
+
+class UserNotFound(DomainError):
+    def __init__(self, username: str) -> None:
+        super().__init__(f"User '{username}' was not found")
+
+
+class AccessDenied(DomainError):
+    def __init__(self) -> None:
+        super().__init__("Access denied")
+
+
+class InvalidInput(DomainError):
+    pass
+
+
+class RateLimitExceeded(DomainError):
+    def __init__(self) -> None:
+        super().__init__("Too many authentication attempts; try again later")
+
+
 class InvalidStateTransition(DomainError):
     def __init__(self, current: object, target: object) -> None:
         super().__init__(f"Cannot transition avatar from '{current}' to '{target}'")

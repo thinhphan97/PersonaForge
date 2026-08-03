@@ -7,39 +7,102 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <main class="layout">
-      <section class="avatar-panel">
-        <div class="character-picker">
-          <label for="character-select">Chọn nhân vật</label>
-          <select id="character-select" disabled></select>
-          <button id="start-avatar" type="button" disabled>Bắt đầu</button>
+    <main id="auth-view" class="auth-view">
+      <section class="auth-card">
+        <h1>Avatar Chat</h1>
+        <p>Đăng nhập để quản lý và chia sẻ phiên trò chuyện.</p>
+        <div class="auth-tabs">
+          <button id="show-login" type="button" class="is-active">Đăng nhập</button>
+          <button id="show-register" type="button" class="secondary">Đăng ký</button>
         </div>
-        <div class="video-shell">
-          <video id="avatar" autoplay playsinline muted></video>
-          <span id="state" class="state">đang khởi tạo</span>
-          <button id="audio-toggle" class="audio-toggle" type="button">
-            Bật âm thanh kiểm tra
-          </button>
-        </div>
-        <p id="connection" class="connection">Đang kết nối…</p>
-      </section>
-
-      <section class="chat-panel">
-        <header>
-          <h1>Nhân vật ảo</h1>
-          <p>Video được truyền từ Python server qua WebRTC.</p>
-        </header>
-        <div id="messages" class="messages" aria-live="polite"></div>
-        <form id="chat-form">
-          <input
-            id="message-input"
-            autocomplete="off"
-            maxlength="10000"
-            placeholder="Nhập tin nhắn…"
-            disabled
-          />
-          <button type="submit" disabled>Gửi</button>
+        <form id="login-form" class="stack-form">
+          <input id="login-identifier" placeholder="Email hoặc username" required />
+          <input id="login-password" type="password" placeholder="Mật khẩu" required />
+          <button type="submit">Đăng nhập</button>
         </form>
+        <form id="register-form" class="stack-form" hidden>
+          <input id="register-email" type="email" placeholder="Email" required />
+          <input id="register-username" placeholder="Username" minlength="3" required />
+          <input id="register-password" type="password" minlength="12" placeholder="Mật khẩu (ít nhất 12 ký tự)" required />
+          <button type="submit">Tạo tài khoản</button>
+        </form>
+        <p id="auth-error" class="error"></p>
+      </section>
+    </main>
+
+    <main id="app-view" class="app-shell" hidden>
+      <aside class="sidebar">
+        <div class="user-bar">
+          <strong id="current-user"></strong>
+          <button id="logout" type="button" class="secondary">Đăng xuất</button>
+        </div>
+        <section class="create-card">
+          <label for="character-select">Nhân vật</label>
+          <select id="character-select"></select>
+          <label for="create-visibility">Quyền xem</label>
+          <select id="create-visibility">
+            <option value="private">Private</option>
+            <option value="public">Public</option>
+          </select>
+          <button id="create-session" type="button">Tạo session</button>
+        </section>
+        <nav class="session-tabs">
+          <button data-list="mine" type="button" class="is-active">Của tôi</button>
+          <button data-list="shared" type="button" class="secondary">Được chia sẻ</button>
+          <button data-list="public" type="button" class="secondary">Public</button>
+        </nav>
+        <div id="session-list" class="session-list"></div>
+      </aside>
+
+      <section class="workspace">
+        <section class="avatar-panel">
+          <div class="video-shell">
+            <video id="avatar" autoplay playsinline muted></video>
+            <span id="state" class="state">chưa chọn session</span>
+            <button id="audio-toggle" class="audio-toggle" type="button">
+              Bật âm thanh kiểm tra
+            </button>
+          </div>
+          <p id="connection" class="connection">Chọn hoặc tạo một session.</p>
+        </section>
+
+        <section class="chat-panel">
+          <header>
+            <div>
+              <h1 id="session-title">Nhân vật ảo</h1>
+              <p id="session-access">Chưa kết nối</p>
+            </div>
+            <div id="owner-controls" class="owner-controls" hidden>
+              <select id="session-visibility">
+                <option value="private">Private</option>
+                <option value="public">Public</option>
+              </select>
+              <button id="close-session" type="button" class="danger">Đóng session</button>
+            </div>
+          </header>
+          <div id="public-link-panel" class="public-link-panel" hidden>
+            <label for="public-link">URL public — người xem không cần tài khoản</label>
+            <div>
+              <input id="public-link" readonly />
+              <button id="copy-public-link" type="button">Copy URL</button>
+              <a id="open-public-link" target="_blank" rel="noopener">Mở</a>
+            </div>
+          </div>
+          <div id="share-controls" class="share-controls" hidden>
+            <input id="share-username" placeholder="Username cần chia sẻ" />
+            <select id="share-permission">
+              <option value="interactor">Interactor — xem và gửi tin nhắn</option>
+              <option value="viewer">Viewer — chỉ xem</option>
+            </select>
+            <button id="share-session" type="button">Chia sẻ</button>
+            <div id="share-list" class="share-list"></div>
+          </div>
+          <div id="messages" class="messages" aria-live="polite"></div>
+          <form id="chat-form">
+            <input id="message-input" autocomplete="off" maxlength="10000" placeholder="Nhập tin nhắn…" disabled />
+            <button type="submit" disabled>Gửi</button>
+          </form>
+        </section>
       </section>
     </main>
     <script type="module" src="/app.js"></script>

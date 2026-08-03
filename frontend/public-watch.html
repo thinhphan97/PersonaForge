@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Public Avatar Stream</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="public-watch">
+      <section class="public-watch-card">
+        <div class="public-watch-header">
+          <div>
+            <h1 id="public-title">Avatar public stream</h1>
+            <p>Chế độ chỉ xem — không cần đăng nhập.</p>
+          </div>
+          <a href="/?login=1">Đăng nhập</a>
+        </div>
+        <div class="public-watch-layout">
+          <div>
+            <div class="video-shell">
+              <video id="public-avatar" autoplay playsinline muted></video>
+              <button id="public-audio" class="audio-toggle" type="button">Bật âm thanh</button>
+            </div>
+            <p id="public-status" class="connection">Đang kiểm tra session…</p>
+          </div>
+          <section class="public-transcript" aria-label="Hội thoại chỉ đọc">
+            <header>
+              <h2>Hội thoại</h2>
+              <span>Chỉ xem</span>
+            </header>
+            <div id="public-messages" class="messages" aria-live="polite"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/public-watch.js"></script>
+  </body>
+</html>

@@ -21,6 +21,15 @@ class Settings:
     host: str
     port: int
     database_url: str | None
+    auto_create_schema: bool
+    refresh_cookie_name: str
+    auth_cookie_secure: bool
+    jwt_secret: str
+    jwt_issuer: str
+    jwt_audience: str
+    access_token_ttl_minutes: int
+    refresh_token_ttl_days: int
+    allowed_origins: tuple[str, ...]
     reply_provider: str
     reply_chunk_delay_seconds: float
     thinking_min_duration_seconds: float
@@ -34,6 +43,7 @@ class Settings:
     av_sync_pulse_duration_seconds: float
     media_provider: str
     livekit_url: str | None
+    livekit_api_url: str | None
     livekit_worker_url: str | None
     livekit_api_key: str | None
     livekit_api_secret: str | None
@@ -56,6 +66,27 @@ class Settings:
             host=os.getenv("APP_HOST", "0.0.0.0"),
             port=int(os.getenv("APP_PORT", "8000")),
             database_url=os.getenv("DATABASE_URL") or None,
+            auto_create_schema=os.getenv("AUTO_CREATE_SCHEMA", "true").lower()
+            in {"1", "true", "yes", "on"},
+            refresh_cookie_name=os.getenv("REFRESH_COOKIE_NAME", "avatar_refresh"),
+            auth_cookie_secure=os.getenv("AUTH_COOKIE_SECURE", "false").lower()
+            in {"1", "true", "yes", "on"},
+            jwt_secret=os.getenv(
+                "JWT_SECRET",
+                "development-only-jwt-secret-change-me-32-bytes",
+            ),
+            jwt_issuer=os.getenv("JWT_ISSUER", "avatar-chat"),
+            jwt_audience=os.getenv("JWT_AUDIENCE", "avatar-chat-browser"),
+            access_token_ttl_minutes=int(os.getenv("ACCESS_TOKEN_TTL_MINUTES", "15")),
+            refresh_token_ttl_days=int(os.getenv("REFRESH_TOKEN_TTL_DAYS", "7")),
+            allowed_origins=tuple(
+                origin.strip()
+                for origin in os.getenv(
+                    "ALLOWED_ORIGINS",
+                    "http://localhost:8000,http://localhost:18000",
+                ).split(",")
+                if origin.strip()
+            ),
             reply_provider=os.getenv("REPLY_PROVIDER", "scripted"),
             reply_chunk_delay_seconds=float(os.getenv("REPLY_CHUNK_DELAY", "0.25")),
             thinking_min_duration_seconds=float(
@@ -74,6 +105,7 @@ class Settings:
             ),
             media_provider=os.getenv("MEDIA_PROVIDER", "aiortc").lower(),
             livekit_url=os.getenv("LIVEKIT_URL") or None,
+            livekit_api_url=os.getenv("LIVEKIT_API_URL") or None,
             livekit_worker_url=os.getenv("LIVEKIT_WORKER_URL") or None,
             livekit_api_key=os.getenv("LIVEKIT_API_KEY") or None,
             livekit_api_secret=os.getenv("LIVEKIT_API_SECRET") or None,

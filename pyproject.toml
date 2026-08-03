@@ -10,6 +10,7 @@ requires-python = ">=3.10"
 dependencies = [
     "aiortc>=1.13,<2",
     "aiosqlite>=0.21,<1",
+    "alembic>=1.14,<2",
     "asyncpg>=0.30,<1",
     "av>=14,<16",
     "fastapi>=0.115,<1",
@@ -17,6 +18,8 @@ dependencies = [
     "livekit>=1.0,<2",
     "livekit-api>=1.0,<2",
     "pydantic>=2.10,<3",
+    "pwdlib[argon2]>=0.3,<1",
+    "pyjwt>=2.10,<3",
     "redis>=5.2,<7",
     "sqlalchemy[asyncio]>=2.0,<3",
     "uvicorn[standard]>=0.34,<1",
