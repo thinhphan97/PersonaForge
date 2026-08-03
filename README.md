@@ -1,4 +1,10 @@
-# Avatar Chat WebRTC
+# PersonaForge
+
+**Build AI agents that think, speak and appear.**
+
+PersonaForge là nền tảng tạo và vận hành AI Agent theo từng session. Mỗi Agent có thể được
+cấu hình kiến thức, hành vi, giọng nói và nhân vật avatar riêng; người dùng tương tác với Agent
+qua hội thoại và luồng audio/video realtime.
 
 Tài liệu kiến trúc:
 
@@ -8,7 +14,8 @@ Tài liệu kiến trúc:
 - Thiết kế Render Worker/SFU và lộ trình model GPU:
   [docs/direct-worker-streaming.md](docs/direct-worker-streaming.md).
 
-MVP nhân vật ảo theo Hexagonal Architecture. FastAPI nhận signaling/chat; media có thể chạy
+Phiên bản hiện tại là nền tảng MVP của PersonaForge, được triển khai theo Hexagonal
+Architecture. FastAPI nhận signaling/chat; media có thể chạy
 trực tiếp bằng aiortc hoặc qua Render Worker + LiveKit SFU. Video chuyển giữa các trạng thái
 `idle`, `thinking`, `speaking`, và core không phụ thuộc framework.
 Server đồng thời phát một audio track PCM im lặng; track này là điểm thay thế dành cho TTS.
@@ -17,6 +24,10 @@ Trạng thái `thinking` được giữ tối thiểu một giây và có thể 
 `THINKING_MIN_DURATION`.
 Chế độ `AV_SYNC_DEBUG` mặc định phát beep 1 kHz và nháy ô trắng đồng thời mỗi hai giây;
 bấm “Bật âm thanh kiểm tra” trên video để nghe do giới hạn autoplay của trình duyệt.
+
+Định hướng tiếp theo là gắn một Agent runtime vào mỗi session, bổ sung memory, knowledge,
+tools và model trả lời; đồng thời cho phép người dùng chọn hoặc tùy chỉnh TTS voice và avatar
+renderer mà không làm thay đổi business core.
 
 ## Chạy local
 
