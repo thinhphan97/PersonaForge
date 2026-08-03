@@ -7,7 +7,7 @@ import struct
 from av import VideoFrame as AvVideoFrame
 from livekit import rtc
 
-from avatar_chat.adapters.outbound.media.recorded_source import RecordedClipCatalog
+from avatar_chat.adapters.outbound.media.recorded_source import RecordedCharacterCatalog
 from avatar_chat.domain.models import AvatarState
 from avatar_worker.recorded_frames import LoopingRecordedFrameSource
 from avatar_worker.settings import WorkerSettings
@@ -21,11 +21,13 @@ class LiveKitRenderSession:
     def __init__(
         self,
         session_id: str,
+        character_id: str,
         livekit_url: str,
         publisher_token: str,
         settings: WorkerSettings,
     ) -> None:
         self.session_id = session_id
+        self.character_id = character_id
         self._livekit_url = livekit_url
         self._publisher_token = publisher_token
         self._settings = settings
@@ -96,7 +98,10 @@ class LiveKitRenderSession:
             video_queue_size_ms=settings.video_queue_size_ms,
         )
         recorded = LoopingRecordedFrameSource(
-            RecordedClipCatalog(settings.avatar_clips),
+            RecordedCharacterCatalog(
+                settings.characters_root,
+                settings.avatar_clips,
+            ).clips_for(self.character_id),
             settings.video_width,
             settings.video_height,
         )
@@ -117,7 +122,11 @@ class LiveKitRenderSession:
                 _video_publish_options(settings),
             )
             self._ready.set()
-            logger.info("LiveKit media ready session=%s", self.session_id)
+            logger.info(
+                "LiveKit media ready session=%s character=%s",
+                self.session_id,
+                self.character_id,
+            )
             await self._publish_timeline(synchronizer, recorded)
         except Exception as exc:
             self._startup_error = exc

@@ -45,8 +45,13 @@ class RedisAvatarStreamAdapter:
             command_id,
         )
 
-    async def negotiate(self, session_id: str, offer: WebRtcOffer) -> WebRtcAnswer:
-        del session_id, offer
+    async def negotiate(
+        self,
+        session_id: str,
+        character_id: str,
+        offer: WebRtcOffer,
+    ) -> WebRtcAnswer:
+        del session_id, character_id, offer
         raise RuntimeError("SDP negotiation is handled by LiveKit in livekit media mode")
 
     async def change_state(

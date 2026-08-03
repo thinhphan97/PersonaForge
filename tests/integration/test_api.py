@@ -11,6 +11,7 @@ async def test_health_session_and_frontend() -> None:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             health = await client.get("/api/health")
+            characters = await client.get("/api/characters")
             session = await client.post(
                 "/api/sessions",
                 json={"character_id": "default"},
@@ -18,7 +19,11 @@ async def test_health_session_and_frontend() -> None:
             frontend = await client.get("/")
 
     assert health.json() == {"status": "ok"}
+    assert {item["character_id"] for item in characters.json()} >= {
+        "default",
+        "violet",
+        "coral",
+    }
     assert session.status_code == 201
     assert session.json()["session_id"]
     assert "Avatar WebRTC Chat" in frontend.text
-

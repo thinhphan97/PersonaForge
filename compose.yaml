@@ -23,6 +23,7 @@ services:
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       RENDER_WORKER_ID: ${RENDER_WORKER_ID:-avatar-worker-1}
+      AVATAR_CHARACTERS_ROOT: ${AVATAR_CHARACTERS_ROOT:-/app/assets/characters}
     restart: unless-stopped
 
   avatar-worker:
@@ -42,6 +43,7 @@ services:
       AV_SYNC_DEBUG: ${AV_SYNC_DEBUG:-true}
       AV_SYNC_INTERVAL: ${AV_SYNC_INTERVAL:-2.0}
       AV_SYNC_PULSE_DURATION: ${AV_SYNC_PULSE_DURATION:-0.1}
+      AVATAR_CHARACTERS_ROOT: ${AVATAR_CHARACTERS_ROOT:-/app/assets/characters}
     depends_on:
       redis:
         condition: service_healthy

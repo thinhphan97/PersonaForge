@@ -8,6 +8,12 @@ class SessionNotFound(DomainError):
         self.session_id = session_id
 
 
+class CharacterNotFound(DomainError):
+    def __init__(self, character_id: str) -> None:
+        super().__init__(f"Character '{character_id}' was not found")
+        self.character_id = character_id
+
+
 class InvalidStateTransition(DomainError):
     def __init__(self, current: object, target: object) -> None:
         super().__init__(f"Cannot transition avatar from '{current}' to '{target}'")

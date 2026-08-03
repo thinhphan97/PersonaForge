@@ -148,10 +148,10 @@ frontend/
 ├── app.js                            # Session, aiortc/LiveKit, chat UI
 └── styles.css
 
-assets/characters/default/
-├── idle.mp4
-├── thinking.mp4
-└── speaking.mp4
+assets/characters/
+├── default/{idle,thinking,speaking}.mp4
+├── violet/{idle,thinking,speaking}.mp4
+└── coral/{idle,thinking,speaking}.mp4
 
 compose.yaml                          # API, worker, Redis, LiveKit
 Dockerfile                            # Python + FFmpeg + generated clips
@@ -345,7 +345,24 @@ GET /api/health
 
 Endpoint này mới kiểm tra process API, chưa kiểm tra Redis, worker hoặc LiveKit readiness.
 
-### 7.2. Tạo session
+### 7.2. Danh sách nhân vật
+
+```http
+GET /api/characters
+```
+
+```json
+[
+  {"character_id":"coral", "display_name":"Coral"},
+  {"character_id":"default", "display_name":"Default"},
+  {"character_id":"violet", "display_name":"Violet"}
+]
+```
+
+Catalog filesystem chỉ công bố thư mục có đủ ba clip. `character_id` không tồn tại bị từ chối
+trước khi tạo session; Core chỉ phụ thuộc `CharacterCatalogPort` nên có thể thay bằng DB/S3.
+
+### 7.3. Tạo session
 
 ```http
 POST /api/sessions
@@ -369,7 +386,7 @@ Response:
 
 Trong aiortc mode, `media_access_url` là `null`; frontend dùng `offer_url`.
 
-### 7.3. Provision LiveKit media
+### 7.4. Provision LiveKit media
 
 ```http
 POST /api/sessions/{session_id}/media/access
@@ -387,7 +404,7 @@ POST /api/sessions/{session_id}/media/access
 
 Gọi endpoint này trong aiortc mode trả `409`.
 
-### 7.4. aiortc SDP signaling
+### 7.5. aiortc SDP signaling
 
 ```http
 POST /api/sessions/{session_id}/webrtc/offer
@@ -398,7 +415,7 @@ Content-Type: application/json
 
 Response chứa SDP answer và `avatar_state=idle`. Gọi endpoint trong LiveKit mode trả `409`.
 
-### 7.5. Chat WebSocket
+### 7.6. Chat WebSocket
 
 Client gửi:
 
@@ -423,7 +440,7 @@ Domain error được trả dưới dạng:
 {"type":"error","detail":"..."}
 ```
 
-### 7.6. Lịch sử và cleanup
+### 7.7. Lịch sử và cleanup
 
 ```http
 GET /api/sessions/{session_id}/messages?limit=50
@@ -879,6 +896,7 @@ ICE timeout.
 | `AV_SYNC_DEBUG` | `true` | Bật beep + flash |
 | `AV_SYNC_INTERVAL` | `2.0` | Chu kỳ pulse |
 | `AV_SYNC_PULSE_DURATION` | `0.1` | Độ dài pulse |
+| `AVATAR_CHARACTERS_ROOT` | `assets/characters` | Catalog, mỗi thư mục con là một nhân vật |
 | `AVATAR_IDLE_VIDEO` | asset mặc định | Clip idle |
 | `AVATAR_THINKING_VIDEO` | asset mặc định | Clip thinking |
 | `AVATAR_SPEAKING_VIDEO` | asset mặc định | Clip speaking |

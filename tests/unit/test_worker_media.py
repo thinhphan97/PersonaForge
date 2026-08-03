@@ -1,4 +1,9 @@
-from avatar_chat.adapters.outbound.media.recorded_source import RecordedClipCatalog
+import av
+
+from avatar_chat.adapters.outbound.media.recorded_source import (
+    RecordedCharacterCatalog,
+    RecordedClipCatalog,
+)
 from avatar_chat.bootstrap.settings import Settings
 from avatar_chat.domain.models import AvatarState
 from avatar_worker.livekit_session import (
@@ -25,6 +30,28 @@ def test_worker_audio_uses_exact_twenty_millisecond_pcm_frames() -> None:
     assert frame.samples_per_channel == 960
     assert frame.duration == 0.02
     assert set(bytes(frame.data)) == {0}
+
+
+def test_demo_characters_have_distinct_video_colors() -> None:
+    settings = Settings.from_env()
+    catalog = RecordedCharacterCatalog(
+        settings.characters_root,
+        settings.avatar_clips,
+    )
+    character_ids = {character.character_id for character in catalog.list()}
+    assert character_ids >= {"default", "violet", "coral"}
+
+    colors: set[bytes] = set()
+    for character_id in ("default", "violet", "coral"):
+        path = catalog.clips_for(character_id).path_for(AvatarState.IDLE)
+        container = av.open(str(path))
+        try:
+            frame = next(container.decode(video=0)).reformat(format="rgb24")
+            colors.add(bytes(frame.planes[0])[:3])
+        finally:
+            container.close()
+
+    assert len(colors) == 3
 
 
 def test_worker_sync_pulse_generates_beep_and_video_flash() -> None:
@@ -93,6 +120,7 @@ def test_worker_keeps_custom_resolution_after_the_first_frame() -> None:
 def test_worker_ignores_out_of_order_avatar_state() -> None:
     session = LiveKitRenderSession(
         session_id="session-1",
+        character_id="default",
         livekit_url="ws://media.test",
         publisher_token="token",
         settings=WorkerSettings.from_env(),

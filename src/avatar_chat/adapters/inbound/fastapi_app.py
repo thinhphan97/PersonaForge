@@ -27,6 +27,11 @@ class CreateSessionResponse(BaseModel):
     chat_url: str
 
 
+class CharacterResponse(BaseModel):
+    character_id: str
+    display_name: str
+
+
 class SessionDescriptionRequest(BaseModel):
     sdp: str
     type: str
@@ -90,6 +95,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @router.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @router.get("/characters", response_model=list[CharacterResponse])
+    async def list_characters(
+        container: ContainerDependency,
+    ) -> list[CharacterResponse]:
+        characters = await container.list_characters.execute()
+        return [
+            CharacterResponse(
+                character_id=character.character_id,
+                display_name=character.display_name,
+            )
+            for character in characters
+        ]
 
     @router.post("/sessions", response_model=CreateSessionResponse, status_code=201)
     async def create_session(

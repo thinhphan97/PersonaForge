@@ -29,11 +29,13 @@ class WorkerSettings:
     av_sync_debug: bool
     av_sync_interval_seconds: float
     av_sync_pulse_duration_seconds: float
+    characters_root: Path
     avatar_clips: dict[AvatarState, Path]
 
     @classmethod
     def from_env(cls) -> "WorkerSettings":
-        default_assets = _project_root() / "assets" / "characters" / "default"
+        root = _project_root()
+        default_assets = root / "assets" / "characters" / "default"
         return cls(
             worker_id=os.getenv("WORKER_ID", "avatar-worker-1"),
             redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
@@ -51,6 +53,9 @@ class WorkerSettings:
             av_sync_interval_seconds=float(os.getenv("AV_SYNC_INTERVAL", "2.0")),
             av_sync_pulse_duration_seconds=float(
                 os.getenv("AV_SYNC_PULSE_DURATION", "0.1")
+            ),
+            characters_root=Path(
+                os.getenv("AVATAR_CHARACTERS_ROOT", root / "assets" / "characters")
             ),
             avatar_clips={
                 AvatarState.IDLE: Path(

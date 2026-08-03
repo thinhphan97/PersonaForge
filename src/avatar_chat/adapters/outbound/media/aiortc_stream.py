@@ -9,7 +9,7 @@ from aiortc import (
 )
 
 from avatar_chat.adapters.outbound.media.media_clock import MediaClock
-from avatar_chat.adapters.outbound.media.recorded_source import ClipCatalog
+from avatar_chat.adapters.outbound.media.recorded_source import RecordedCharacterCatalog
 from avatar_chat.adapters.outbound.media.silent_audio_track import SilentAudioTrack
 from avatar_chat.adapters.outbound.media.switchable_track import SwitchableAvatarVideoTrack
 from avatar_chat.application.dto import WebRtcAnswer, WebRtcOffer
@@ -26,7 +26,7 @@ class PeerContext:
 class AiortcAvatarStreamAdapter:
     def __init__(
         self,
-        catalog: ClipCatalog,
+        catalog: RecordedCharacterCatalog,
         ice_server_urls: tuple[str, ...] = (),
         ice_username: str | None = None,
         ice_credential: str | None = None,
@@ -62,7 +62,12 @@ class AiortcAvatarStreamAdapter:
         # In-process aiortc sessions are started by SDP negotiation.
         del session_id, character_id, room_name, publisher_token
 
-    async def negotiate(self, session_id: str, offer: WebRtcOffer) -> WebRtcAnswer:
+    async def negotiate(
+        self,
+        session_id: str,
+        character_id: str,
+        offer: WebRtcOffer,
+    ) -> WebRtcAnswer:
         await self.close(session_id)
         peer = RTCPeerConnection(configuration=self._configuration)
         clock = MediaClock(
@@ -70,7 +75,10 @@ class AiortcAvatarStreamAdapter:
             sync_interval_seconds=self._sync_interval_seconds,
             sync_pulse_duration_seconds=self._sync_pulse_duration_seconds,
         )
-        video = SwitchableAvatarVideoTrack(self._catalog, clock)
+        video = SwitchableAvatarVideoTrack(
+            self._catalog.clips_for(character_id),
+            clock,
+        )
         audio = SilentAudioTrack(clock)
         await video.switch(AvatarState.IDLE)
         peer.addTrack(video)

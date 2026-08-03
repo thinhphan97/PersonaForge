@@ -39,6 +39,7 @@ class Settings:
     livekit_api_secret: str | None
     redis_url: str
     render_worker_id: str
+    characters_root: Path
     avatar_clips: dict[AvatarState, Path]
 
     @classmethod
@@ -78,6 +79,9 @@ class Settings:
             livekit_api_secret=os.getenv("LIVEKIT_API_SECRET") or None,
             redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
             render_worker_id=os.getenv("RENDER_WORKER_ID", "avatar-worker-1"),
+            characters_root=Path(
+                os.getenv("AVATAR_CHARACTERS_ROOT", root / "assets" / "characters")
+            ),
             avatar_clips={
                 AvatarState.IDLE: Path(
                     os.getenv("AVATAR_IDLE_VIDEO", default_assets / "idle.mp4")

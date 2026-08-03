@@ -45,8 +45,10 @@ SQLAlchemy adapter tự tạo schema khi ứng dụng khởi động. Có thể 
 docker compose up --build
 ```
 
-Image tự tạo clip demo khi build. Muốn dùng clip bên ngoài, mount thư mục chứa clip vào
-container rồi cấu hình ba biến `AVATAR_*_VIDEO`.
+Image tự tạo ba nhân vật demo `default`, `violet`, `coral`; frontend cho chọn nhân vật trước
+khi kết nối. Muốn thêm nhân vật, tạo thư mục `assets/characters/<character_id>/` chứa đủ
+`idle.mp4`, `thinking.mp4`, `speaking.mp4`. Có thể mount catalog ngoài và cấu hình
+`AVATAR_CHARACTERS_ROOT`; ba biến `AVATAR_*_VIDEO` vẫn override nhân vật `default`.
 
 ## Thay model chat bên ngoài
 

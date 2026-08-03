@@ -8,6 +8,7 @@ from avatar_chat.adapters.outbound.memory import (
     InMemorySessionRepository,
 )
 from avatar_chat.application.dto import (
+    CharacterSummary,
     ChatEventType,
     MediaAccess,
     MediaProvisioning,
@@ -22,7 +23,7 @@ from avatar_chat.application.use_cases import (
     NegotiateStream,
     ProvisionMedia,
 )
-from avatar_chat.domain.errors import SessionNotFound
+from avatar_chat.domain.errors import CharacterNotFound, SessionNotFound
 from avatar_chat.domain.models import AvatarState, ChatMessage, SessionStatus
 
 
@@ -38,6 +39,16 @@ class SequentialIds:
     def new_id(self) -> str:
         self.value += 1
         return f"id-{self.value}"
+
+
+class FakeCharacters:
+    def get(self, character_id: str) -> CharacterSummary | None:
+        if character_id != "default":
+            return None
+        return CharacterSummary("default", "Default")
+
+    def list(self) -> tuple[CharacterSummary, ...]:
+        return (CharacterSummary("default", "Default"),)
 
 
 class FakeAvatarStream:
@@ -61,8 +72,13 @@ class FakeAvatarStream:
             (session_id, character_id, room_name, publisher_token)
         )
 
-    async def negotiate(self, session_id: str, offer: WebRtcOffer) -> WebRtcAnswer:
-        assert session_id
+    async def negotiate(
+        self,
+        session_id: str,
+        character_id: str,
+        offer: WebRtcOffer,
+    ) -> WebRtcAnswer:
+        assert session_id and character_id == "default"
         return WebRtcAnswer(sdp=f"answer-for-{offer.sdp}", type="answer")
 
     async def change_state(
@@ -119,6 +135,17 @@ class FakeMediaRooms:
 
 
 @pytest.mark.asyncio
+async def test_create_session_rejects_unknown_character() -> None:
+    with pytest.raises(CharacterNotFound):
+        await CreateSession(
+            InMemorySessionRepository(),
+            SequentialIds(),
+            FixedClock(),
+            FakeCharacters(),
+        ).execute("missing")
+
+
+@pytest.mark.asyncio
 async def test_message_flow_changes_avatar_and_persists_history() -> None:
     sessions = InMemorySessionRepository()
     conversations = InMemoryConversationRepository()
@@ -126,7 +153,9 @@ async def test_message_flow_changes_avatar_and_persists_history() -> None:
     clock = FixedClock()
     avatar = FakeAvatarStream()
 
-    created = await CreateSession(sessions, ids, clock).execute("default")
+    created = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
+        "default"
+    )
     answer = await NegotiateStream(sessions, avatar, clock).execute(
         created.session_id,
         WebRtcOffer("offer", "offer"),
@@ -172,7 +201,9 @@ async def test_livekit_media_provision_starts_worker_and_connects_session() -> N
     ids = SequentialIds()
     clock = FixedClock()
     avatar = FakeAvatarStream()
-    created = await CreateSession(sessions, ids, clock).execute("default")
+    created = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
+        "default"
+    )
 
     access = await ProvisionMedia(
         sessions,
@@ -204,7 +235,9 @@ async def test_livekit_media_provision_is_idempotent_after_ready() -> None:
     clock = FixedClock()
     avatar = FakeAvatarStream()
     rooms = FakeMediaRooms()
-    created = await CreateSession(sessions, ids, clock).execute("default")
+    created = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
+        "default"
+    )
     provision = ProvisionMedia(sessions, avatar, rooms, clock)
 
     first = await provision.execute(created.session_id)
@@ -226,7 +259,9 @@ async def test_media_start_failure_marks_session_failed_and_cleans_up() -> None:
     avatar = FakeAvatarStream()
     avatar.fail_start = True
     rooms = FakeMediaRooms()
-    created = await CreateSession(sessions, ids, clock).execute("default")
+    created = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
+        "default"
+    )
 
     with pytest.raises(RuntimeError, match="worker failed to start"):
         await ProvisionMedia(sessions, avatar, rooms, clock).execute(created.session_id)
@@ -256,7 +291,9 @@ async def test_provider_failure_restores_idle_state() -> None:
     ids = SequentialIds()
     clock = FixedClock()
     avatar = FakeAvatarStream()
-    created = await CreateSession(sessions, ids, clock).execute("default")
+    created = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
+        "default"
+    )
     await NegotiateStream(sessions, avatar, clock).execute(
         created.session_id,
         WebRtcOffer("offer", "offer"),
@@ -287,7 +324,9 @@ async def test_thinking_render_failure_restores_core_and_renderer_to_idle() -> N
     ids = SequentialIds()
     clock = FixedClock()
     avatar = FakeAvatarStream()
-    created = await CreateSession(sessions, ids, clock).execute("default")
+    created = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
+        "default"
+    )
     await NegotiateStream(sessions, avatar, clock).execute(
         created.session_id,
         WebRtcOffer("offer", "offer"),

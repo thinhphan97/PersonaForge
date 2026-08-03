@@ -24,6 +24,7 @@ class RenderSessionManager:
         await self.stop(session_id)
         session = LiveKitRenderSession(
             session_id=session_id,
+            character_id=_required_string(payload, "character_id"),
             livekit_url=_required_string(payload, "livekit_url"),
             publisher_token=_required_string(payload, "publisher_token"),
             settings=self._settings,

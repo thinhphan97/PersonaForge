@@ -23,6 +23,12 @@ class CreateSessionResult:
 
 
 @dataclass(frozen=True, slots=True)
+class CharacterSummary:
+    character_id: str
+    display_name: str
+
+
+@dataclass(frozen=True, slots=True)
 class MediaAccess:
     provider: str
     server_url: str

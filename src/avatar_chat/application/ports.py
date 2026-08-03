@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Protocol
 
 from avatar_chat.application.dto import (
+    CharacterSummary,
     MediaProvisioning,
     ReplyChunk,
     WebRtcAnswer,
@@ -29,6 +30,12 @@ class ConversationRepository(Protocol):
     async def list_recent(self, session_id: str, limit: int) -> tuple[ChatMessage, ...]: ...
 
 
+class CharacterCatalogPort(Protocol):
+    def get(self, character_id: str) -> CharacterSummary | None: ...
+
+    def list(self) -> tuple[CharacterSummary, ...]: ...
+
+
 class AvatarStreamPort(Protocol):
     async def start(
         self,
@@ -38,7 +45,12 @@ class AvatarStreamPort(Protocol):
         publisher_token: str,
     ) -> None: ...
 
-    async def negotiate(self, session_id: str, offer: WebRtcOffer) -> WebRtcAnswer: ...
+    async def negotiate(
+        self,
+        session_id: str,
+        character_id: str,
+        offer: WebRtcOffer,
+    ) -> WebRtcAnswer: ...
 
     async def change_state(
         self,

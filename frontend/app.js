@@ -6,6 +6,8 @@ const form = document.querySelector("#chat-form");
 const input = document.querySelector("#message-input");
 const submit = form.querySelector("button");
 const audioToggle = document.querySelector("#audio-toggle");
+const characterSelect = document.querySelector("#character-select");
+const startAvatar = document.querySelector("#start-avatar");
 
 let sessionId;
 let peer;
@@ -18,10 +20,14 @@ let avatarState = "initializing";
 const remoteStream = new MediaStream();
 
 async function start() {
+  const characterId = characterSelect.value;
+  characterSelect.disabled = true;
+  startAvatar.disabled = true;
+  connectionLabel.textContent = "Đang khởi tạo session…";
   const response = await fetch("/api/sessions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ character_id: "default" }),
+    body: JSON.stringify({ character_id: characterId }),
   });
   if (!response.ok) throw new Error(await response.text());
   const session = await response.json();
@@ -33,6 +39,24 @@ async function start() {
   } else {
     await connectWebRtc(session.offer_url);
   }
+}
+
+async function loadCharacters() {
+  const response = await fetch("/api/characters");
+  if (!response.ok) throw new Error(await response.text());
+  const characters = await response.json();
+  if (characters.length === 0) throw new Error("Server chưa có nhân vật hợp lệ");
+  characterSelect.replaceChildren(
+    ...characters.map((character) => {
+      const option = document.createElement("option");
+      option.value = character.character_id;
+      option.textContent = character.display_name;
+      return option;
+    }),
+  );
+  characterSelect.disabled = false;
+  startAvatar.disabled = false;
+  connectionLabel.textContent = "Chọn nhân vật rồi bấm Bắt đầu";
 }
 
 async function connectLiveKit(accessUrl) {
@@ -194,7 +218,14 @@ window.addEventListener("beforeunload", () => {
   livekitRoom?.disconnect();
 });
 
-start().catch((error) => {
-  connectionLabel.textContent = `Không thể khởi động: ${error.message}`;
+startAvatar.addEventListener("click", () => {
+  start().catch((error) => {
+    connectionLabel.textContent = `Không thể khởi động: ${error.message}`;
+    console.error(error);
+  });
+});
+
+loadCharacters().catch((error) => {
+  connectionLabel.textContent = `Không tải được nhân vật: ${error.message}`;
   console.error(error);
 });

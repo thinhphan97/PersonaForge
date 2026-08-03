@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 
 from avatar_chat.application.dto import (
+    CharacterSummary,
     ChatEventType,
     ChatOutputEvent,
     CreateSessionResult,
@@ -13,6 +14,7 @@ from avatar_chat.application.dto import (
 )
 from avatar_chat.application.ports import (
     AvatarStreamPort,
+    CharacterCatalogPort,
     Clock,
     ConversationRepository,
     IdGenerator,
@@ -21,6 +23,7 @@ from avatar_chat.application.ports import (
     SessionRepository,
 )
 from avatar_chat.domain.errors import (
+    CharacterNotFound,
     ConcurrentSessionUpdate,
     SessionBusy,
     SessionNotFound,
@@ -41,8 +44,11 @@ class CreateSession:
     sessions: SessionRepository
     ids: IdGenerator
     clock: Clock
+    characters: CharacterCatalogPort
 
     async def execute(self, character_id: str) -> CreateSessionResult:
+        if self.characters.get(character_id) is None:
+            raise CharacterNotFound(character_id)
         now = self.clock.now()
         session = AvatarSession(
             session_id=self.ids.new_id(),
@@ -57,6 +63,14 @@ class CreateSession:
 
 
 @dataclass(slots=True)
+class ListCharacters:
+    characters: CharacterCatalogPort
+
+    async def execute(self) -> tuple[CharacterSummary, ...]:
+        return self.characters.list()
+
+
+@dataclass(slots=True)
 class NegotiateStream:
     sessions: SessionRepository
     avatar: AvatarStreamPort
@@ -65,7 +79,7 @@ class NegotiateStream:
     async def execute(self, session_id: str, offer: WebRtcOffer) -> WebRtcAnswer:
         session = await _require_session(self.sessions, session_id)
         if session.status is SessionStatus.READY:
-            return await self.avatar.negotiate(session_id, offer)
+            return await self.avatar.negotiate(session_id, session.character_id, offer)
         if session.status is SessionStatus.MEDIA_STARTING:
             raise SessionBusy(session_id)
 
@@ -75,7 +89,11 @@ class NegotiateStream:
             lambda: session.start_media(self.clock.now()),
         )
         try:
-            answer = await self.avatar.negotiate(session_id, offer)
+            answer = await self.avatar.negotiate(
+                session_id,
+                session.character_id,
+                offer,
+            )
             await _transition_session(
                 self.sessions,
                 session,

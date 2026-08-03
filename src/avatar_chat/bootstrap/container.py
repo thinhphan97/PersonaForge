@@ -4,7 +4,7 @@ from typing import Protocol, cast
 from avatar_chat.adapters.outbound.http_reply import HttpStreamingReplyAdapter
 from avatar_chat.adapters.outbound.media.aiortc_stream import AiortcAvatarStreamAdapter
 from avatar_chat.adapters.outbound.media.livekit_room import LiveKitMediaRoomAdapter
-from avatar_chat.adapters.outbound.media.recorded_source import RecordedClipCatalog
+from avatar_chat.adapters.outbound.media.recorded_source import RecordedCharacterCatalog
 from avatar_chat.adapters.outbound.media.redis_render import RedisAvatarStreamAdapter
 from avatar_chat.adapters.outbound.memory import (
     InMemoryConversationRepository,
@@ -28,6 +28,7 @@ from avatar_chat.application.use_cases import (
     CreateSession,
     GetConversation,
     HandleMessage,
+    ListCharacters,
     NegotiateStream,
     ProvisionMedia,
 )
@@ -44,6 +45,7 @@ class InfrastructureLifecycle(Protocol):
 @dataclass(slots=True)
 class Container:
     create_session: CreateSession
+    list_characters: ListCharacters
     negotiate_stream: NegotiateStream
     handle_message: HandleMessage
     get_conversation: GetConversation
@@ -77,12 +79,15 @@ def build_container(settings: Settings) -> Container:
         conversations = InMemoryConversationRepository()
     ids = UuidGenerator()
     clock = SystemClock()
+    characters = RecordedCharacterCatalog(
+        settings.characters_root,
+        settings.avatar_clips,
+    )
     provision_media: ProvisionMedia | None = None
     rooms: LiveKitMediaRoomAdapter | None = None
     if settings.media_provider == "aiortc":
-        catalog = RecordedClipCatalog(settings.avatar_clips)
         avatar_stream: AvatarStreamPort = AiortcAvatarStreamAdapter(
-            catalog=catalog,
+            catalog=characters,
             ice_server_urls=settings.ice_server_urls,
             ice_username=settings.ice_username,
             ice_credential=settings.ice_credential,
@@ -128,7 +133,8 @@ def build_container(settings: Settings) -> Container:
     replies = DelayedReplyAdapter(base_replies, settings.reply_chunk_delay_seconds)
 
     return Container(
-        create_session=CreateSession(sessions, ids, clock),
+        create_session=CreateSession(sessions, ids, clock, characters),
+        list_characters=ListCharacters(characters),
         negotiate_stream=NegotiateStream(sessions, avatar_stream, clock),
         handle_message=HandleMessage(
             sessions,

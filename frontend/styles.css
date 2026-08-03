@@ -24,7 +24,10 @@ body { margin: 0; min-height: 100vh; }
   overflow: hidden;
 }
 
-.avatar-panel { display: grid; place-content: center; padding: 24px; }
+.avatar-panel { display: grid; place-content: center; gap: 14px; padding: 24px; }
+.character-picker { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.character-picker label { display: grid; gap: 6px; flex: 1; color: #b9c3df; }
+select { min-width: 180px; padding: 11px 12px; border: 1px solid #34415f; border-radius: 10px; background: #0c1325; color: inherit; }
 .video-shell { position: relative; width: min(100%, 960px); }
 video { display: block; width: 100%; border-radius: 16px; background: #050812; }
 .state { position: absolute; right: 12px; bottom: 12px; padding: 6px 10px; border-radius: 999px; background: #10172ccc; }

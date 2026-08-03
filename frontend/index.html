@@ -9,6 +9,11 @@
   <body>
     <main class="layout">
       <section class="avatar-panel">
+        <div class="character-picker">
+          <label for="character-select">Chọn nhân vật</label>
+          <select id="character-select" disabled></select>
+          <button id="start-avatar" type="button" disabled>Bắt đầu</button>
+        </div>
         <div class="video-shell">
           <video id="avatar" autoplay playsinline muted></video>
           <span id="state" class="state">đang khởi tạo</span>
