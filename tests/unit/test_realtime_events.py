@@ -9,24 +9,29 @@ from avatar_chat.adapters.outbound.realtime_events import (
     _event_payload,
 )
 from avatar_chat.application.dto import ChatEventType, ChatOutputEvent
-from avatar_chat.domain.errors import AccessDenied
+from avatar_chat.domain.errors import AccessDenied, AuthenticationRequired
 
 
 class FakeWebSocket:
     def __init__(self) -> None:
         self.payloads: list[dict[str, object]] = []
         self.closed = False
+        self.close_code: int | None = None
+        self.close_reason: str | None = None
 
     async def send_json(self, payload: dict[str, object]) -> None:
         self.payloads.append(payload)
 
     async def close(self, code: int, reason: str) -> None:
-        del code, reason
         self.closed = True
+        self.close_code = code
+        self.close_reason = reason
 
 
 class FakeAuthenticator:
     async def execute(self, token: str) -> SimpleNamespace:
+        if token == "expired-user":
+            raise AuthenticationRequired()
         return SimpleNamespace(user=SimpleNamespace(user_id=token))
 
 
@@ -49,9 +54,11 @@ async def test_chat_hub_broadcasts_to_all_authorized_local_clients() -> None:
     first = FakeWebSocket()
     second = FakeWebSocket()
     revoked = FakeWebSocket()
+    expired = FakeWebSocket()
     hub.add("session-1", first, "user-1")  # type: ignore[arg-type]
     hub.add("session-1", second, "user-2")  # type: ignore[arg-type]
     hub.add("session-1", revoked, "revoked-user")  # type: ignore[arg-type]
+    hub.add("session-1", expired, "expired-user")  # type: ignore[arg-type]
     container = SimpleNamespace(
         authenticate_token=FakeAuthenticator(),
         get_conversation=FakeConversationAccess(),
@@ -70,6 +77,9 @@ async def test_chat_hub_broadcasts_to_all_authorized_local_clients() -> None:
     assert second.payloads == first.payloads
     assert revoked.payloads == []
     assert revoked.closed is True
+    assert revoked.close_reason == "Access revoked"
+    assert expired.closed is True
+    assert expired.close_reason == "Authentication expired"
 
     update = ChatOutputEvent(
         ChatEventType.SESSION_UPDATED,

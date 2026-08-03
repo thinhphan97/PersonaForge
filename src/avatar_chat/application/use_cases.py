@@ -10,6 +10,7 @@ from avatar_chat.application.dto import (
     CreateSessionResult,
     MediaAccess,
     PublicSessionInfo,
+    RealtimeOutboxEvent,
     WebRtcAnswer,
     WebRtcOffer,
 )
@@ -21,6 +22,7 @@ from avatar_chat.application.ports import (
     IdGenerator,
     MediaRoomPort,
     ReplyGeneratorPort,
+    SessionMutationPort,
     SessionRepository,
 )
 from avatar_chat.application.session_access import SessionAccessPolicy
@@ -32,6 +34,7 @@ from avatar_chat.domain.errors import (
     SessionNotFound,
 )
 from avatar_chat.domain.models import (
+    AuditLog,
     AvatarSession,
     AvatarState,
     ChatMessage,
@@ -508,6 +511,8 @@ class CloseSession:
     clock: Clock
     rooms: MediaRoomPort | None = None
     access: SessionAccessPolicy | None = None
+    mutations: SessionMutationPort | None = None
+    ids: IdGenerator | None = None
 
     async def execute(self, actor_user_id: str, session_id: str) -> None:
         try:
@@ -526,7 +531,30 @@ class CloseSession:
                 expected_version = session.version
                 session.close(self.clock.now())
                 try:
-                    await self.sessions.save(session, expected_version)
+                    if self.mutations is not None and self.ids is not None:
+                        await self.mutations.save_session(
+                            session,
+                            expected_version,
+                            AuditLog(
+                                audit_id=self.ids.new_id(),
+                                actor_user_id=actor_user_id,
+                                action="session.closed",
+                                resource_type="avatar_session",
+                                resource_id=session_id,
+                                created_at=self.clock.now(),
+                            ),
+                            RealtimeOutboxEvent(
+                                event_id=self.ids.new_id(),
+                                session_id=session_id,
+                                event=ChatOutputEvent(
+                                    type=ChatEventType.SESSION_CLOSED,
+                                    session_version=expected_version + 1,
+                                ),
+                                created_at=self.clock.now(),
+                            ),
+                        )
+                    else:
+                        await self.sessions.save(session, expected_version)
                     break
                 except ConcurrentSessionUpdate:
                     continue

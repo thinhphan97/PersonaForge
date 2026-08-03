@@ -8,6 +8,7 @@ from avatar_chat.application.dto import (
     ChatOutputEvent,
     MediaAccess,
     MediaProvisioning,
+    RealtimeOutboxEvent,
     RefreshTokenClaims,
     ReplyChunk,
     WebRtcAnswer,
@@ -115,6 +116,37 @@ class SessionShareRepository(Protocol):
 
 class AuditLogRepository(Protocol):
     async def append(self, event: AuditLog) -> None: ...
+
+
+class SessionMutationPort(Protocol):
+    async def save_session(
+        self,
+        session: AvatarSession,
+        expected_version: int,
+        audit: AuditLog,
+        outbox: RealtimeOutboxEvent,
+    ) -> None: ...
+
+    async def save_share(
+        self,
+        share: SessionShare,
+        audit: AuditLog,
+        outbox: RealtimeOutboxEvent,
+    ) -> None: ...
+
+    async def delete_share(
+        self,
+        session_id: str,
+        user_id: str,
+        audit: AuditLog,
+        outbox: RealtimeOutboxEvent,
+    ) -> None: ...
+
+
+class RealtimeOutboxRepository(Protocol):
+    async def list_pending(self, limit: int = 100) -> tuple[RealtimeOutboxEvent, ...]: ...
+
+    async def mark_published(self, event_id: str, published_at: datetime) -> None: ...
 
 
 class PasswordHasherPort(Protocol):

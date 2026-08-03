@@ -67,7 +67,7 @@ class RedisRealtimeEventBus:
             self._listener = None
         if self._pubsub is not None:
             await self._pubsub.unsubscribe(self._channel)
-            await self._pubsub.aclose()
+            await self._pubsub.aclose()  # type: ignore[no-untyped-call]
             self._pubsub = None
         await self._redis.aclose()
 

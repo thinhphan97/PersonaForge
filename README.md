@@ -194,6 +194,27 @@ python -m avatar_worker.main
 Chi tiết thiết kế và hướng tích hợp model thật nằm trong
 [docs/direct-worker-streaming.md](docs/direct-worker-streaming.md).
 
+## Kiểm thử
+
+```bash
+source .venv/bin/activate
+ruff check .
+mypy src
+pytest tests/unit tests/contract/test_memory_repositories.py tests/integration/test_api.py
+```
+
+Kiểm thử đồng bộ hai browser bằng Playwright sau khi stack đã chạy:
+
+```bash
+pip install -e '.[e2e]'
+playwright install chromium
+E2E_BASE_URL=http://localhost:8000 pytest tests/e2e -q
+```
+
+Các thao tác visibility/share/revoke/close ghi domain state, audit log và realtime outbox
+trong cùng transaction. Nếu Redis tạm lỗi, dispatcher retry theo cơ chế at-least-once; browser
+cũng reconcile snapshot định kỳ để tránh giữ UI cũ.
+
 ## Giới hạn hiện tại
 
 - Nếu không cấu hình `DATABASE_URL`, session và lịch sử mất khi process restart.

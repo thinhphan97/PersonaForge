@@ -129,6 +129,7 @@ src/
 │   │       ├── replies.py            # Scripted + delay decorator
 │   │       ├── http_reply.py          # SSE/NDJSON model adapter
 │   │       ├── realtime_events.py     # Memory/Redis realtime event bus
+│   │       ├── outbox.py              # Durable at-least-once event dispatcher
 │   │       └── media/
 │   │           ├── aiortc_stream.py
 │   │           ├── livekit_room.py
@@ -163,7 +164,7 @@ assets/characters/
 compose.yaml                          # API, worker, Redis, LiveKit
 Dockerfile                            # Python + FFmpeg + generated clips
 .env.example                         # Toàn bộ biến cấu hình mẫu
-tests/                               # Unit, contract, integration, architecture
+tests/                               # Unit, contract, integration, E2E, architecture
 ```
 
 ## 4. Domain và state machine
@@ -1423,6 +1424,7 @@ Test suite hiện chia thành:
 - Unit test cho silent audio, frame overlay, LiveKit token và worker media.
 - Contract test cho memory và SQLAlchemy repositories.
 - Integration test cho API và switchable track.
+- Playwright E2E cho đồng bộ visibility/public link giữa hai browser context.
 - Architecture test ngăn Core import infrastructure.
 
 Chạy đầy đủ:
@@ -1434,6 +1436,14 @@ mypy src
 pytest
 docker compose --profile livekit config
 git diff --check
+```
+
+Chạy E2E sau khi stack đã start và cài Chromium cho Playwright:
+
+```bash
+pip install -e '.[e2e]'
+playwright install chromium
+E2E_BASE_URL=http://localhost:8000 pytest tests/e2e -q
 ```
 
 Smoke test end-to-end cần xác nhận thêm ngoài automated test:
@@ -1470,7 +1480,7 @@ Smoke test end-to-end cần xác nhận thêm ngoài automated test:
 ### Giai đoạn A — làm chắc MVP hiện tại
 
 - Hoàn thiện pending reclaim và DLQ (ready/error, timeout và idempotency đã có).
-- Thêm transactional outbox để commit domain state và publish command nguyên tử.
+- Mở rộng transactional outbox hiện có cho các domain event ngoài quản trị session khi cần.
 - Dùng Alembic migration hiện có và bổ sung quy trình rollback/backup production.
 - Bundle/pin LiveKit JS SDK.
 - Thêm readiness check Redis/worker/LiveKit.
@@ -1531,7 +1541,8 @@ Smoke test end-to-end cần xác nhận thêm ngoài automated test:
 3. LiveKit SFU là media router; worker không tạo peer riêng cho từng browser.
 4. Worker publish trực tiếp lên SFU để frame nặng không đi qua Core API.
 5. Redis Streams là command bus MVP vì giữ ordering theo worker stream và có ACK.
-6. Redis Pub/Sub chỉ fan-out realtime; database `sequence:revision` mới là recovery source.
+6. Redis Pub/Sub chỉ fan-out realtime; PostgreSQL outbox retry delivery, còn snapshot/version và
+   `sequence:revision` là recovery source authoritative.
 7. Assistant streaming là persistent message snapshot với revision, không phải text delta.
 8. Một stable audio/video track được giữ suốt session; state chỉ thay source/content.
 9. Audio sample timeline là master clock; video được pace theo configured FPS.

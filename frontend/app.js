@@ -23,6 +23,7 @@ let livekitRoom;
 let chatSocket;
 let chatReconnectTimer;
 let chatReconnectAttempt = 0;
+let sessionSyncTimer;
 let sessionClosePromise;
 let chatReady = false;
 let mediaReady = false;
@@ -235,6 +236,7 @@ async function loadSessions(kind) {
 async function openSession(session) {
   await disconnectCurrent();
   currentSession = session;
+  setSessionError();
   renderSessionActive();
   document.querySelectorAll(".session-card").forEach((card) => {
     card.classList.toggle("is-active", card.dataset.sessionId === session.session_id);
@@ -249,7 +251,7 @@ async function openSession(session) {
   $("#share-controls").hidden = !isOwner;
   $("#session-visibility").value = session.visibility;
   showPublicLink(session.public_url);
-  if (isOwner) await loadShares();
+  if (isOwner) await loadShares(session.session_id);
   await loadHistory(session.session_id);
   if (session.status === "closed") {
     renderSessionClosed();
@@ -348,6 +350,7 @@ function connectChat(chatPath) {
     if (chatSocket !== socket) return;
     chatReconnectAttempt = 0;
     chatReady = true;
+    startSessionReconciliation();
     updateControls();
     refreshCurrentSession({ refreshList: true })
       .then(() => catchUpHistory())
@@ -362,9 +365,11 @@ function connectChat(chatPath) {
       await handleSessionAccessRevoked();
       return;
     }
-    if (code === 1008 && !await refreshAccessToken()) {
-      addMessage(reason || "Phiên đăng nhập đã hết hạn.", "assistant");
-      return;
+    if (code === 1008) {
+      if (!await refreshAccessToken()) {
+        addMessage(reason || "Phiên đăng nhập đã hết hạn.", "assistant");
+        return;
+      }
     }
     scheduleChatReconnect(chatPath);
   };
@@ -384,6 +389,8 @@ function scheduleChatReconnect(chatPath) {
 
 async function disconnectCurrent() {
   clearTimeout(chatReconnectTimer);
+  clearInterval(sessionSyncTimer);
+  sessionSyncTimer = undefined;
   chatReconnectAttempt = 0;
   chatReady = false;
   mediaReady = false;
@@ -397,6 +404,16 @@ async function disconnectCurrent() {
   for (const track of remoteStream.getTracks()) remoteStream.removeTrack(track);
   video.srcObject = null;
   updateControls();
+}
+
+function startSessionReconciliation() {
+  clearInterval(sessionSyncTimer);
+  sessionSyncTimer = setInterval(() => {
+    if (!currentSession || document.hidden) return;
+    refreshCurrentSession({ refreshList: true }).catch((error) => {
+      console.warn("Periodic session reconciliation failed", error);
+    });
+  }, 15000);
 }
 
 async function loadHistory(sessionId) {
@@ -517,6 +534,10 @@ function renderSessionActive() {
   input.placeholder = "Nhập tin nhắn…";
 }
 
+function setSessionError(message = "") {
+  $("#session-error").textContent = message;
+}
+
 function renderSessionClosed() {
   if (!currentSession) return;
   currentSession.status = "closed";
@@ -550,25 +571,37 @@ async function refreshCurrentSession({
   if (!currentSession) return;
   const sessionId = currentSession.session_id;
   let snapshot;
-  try {
-    snapshot = await (await api(`/api/sessions/${sessionId}`)).json();
-  } catch (error) {
-    if (error.status === 403 || error.status === 404) {
-      await handleSessionAccessRevoked();
-      return;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      snapshot = await (await api(`/api/sessions/${sessionId}`)).json();
+    } catch (error) {
+      if (error.status === 403 || error.status === 404) {
+        await handleSessionAccessRevoked();
+        return;
+      }
+      throw error;
     }
-    throw error;
+    if (minimumVersion == null || snapshot.version >= minimumVersion) break;
+    await delay(150 * (2 ** attempt));
   }
   if (currentSession?.session_id !== sessionId) return;
-  if (minimumVersion != null && snapshot.version < minimumVersion) return;
+  if (minimumVersion != null && snapshot.version < minimumVersion) {
+    throw new Error("Session snapshot chưa bắt kịp realtime event");
+  }
   if ((currentSession.version ?? 0) > snapshot.version) return;
   applySessionSnapshot(snapshot);
   if (snapshot.status === "closed") {
     await markCurrentSessionClosed();
     return;
   }
-  if (refreshShares && snapshot.access_role === "owner") await loadShares();
+  if (refreshShares && snapshot.access_role === "owner") {
+    await loadShares(snapshot.session_id);
+  }
   if (refreshList) await loadSessions(activeSessionList);
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function applySessionSnapshot(snapshot) {
@@ -636,21 +669,40 @@ form.addEventListener("submit", (event) => {
 });
 
 $("#session-visibility").addEventListener("change", async (event) => {
-  const updated = await (
-    await api(
-      `/api/sessions/${currentSession.session_id}/visibility`,
-      { method: "PATCH", body: JSON.stringify({ visibility: event.target.value }) },
-      true,
-    )
-  ).json();
-  applySessionSnapshot(updated);
-  await loadSessions(activeSessionList);
+  const select = event.target;
+  const sessionId = currentSession.session_id;
+  const previousVisibility = currentSession.visibility;
+  select.disabled = true;
+  setSessionError();
+  try {
+    const updated = await (
+      await api(
+        `/api/sessions/${sessionId}/visibility`,
+        { method: "PATCH", body: JSON.stringify({ visibility: select.value }) },
+        true,
+      )
+    ).json();
+    if (currentSession?.session_id !== sessionId) return;
+    applySessionSnapshot(updated);
+    await loadSessions(activeSessionList);
+  } catch (error) {
+    if (currentSession?.session_id === sessionId) select.value = previousVisibility;
+    setSessionError(error.message);
+  } finally {
+    if (currentSession?.session_id === sessionId) {
+      select.disabled = currentSession.status === "closed";
+    }
+  }
 });
 
 function showPublicLink(publicPath) {
   const panel = $("#public-link-panel");
   panel.hidden = !publicPath;
-  if (!publicPath) return;
+  if (!publicPath) {
+    $("#public-link").value = "";
+    $("#open-public-link").removeAttribute("href");
+    return;
+  }
   const absoluteUrl = new URL(publicPath, location.origin).href;
   $("#public-link").value = absoluteUrl;
   $("#open-public-link").href = absoluteUrl;
@@ -684,25 +736,40 @@ $("#copy-public-link").addEventListener("click", async () => {
 });
 
 $("#share-session").addEventListener("click", async () => {
-  await api(
-    `/api/sessions/${currentSession.session_id}/shares`,
-    {
-      method: "POST",
-      body: JSON.stringify({
-        username: $("#share-username").value,
-        permission: $("#share-permission").value,
-      }),
-    },
-    true,
-  );
-  $("#share-username").value = "";
-  await loadShares();
+  const button = $("#share-session");
+  const sessionId = currentSession.session_id;
+  button.disabled = true;
+  setSessionError();
+  try {
+    await api(
+      `/api/sessions/${sessionId}/shares`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          username: $("#share-username").value,
+          permission: $("#share-permission").value,
+        }),
+      },
+      true,
+    );
+    if (currentSession?.session_id !== sessionId) return;
+    $("#share-username").value = "";
+    await loadShares(sessionId);
+  } catch (error) {
+    setSessionError(error.message);
+  } finally {
+    if (currentSession?.session_id === sessionId) {
+      button.disabled = currentSession.status === "closed";
+    }
+  }
 });
 
-async function loadShares() {
+async function loadShares(sessionId = currentSession?.session_id) {
+  if (!sessionId) return;
   const shares = await (
-    await api(`/api/sessions/${currentSession.session_id}/shares`)
+    await api(`/api/sessions/${sessionId}/shares`)
   ).json();
+  if (currentSession?.session_id !== sessionId) return;
   const list = $("#share-list");
   list.replaceChildren();
   for (const share of shares) {
@@ -713,12 +780,19 @@ async function loadShares() {
     revoke.className = "danger small";
     revoke.textContent = "Thu hồi";
     revoke.addEventListener("click", async () => {
-      await api(
-        `/api/sessions/${currentSession.session_id}/shares/${share.user_id}`,
-        { method: "DELETE" },
-        true,
-      );
-      await loadShares();
+      revoke.disabled = true;
+      setSessionError();
+      try {
+        await api(
+          `/api/sessions/${sessionId}/shares/${share.user_id}`,
+          { method: "DELETE" },
+          true,
+        );
+        await loadShares(sessionId);
+      } catch (error) {
+        setSessionError(error.message);
+        revoke.disabled = false;
+      }
     });
     row.append(revoke);
     list.append(row);
@@ -726,8 +800,17 @@ async function loadShares() {
 }
 
 $("#close-session").addEventListener("click", async () => {
-  await api(`/api/sessions/${currentSession.session_id}`, { method: "DELETE" }, true);
-  await markCurrentSessionClosed();
+  const button = $("#close-session");
+  const sessionId = currentSession.session_id;
+  button.disabled = true;
+  setSessionError();
+  try {
+    await api(`/api/sessions/${sessionId}`, { method: "DELETE" }, true);
+    if (currentSession?.session_id === sessionId) await markCurrentSessionClosed();
+  } catch (error) {
+    setSessionError(error.message);
+    if (currentSession?.session_id === sessionId) button.disabled = false;
+  }
 });
 
 $("#audio-toggle").addEventListener("click", async () => {

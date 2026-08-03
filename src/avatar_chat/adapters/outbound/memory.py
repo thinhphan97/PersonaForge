@@ -3,6 +3,7 @@ from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime
 
+from avatar_chat.application.dto import RealtimeOutboxEvent
 from avatar_chat.domain.errors import ConcurrentMessageUpdate, ConcurrentSessionUpdate
 from avatar_chat.domain.models import (
     AuditLog,
@@ -259,3 +260,70 @@ class InMemoryAuditLogRepository:
     async def append(self, event: AuditLog) -> None:
         async with self._lock:
             self.items.append(deepcopy(event))
+
+
+class InMemorySessionMutationUnitOfWork:
+    """Atomic administration mutations plus an at-least-once realtime outbox."""
+
+    def __init__(
+        self,
+        sessions: InMemorySessionRepository,
+        shares: InMemorySessionShareRepository,
+        audit: InMemoryAuditLogRepository,
+    ) -> None:
+        self._sessions = sessions
+        self._shares = shares
+        self._audit = audit
+        self._outbox: dict[str, RealtimeOutboxEvent] = {}
+        self._lock = asyncio.Lock()
+
+    async def save_session(
+        self,
+        session: AvatarSession,
+        expected_version: int,
+        audit: AuditLog,
+        outbox: RealtimeOutboxEvent,
+    ) -> None:
+        async with self._lock, self._sessions._lock, self._audit._lock:
+            current = self._sessions._items.get(session.session_id)
+            if current is None or current.version != expected_version:
+                raise ConcurrentSessionUpdate(session.session_id)
+            session.version = expected_version + 1
+            self._sessions._items[session.session_id] = deepcopy(session)
+            self._audit.items.append(deepcopy(audit))
+            self._outbox[outbox.event_id] = deepcopy(outbox)
+
+    async def save_share(
+        self,
+        share: SessionShare,
+        audit: AuditLog,
+        outbox: RealtimeOutboxEvent,
+    ) -> None:
+        async with self._lock, self._shares._lock, self._audit._lock:
+            self._shares._items[(share.session_id, share.grantee_user_id)] = deepcopy(
+                share
+            )
+            self._audit.items.append(deepcopy(audit))
+            self._outbox[outbox.event_id] = deepcopy(outbox)
+
+    async def delete_share(
+        self,
+        session_id: str,
+        user_id: str,
+        audit: AuditLog,
+        outbox: RealtimeOutboxEvent,
+    ) -> None:
+        async with self._lock, self._shares._lock, self._audit._lock:
+            self._shares._items.pop((session_id, user_id), None)
+            self._audit.items.append(deepcopy(audit))
+            self._outbox[outbox.event_id] = deepcopy(outbox)
+
+    async def list_pending(self, limit: int = 100) -> tuple[RealtimeOutboxEvent, ...]:
+        async with self._lock:
+            values = sorted(self._outbox.values(), key=lambda item: item.created_at)
+            return tuple(deepcopy(values[: max(0, limit)]))
+
+    async def mark_published(self, event_id: str, published_at: datetime) -> None:
+        del published_at
+        async with self._lock:
+            self._outbox.pop(event_id, None)

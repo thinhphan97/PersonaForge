@@ -149,7 +149,7 @@ sequenceDiagram
     participant B as Authenticated browser
     participant API as FastAPI
     participant Core as ProvisionMedia
-    participant DB as SessionRepository
+    participant DB as PostgreSQL + Outbox
     participant R as Redis Streams
     participant W as avatar-worker
     participant L as LiveKit
@@ -265,8 +265,9 @@ sequenceDiagram
     participant B as Browser B
 
     A->>API: PATCH visibility public thành private
-    API->>DB: optimistic save và tăng version
-    API->>E: session_updated, session_version
+    API->>DB: transaction state + audit + outbox
+    DB-->>API: commit và tăng version
+    API->>E: dispatcher gửi session_updated
     E-->>A: invalidation event
     E-->>B: invalidation event
     B->>API: GET /sessions/{id}
@@ -281,6 +282,11 @@ theo access token của từng browser. Frontend bỏ snapshot có version cũ h
 `session_shares_updated` dùng cùng cơ chế. Owner tab reload danh sách share; interactor/viewer
 reload snapshot để bật/tắt chat. Nếu share bị thu hồi trên private session, hub đóng WebSocket
 với reason `Access revoked`, frontend ngắt media và xóa các quyền điều khiển.
+
+Outbox dispatcher retry mỗi giây cho đến khi Redis nhận event và chỉ sau đó đánh dấu
+`published_at`. Delivery là at-least-once, vì vậy frontend luôn fetch snapshot authoritative và
+áp dụng idempotent theo `version`. Ngoài event-driven refresh, tab đang mở reconcile snapshot
+15 giây một lần để tự phục hồi nếu kết nối bị gián đoạn hoặc event đến trễ.
 
 ## 7. Video/audio pipeline
 
@@ -311,10 +317,10 @@ sequenceDiagram
 
     O->>API: DELETE /api/sessions/{id} + Bearer + CSRF
     API->>C: require MANAGE
-    C->>DB: status -> closed, avatar -> idle
+    C->>DB: transaction closed + audit + outbox
     C->>Media: close / avatar.session.stop
     C->>Room: close room nếu có
-    API->>Events: publish session_closed
+    API->>Events: outbox dispatcher publish session_closed
     Events-->>O: chuyển sang read-only
     Events-->>V: chuyển sang read-only
     API-->>O: 204

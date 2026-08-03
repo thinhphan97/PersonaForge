@@ -12,20 +12,22 @@ from avatar_chat.adapters.outbound.memory import (
     InMemoryAuditLogRepository,
     InMemoryAuthSessionRepository,
     InMemoryConversationRepository,
+    InMemorySessionMutationUnitOfWork,
     InMemorySessionRepository,
     InMemorySessionShareRepository,
     InMemoryUserRepository,
 )
+from avatar_chat.adapters.outbound.outbox import RealtimeOutboxDispatcher
 from avatar_chat.adapters.outbound.realtime_events import (
     InMemoryRealtimeEventBus,
     RedisRealtimeEventBus,
 )
 from avatar_chat.adapters.outbound.replies import DelayedReplyAdapter, ScriptedReplyAdapter
 from avatar_chat.adapters.outbound.sqlalchemy_repositories import (
-    SqlAlchemyAuditLogRepository,
     SqlAlchemyAuthSessionRepository,
     SqlAlchemyConversationRepository,
     SqlAlchemyDatabase,
+    SqlAlchemySessionMutationUnitOfWork,
     SqlAlchemySessionRepository,
     SqlAlchemySessionShareRepository,
     SqlAlchemyUserRepository,
@@ -45,12 +47,13 @@ from avatar_chat.application.auth_use_cases import (
     RegisterUser,
 )
 from avatar_chat.application.ports import (
-    AuditLogRepository,
     AuthSessionRepository,
     AvatarStreamPort,
     ConversationRepository,
     RealtimeEventBusPort,
+    RealtimeOutboxRepository,
     ReplyGeneratorPort,
+    SessionMutationPort,
     SessionRepository,
     SessionShareRepository,
     UserRepository,
@@ -117,6 +120,7 @@ class Container:
     refresh_cookie_max_age: int
     allowed_origins: tuple[str, ...]
     realtime_events: RealtimeEventBusPort
+    outbox_dispatcher: RealtimeOutboxDispatcher
     provision_media: ProvisionMedia | None = None
     get_public_session: GetPublicSession | None = None
     get_public_conversation: GetPublicConversation | None = None
@@ -128,6 +132,7 @@ class Container:
             await lifecycle.startup()
 
     async def shutdown(self) -> None:
+        await self.outbox_dispatcher.shutdown()
         await self.realtime_events.shutdown()
         await self.avatar_stream.shutdown()
         for lifecycle in reversed(self.lifecycles):
@@ -141,7 +146,8 @@ def build_container(settings: Settings) -> Container:
     users: UserRepository
     auth_sessions: AuthSessionRepository
     shares: SessionShareRepository
-    audit: AuditLogRepository
+    mutations: SessionMutationPort
+    outbox: RealtimeOutboxRepository
     if settings.database_url:
         database = SqlAlchemyDatabase(
             settings.database_url,
@@ -152,7 +158,9 @@ def build_container(settings: Settings) -> Container:
         users = SqlAlchemyUserRepository(database.sessions)
         auth_sessions = SqlAlchemyAuthSessionRepository(database.sessions)
         shares = SqlAlchemySessionShareRepository(database.sessions)
-        audit = SqlAlchemyAuditLogRepository(database.sessions)
+        sql_mutations = SqlAlchemySessionMutationUnitOfWork(database.sessions)
+        mutations = sql_mutations
+        outbox = sql_mutations
         lifecycles = (cast(InfrastructureLifecycle, database),)
     else:
         sessions = InMemorySessionRepository()
@@ -161,6 +169,9 @@ def build_container(settings: Settings) -> Container:
         auth_sessions = InMemoryAuthSessionRepository()
         shares = InMemorySessionShareRepository()
         audit = InMemoryAuditLogRepository()
+        memory_mutations = InMemorySessionMutationUnitOfWork(sessions, shares, audit)
+        mutations = memory_mutations
+        outbox = memory_mutations
     ids = UuidGenerator()
     clock = SystemClock()
     passwords = Argon2PasswordHasher()
@@ -240,6 +251,7 @@ def build_container(settings: Settings) -> Container:
         if use_redis_events
         else InMemoryRealtimeEventBus()
     )
+    outbox_dispatcher = RealtimeOutboxDispatcher(outbox, realtime_events, clock)
 
     return Container(
         register_user=RegisterUser(
@@ -294,28 +306,37 @@ def build_container(settings: Settings) -> Container:
             thinking_min_duration_seconds=settings.thinking_min_duration_seconds,
         ),
         get_conversation=GetConversation(sessions, conversations, access),
-        close_session=CloseSession(sessions, avatar_stream, clock, rooms, access),
+        close_session=CloseSession(
+            sessions,
+            avatar_stream,
+            clock,
+            rooms,
+            access,
+            mutations,
+            ids,
+        ),
         avatar_stream=avatar_stream,
         media_provider=settings.media_provider,
         list_owned_sessions=ListOwnedSessions(sessions),
         list_shared_sessions=ListSharedSessions(sessions, shares),
         list_public_sessions=ListPublicSessions(sessions, shares),
         change_visibility=ChangeSessionVisibility(
-            sessions, access, audit, ids, clock, shares, rooms
+            sessions, access, mutations, ids, clock, shares, rooms
         ),
         get_session_summary=GetSessionSummary(sessions, shares, access),
         share_session=ShareSession(
-            sessions, users, shares, access, audit, ids, clock
+            sessions, users, shares, access, mutations, ids, clock
         ),
         list_session_shares=ListSessionShares(sessions, users, shares, access),
         revoke_session_share=RevokeSessionShare(
-            sessions, shares, access, audit, ids, clock, rooms
+            sessions, shares, access, mutations, ids, clock, rooms
         ),
         refresh_cookie_name=settings.refresh_cookie_name,
         auth_cookie_secure=settings.auth_cookie_secure,
         refresh_cookie_max_age=int(refresh_ttl.total_seconds()),
         allowed_origins=settings.allowed_origins,
         realtime_events=realtime_events,
+        outbox_dispatcher=outbox_dispatcher,
         provision_media=provision_media,
         get_public_session=GetPublicSession(sessions),
         get_public_conversation=GetPublicConversation(sessions, conversations),

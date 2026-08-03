@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 
 from avatar_chat.domain.models import (
@@ -137,3 +138,11 @@ class ChatOutputEvent:
     revision: int | None = None
     author_user_id: str | None = None
     session_version: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RealtimeOutboxEvent:
+    event_id: str
+    session_id: str
+    event: ChatOutputEvent
+    created_at: datetime

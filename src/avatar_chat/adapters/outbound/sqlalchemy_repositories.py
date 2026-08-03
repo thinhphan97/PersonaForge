@@ -1,7 +1,9 @@
+import asyncio
 from dataclasses import replace
 from datetime import datetime
 
 from sqlalchemy import (
+    JSON,
     DateTime,
     ForeignKey,
     Integer,
@@ -24,6 +26,11 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql import Select
 from sqlalchemy.sql.elements import ColumnElement
 
+from avatar_chat.application.dto import (
+    ChatEventType,
+    ChatOutputEvent,
+    RealtimeOutboxEvent,
+)
 from avatar_chat.domain.errors import ConcurrentMessageUpdate, ConcurrentSessionUpdate
 from avatar_chat.domain.models import (
     AuditLog,
@@ -140,15 +147,41 @@ class AuditLogRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
+class RealtimeOutboxRow(Base):
+    __tablename__ = "realtime_outbox"
+
+    event_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    payload: Mapped[dict[str, object | None]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+
+
 class SqlAlchemyDatabase:
-    def __init__(self, url: str, auto_create_schema: bool = True) -> None:
+    def __init__(
+        self,
+        url: str,
+        auto_create_schema: bool = True,
+        startup_timeout_seconds: float = 15.0,
+    ) -> None:
         self.engine: AsyncEngine = create_async_engine(url, pool_pre_ping=True)
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
         self._auto_create_schema = auto_create_schema
+        self._startup_timeout_seconds = startup_timeout_seconds
 
     async def startup(self) -> None:
         if not self._auto_create_schema:
             return
+        await asyncio.wait_for(
+            self._create_schema(),
+            timeout=self._startup_timeout_seconds,
+        )
+
+    async def _create_schema(self) -> None:
         async with self.engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
 
@@ -579,6 +612,119 @@ class SqlAlchemySessionShareRepository:
             await database.commit()
 
 
+class SqlAlchemySessionMutationUnitOfWork:
+    """Commit an administration mutation, its audit record and outbox atomically."""
+
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+        self._sessions = sessions
+
+    async def save_session(
+        self,
+        session: AvatarSession,
+        expected_version: int,
+        audit: AuditLog,
+        outbox: RealtimeOutboxEvent,
+    ) -> None:
+        async with self._sessions() as database:
+            result = await database.execute(
+                update(AvatarSessionRow)
+                .where(
+                    AvatarSessionRow.session_id == session.session_id,
+                    AvatarSessionRow.version == expected_version,
+                )
+                .values(
+                    character_id=session.character_id,
+                    owner_user_id=session.owner_user_id,
+                    visibility=session.visibility.value,
+                    status=session.status.value,
+                    avatar_state=session.avatar_state.value,
+                    version=expected_version + 1,
+                    updated_at=session.updated_at,
+                )
+            )
+            if not isinstance(result, CursorResult) or result.rowcount != 1:
+                await database.rollback()
+                raise ConcurrentSessionUpdate(session.session_id)
+            database.add(_audit_row(audit))
+            database.add(_outbox_row(outbox))
+            await database.commit()
+            session.version = expected_version + 1
+
+    async def save_share(
+        self,
+        share: SessionShare,
+        audit: AuditLog,
+        outbox: RealtimeOutboxEvent,
+    ) -> None:
+        async with self._sessions() as database:
+            existing = await database.scalar(
+                select(SessionShareRow).where(
+                    SessionShareRow.session_id == share.session_id,
+                    SessionShareRow.grantee_user_id == share.grantee_user_id,
+                )
+            )
+            if existing is None:
+                database.add(
+                    SessionShareRow(
+                        share_id=share.share_id,
+                        session_id=share.session_id,
+                        grantee_user_id=share.grantee_user_id,
+                        permission=share.permission.value,
+                        created_by_user_id=share.created_by_user_id,
+                        created_at=share.created_at,
+                    )
+                )
+            else:
+                existing.permission = share.permission.value
+            database.add(_audit_row(audit))
+            database.add(_outbox_row(outbox))
+            await database.commit()
+
+    async def delete_share(
+        self,
+        session_id: str,
+        user_id: str,
+        audit: AuditLog,
+        outbox: RealtimeOutboxEvent,
+    ) -> None:
+        async with self._sessions() as database:
+            await database.execute(
+                delete(SessionShareRow).where(
+                    SessionShareRow.session_id == session_id,
+                    SessionShareRow.grantee_user_id == user_id,
+                )
+            )
+            database.add(_audit_row(audit))
+            database.add(_outbox_row(outbox))
+            await database.commit()
+
+    async def list_pending(self, limit: int = 100) -> tuple[RealtimeOutboxEvent, ...]:
+        async with self._sessions() as database:
+            rows = list(
+                (
+                    await database.scalars(
+                        select(RealtimeOutboxRow)
+                        .where(RealtimeOutboxRow.published_at.is_(None))
+                        .order_by(RealtimeOutboxRow.created_at)
+                        .limit(max(0, limit))
+                    )
+                ).all()
+            )
+        return tuple(_outbox_from_row(row) for row in rows)
+
+    async def mark_published(self, event_id: str, published_at: datetime) -> None:
+        async with self._sessions() as database:
+            await database.execute(
+                update(RealtimeOutboxRow)
+                .where(
+                    RealtimeOutboxRow.event_id == event_id,
+                    RealtimeOutboxRow.published_at.is_(None),
+                )
+                .values(published_at=published_at)
+            )
+            await database.commit()
+
+
 class SqlAlchemyAuditLogRepository:
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
         self._sessions = sessions
@@ -657,3 +803,62 @@ def _share_from_row(row: SessionShareRow | None) -> SessionShare | None:
         created_by_user_id=row.created_by_user_id,
         created_at=row.created_at,
     )
+
+
+def _audit_row(event: AuditLog) -> AuditLogRow:
+    return AuditLogRow(
+        audit_id=event.audit_id,
+        actor_user_id=event.actor_user_id,
+        action=event.action,
+        resource_type=event.resource_type,
+        resource_id=event.resource_id,
+        created_at=event.created_at,
+    )
+
+
+def _outbox_row(item: RealtimeOutboxEvent) -> RealtimeOutboxRow:
+    event = item.event
+    return RealtimeOutboxRow(
+        event_id=item.event_id,
+        session_id=item.session_id,
+        payload={
+            "type": event.type.value,
+            "content": event.content,
+            "avatar_state": event.avatar_state.value if event.avatar_state else None,
+            "message_id": event.message_id,
+            "sequence": event.sequence,
+            "revision": event.revision,
+            "author_user_id": event.author_user_id,
+            "session_version": event.session_version,
+        },
+        created_at=item.created_at,
+        published_at=None,
+    )
+
+
+def _outbox_from_row(row: RealtimeOutboxRow) -> RealtimeOutboxEvent:
+    payload = row.payload
+    avatar_state = payload.get("avatar_state")
+    return RealtimeOutboxEvent(
+        event_id=row.event_id,
+        session_id=row.session_id,
+        event=ChatOutputEvent(
+            type=ChatEventType(str(payload["type"])),
+            content=_optional_string(payload.get("content")),
+            avatar_state=AvatarState(str(avatar_state)) if avatar_state else None,
+            message_id=_optional_string(payload.get("message_id")),
+            sequence=_optional_int(payload.get("sequence")),
+            revision=_optional_int(payload.get("revision")),
+            author_user_id=_optional_string(payload.get("author_user_id")),
+            session_version=_optional_int(payload.get("session_version")),
+        ),
+        created_at=row.created_at,
+    )
+
+
+def _optional_string(value: object) -> str | None:
+    return str(value) if value is not None else None
+
+
+def _optional_int(value: object) -> int | None:
+    return int(str(value)) if value is not None else None

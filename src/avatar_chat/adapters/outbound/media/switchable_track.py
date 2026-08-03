@@ -37,7 +37,12 @@ class SwitchableAvatarVideoTrack(MediaStreamTrack):
 
     kind = "video"
 
-    def __init__(self, catalog: ClipCatalog, clock: MediaClock | None = None) -> None:
+    def __init__(
+        self,
+        catalog: ClipCatalog,
+        clock: MediaClock | None = None,
+        source_start_timeout_seconds: float = 10.0,
+    ) -> None:
         super().__init__()
         self._catalog = catalog
         self._clock = clock or MediaClock()
@@ -51,6 +56,7 @@ class SwitchableAvatarVideoTrack(MediaStreamTrack):
         self._last_pts = -1
         self._frame_number = 0
         self._state: AvatarState | None = None
+        self._source_start_timeout_seconds = source_start_timeout_seconds
 
     async def switch(self, state: AvatarState) -> None:
         path = self._catalog.path_for(state)
@@ -59,7 +65,13 @@ class SwitchableAvatarVideoTrack(MediaStreamTrack):
         if source is None:
             raise RuntimeError(f"Avatar clip has no video track: {path}")
         try:
-            first_frame = cast(VideoFrame, await source.recv())
+            first_frame = cast(
+                VideoFrame,
+                await asyncio.wait_for(
+                    source.recv(),
+                    timeout=self._source_start_timeout_seconds,
+                ),
+            )
         except BaseException:
             source.stop()
             raise

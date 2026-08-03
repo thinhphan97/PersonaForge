@@ -23,7 +23,6 @@ from avatar_chat.application.auth_use_cases import require_csrf
 from avatar_chat.application.dto import (
     AuthContext,
     AuthResult,
-    ChatEventType,
     ChatOutputEvent,
     SessionSummary,
     ShareSummary,
@@ -234,22 +233,52 @@ class ChatConnectionHub:
         for websocket, access_token in connections:
             try:
                 auth = await container.authenticate_token.execute(access_token)
+            except (AuthenticationRequired, AuthenticationFailed):
+                self.remove(session_id, websocket)
+                await _close_websocket_safely(
+                    websocket,
+                    code=1008,
+                    reason="Authentication expired",
+                )
+                continue
+            try:
                 await container.get_conversation.execute(
                     auth.user.user_id,
                     session_id,
                     1,
                 )
+            except (AccessDenied, SessionNotFound):
+                self.remove(session_id, websocket)
+                await _close_websocket_safely(
+                    websocket,
+                    code=1008,
+                    reason="Access revoked",
+                )
+                continue
+            try:
                 await websocket.send_json(payload)
             except Exception:
                 self.remove(session_id, websocket)
-                try:
-                    await websocket.close(code=1008, reason="Access revoked")
-                except Exception:
-                    pass
+                await _close_websocket_safely(
+                    websocket,
+                    code=1011,
+                    reason="Connection interrupted",
+                )
 
 
 async def get_container(request: Request) -> Container:
     return cast(Container, request.app.state.container)
+
+
+async def _close_websocket_safely(
+    websocket: WebSocket,
+    code: int,
+    reason: str,
+) -> None:
+    try:
+        await websocket.close(code=code, reason=reason)
+    except Exception:
+        pass
 
 
 ContainerDependency = Annotated[Container, Depends(get_container)]
@@ -291,6 +320,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     app.state.container,
                 )
             )
+            await app.state.container.outbox_dispatcher.startup()
             yield
         finally:
             await app.state.container.shutdown()
@@ -580,14 +610,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             session_id,
             body.visibility,
         )
-        await _publish_realtime_event_safely(
-            container,
-            session_id,
-            ChatOutputEvent(
-                type=ChatEventType.SESSION_UPDATED,
-                session_version=summary.version,
-            ),
-        )
+        await container.outbox_dispatcher.flush()
         return _session_response(summary, container.media_provider)
 
     @router.post("/sessions/{session_id}/shares", response_model=ShareResponse)
@@ -603,11 +626,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             body.username,
             body.permission,
         )
-        await _publish_realtime_event_safely(
-            container,
-            session_id,
-            ChatOutputEvent(type=ChatEventType.SESSION_SHARES_UPDATED),
-        )
+        await container.outbox_dispatcher.flush()
         return _share_response(share)
 
     @router.get("/sessions/{session_id}/shares", response_model=list[ShareResponse])
@@ -636,11 +655,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             session_id,
             user_id,
         )
-        await _publish_realtime_event_safely(
-            container,
-            session_id,
-            ChatOutputEvent(type=ChatEventType.SESSION_SHARES_UPDATED),
-        )
+        await container.outbox_dispatcher.flush()
 
     @router.post(
         "/sessions/{session_id}/media/access",
@@ -721,11 +736,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         container: ContainerDependency,
     ) -> None:
         await container.close_session.execute(auth.user.user_id, session_id)
-        await _publish_realtime_event_safely(
-            container,
-            session_id,
-            ChatOutputEvent(type=ChatEventType.SESSION_CLOSED),
-        )
+        await container.outbox_dispatcher.flush()
 
     @app.websocket("/api/sessions/{session_id}/chat")
     async def chat(websocket: WebSocket, session_id: str) -> None:
@@ -955,21 +966,6 @@ def _event_payload(event: ChatOutputEvent) -> dict[str, Any]:
         "author_user_id": event.author_user_id,
         "session_version": event.session_version,
     }
-
-
-async def _publish_realtime_event_safely(
-    container: Container,
-    session_id: str,
-    event: ChatOutputEvent,
-) -> None:
-    try:
-        await container.realtime_events.publish(session_id, event)
-    except Exception:
-        logger.exception(
-            "Could not publish realtime event session=%s type=%s",
-            session_id,
-            event.type.value,
-        )
 
 
 def _message_response(message: ChatMessage) -> MessageResponse:

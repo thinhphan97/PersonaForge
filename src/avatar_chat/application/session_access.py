@@ -1,12 +1,18 @@
 import logging
 from dataclasses import dataclass
 
-from avatar_chat.application.dto import SessionSummary, ShareSummary
+from avatar_chat.application.dto import (
+    ChatEventType,
+    ChatOutputEvent,
+    RealtimeOutboxEvent,
+    SessionSummary,
+    ShareSummary,
+)
 from avatar_chat.application.ports import (
-    AuditLogRepository,
     Clock,
     IdGenerator,
     MediaRoomPort,
+    SessionMutationPort,
     SessionRepository,
     SessionShareRepository,
     UserRepository,
@@ -140,7 +146,7 @@ class GetSessionSummary:
 class ChangeSessionVisibility:
     sessions: SessionRepository
     access: SessionAccessPolicy
-    audit: AuditLogRepository
+    mutations: SessionMutationPort
     ids: IdGenerator
     clock: Clock
     shares: SessionShareRepository
@@ -158,7 +164,26 @@ class ChangeSessionVisibility:
         expected_version = session.version
         session.visibility = visibility
         session.updated_at = self.clock.now()
-        await self.sessions.save(session, expected_version)
+        await self.mutations.save_session(
+            session,
+            expected_version,
+            _audit_event(
+                self.ids,
+                self.clock,
+                actor_user_id,
+                "session.visibility.changed",
+                session_id,
+            ),
+            _outbox_event(
+                self.ids,
+                self.clock,
+                session_id,
+                ChatOutputEvent(
+                    type=ChatEventType.SESSION_UPDATED,
+                    session_version=expected_version + 1,
+                ),
+            ),
+        )
         if visibility is SessionVisibility.PRIVATE and self.rooms is not None:
             allowed = (session.owner_user_id,) + tuple(
                 share.grantee_user_id
@@ -171,14 +196,6 @@ class ChangeSessionVisibility:
                     "Could not revoke public media viewers session=%s",
                     session_id,
                 )
-        await _audit(
-            self.audit,
-            self.ids,
-            self.clock,
-            actor_user_id,
-            "session.visibility.changed",
-            session_id,
-        )
         return _summary(session, "owner", True)
 
 
@@ -188,7 +205,7 @@ class ShareSession:
     users: UserRepository
     shares: SessionShareRepository
     access: SessionAccessPolicy
-    audit: AuditLogRepository
+    mutations: SessionMutationPort
     ids: IdGenerator
     clock: Clock
 
@@ -215,14 +232,21 @@ class ShareSession:
             created_by_user_id=actor_user_id,
             created_at=self.clock.now(),
         )
-        await self.shares.save(share)
-        await _audit(
-            self.audit,
-            self.ids,
-            self.clock,
-            actor_user_id,
-            "session.shared",
-            session_id,
+        await self.mutations.save_share(
+            share,
+            _audit_event(
+                self.ids,
+                self.clock,
+                actor_user_id,
+                "session.shared",
+                session_id,
+            ),
+            _outbox_event(
+                self.ids,
+                self.clock,
+                session_id,
+                ChatOutputEvent(type=ChatEventType.SESSION_SHARES_UPDATED),
+            ),
         )
         return ShareSummary(user.user_id, user.username, permission)
 
@@ -254,7 +278,7 @@ class RevokeSessionShare:
     sessions: SessionRepository
     shares: SessionShareRepository
     access: SessionAccessPolicy
-    audit: AuditLogRepository
+    mutations: SessionMutationPort
     ids: IdGenerator
     clock: Clock
     rooms: MediaRoomPort | None = None
@@ -268,7 +292,23 @@ class RevokeSessionShare:
         session = await _session(self.sessions, session_id)
         await self.access.require(actor_user_id, session, SessionAction.MANAGE)
         _require_open_session(session)
-        await self.shares.delete(session_id, user_id)
+        await self.mutations.delete_share(
+            session_id,
+            user_id,
+            _audit_event(
+                self.ids,
+                self.clock,
+                actor_user_id,
+                "session.share.revoked",
+                session_id,
+            ),
+            _outbox_event(
+                self.ids,
+                self.clock,
+                session_id,
+                ChatOutputEvent(type=ChatEventType.SESSION_SHARES_UPDATED),
+            ),
+        )
         if self.rooms is not None:
             try:
                 await self.rooms.revoke_participant(session_id, user_id)
@@ -278,14 +318,6 @@ class RevokeSessionShare:
                     session_id,
                     user_id,
                 )
-        await _audit(
-            self.audit,
-            self.ids,
-            self.clock,
-            actor_user_id,
-            "session.share.revoked",
-            session_id,
-        )
 
 
 def _summary(
@@ -317,21 +349,27 @@ def _require_open_session(session: AvatarSession) -> None:
         raise SessionClosed(session.session_id)
 
 
-async def _audit(
-    repository: AuditLogRepository,
+def _audit_event(
     ids: IdGenerator,
     clock: Clock,
     actor_user_id: str,
     action: str,
     resource_id: str,
-) -> None:
-    await repository.append(
-        AuditLog(
-            audit_id=ids.new_id(),
-            actor_user_id=actor_user_id,
-            action=action,
-            resource_type="avatar_session",
-            resource_id=resource_id,
-            created_at=clock.now(),
-        )
+) -> AuditLog:
+    return AuditLog(
+        audit_id=ids.new_id(),
+        actor_user_id=actor_user_id,
+        action=action,
+        resource_type="avatar_session",
+        resource_id=resource_id,
+        created_at=clock.now(),
     )
+
+
+def _outbox_event(
+    ids: IdGenerator,
+    clock: Clock,
+    session_id: str,
+    event: ChatOutputEvent,
+) -> RealtimeOutboxEvent:
+    return RealtimeOutboxEvent(ids.new_id(), session_id, event, clock.now())
