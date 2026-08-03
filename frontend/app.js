@@ -18,9 +18,12 @@ let currentSession;
 let peer;
 let livekitRoom;
 let chatSocket;
-let streamingBubble;
+let chatReconnectTimer;
+let chatReconnectAttempt = 0;
 let chatReady = false;
 let mediaReady = false;
+let messageCursor = { sequence: 0, revision: 0 };
+const messageStates = new Map();
 const remoteStream = new MediaStream();
 
 async function api(path, options = {}, mutation = false, retry = true) {
@@ -227,6 +230,8 @@ async function openSession(session) {
     card.classList.toggle("is-active", card.dataset.sessionId === session.session_id);
   });
   messages.replaceChildren();
+  messageStates.clear();
+  messageCursor = { sequence: 0, revision: 0 };
   $("#session-title").textContent = session.character_id;
   $("#session-access").textContent = `${session.access_role} · ${session.visibility}`;
   const isOwner = session.owner_user_id === currentUser.user_id;
@@ -318,27 +323,57 @@ async function connectWebRtc(offerUrl) {
 }
 
 function connectChat(chatPath) {
+  clearTimeout(chatReconnectTimer);
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  chatSocket = new WebSocket(
+  const socket = new WebSocket(
     `${protocol}//${location.host}${chatPath}`,
     ["avatar-chat", `bearer.${accessToken}`],
   );
-  chatSocket.onopen = () => {
+  chatSocket = socket;
+  socket.onopen = () => {
+    if (chatSocket !== socket) return;
+    chatReconnectAttempt = 0;
     chatReady = true;
     updateControls();
+    catchUpHistory().catch((error) => addMessage(error.message, "assistant"));
   };
-  chatSocket.onclose = () => {
+  socket.onclose = async ({ code, reason }) => {
+    if (chatSocket !== socket) return;
+    chatSocket = undefined;
     chatReady = false;
     updateControls();
+    if (reason === "Access revoked") {
+      addMessage("Quyền truy cập phiên đã bị thu hồi.", "assistant");
+      return;
+    }
+    if (code === 1008 && !await refreshAccessToken()) {
+      addMessage(reason || "Phiên đăng nhập đã hết hạn.", "assistant");
+      return;
+    }
+    scheduleChatReconnect(chatPath);
   };
-  chatSocket.onmessage = ({ data }) => handleChatEvent(JSON.parse(data));
+  socket.onmessage = ({ data }) => handleChatEvent(JSON.parse(data));
+}
+
+function scheduleChatReconnect(chatPath) {
+  if (!currentSession || !accessToken) return;
+  const sessionId = currentSession.session_id;
+  const delay = Math.min(500 * (2 ** chatReconnectAttempt), 10000);
+  chatReconnectAttempt += 1;
+  clearTimeout(chatReconnectTimer);
+  chatReconnectTimer = setTimeout(() => {
+    if (currentSession?.session_id === sessionId && !chatSocket) connectChat(chatPath);
+  }, delay);
 }
 
 async function disconnectCurrent() {
+  clearTimeout(chatReconnectTimer);
+  chatReconnectAttempt = 0;
   chatReady = false;
   mediaReady = false;
-  chatSocket?.close();
+  const socket = chatSocket;
   chatSocket = undefined;
+  socket?.close();
   peer?.close();
   peer = undefined;
   if (livekitRoom) await livekitRoom.disconnect();
@@ -350,7 +385,20 @@ async function disconnectCurrent() {
 
 async function loadHistory(sessionId) {
   const history = await (await api(`/api/sessions/${sessionId}/messages`)).json();
-  for (const message of history) addMessage(message.content, message.role);
+  for (const message of history) reconcileMessage(message);
+}
+
+async function catchUpHistory() {
+  if (!currentSession) return;
+  const sessionId = currentSession.session_id;
+  while (currentSession?.session_id === sessionId) {
+    const after = `${messageCursor.sequence}:${messageCursor.revision}`;
+    const history = await (
+      await api(`/api/sessions/${sessionId}/messages?after=${after}&limit=100`)
+    ).json();
+    for (const message of history) reconcileMessage(message);
+    if (history.length < 100) return;
+  }
 }
 
 function updateControls() {
@@ -362,18 +410,58 @@ function updateControls() {
 function handleChatEvent(event) {
   if (event.type === "avatar_state") return setAvatarState(event.avatar_state);
   if (event.type === "user_message") {
-    addMessage(event.content, "user");
+    reconcileMessage({ ...event, role: "user", status: "complete" });
     return;
   }
-  if (event.type === "assistant_chunk") {
-    if (!streamingBubble) streamingBubble = addMessage("", "assistant");
-    streamingBubble.textContent += event.content;
-    messages.scrollTop = messages.scrollHeight;
-  } else if (event.type === "assistant_complete") {
-    streamingBubble = undefined;
+  if (
+    ["assistant_started", "assistant_chunk", "assistant_complete", "assistant_failed"]
+      .includes(event.type)
+  ) {
+    reconcileMessage({
+      ...event,
+      role: "assistant",
+      status: event.type === "assistant_complete"
+        ? "complete"
+        : event.type === "assistant_failed" ? "failed" : "streaming",
+    });
   } else if (event.type === "error") {
     addMessage(event.detail, "assistant");
   }
+}
+
+function reconcileMessage(message) {
+  if (!message.message_id || message.sequence == null || message.revision == null) return;
+  const current = messageStates.get(message.message_id);
+  if (current && current.revision > message.revision) return;
+  let element = current?.element;
+  if (!element) {
+    element = addMessage("", message.role);
+    element.dataset.messageId = message.message_id;
+  }
+  element.dataset.sequence = String(message.sequence);
+  placeMessageInOrder(element, message.sequence);
+  element.textContent = message.content || "";
+  element.classList.toggle("streaming", message.status === "streaming");
+  element.classList.toggle("failed", message.status === "failed");
+  messageStates.set(message.message_id, {
+    revision: message.revision,
+    sequence: message.sequence,
+    element,
+  });
+  if (
+    message.sequence > messageCursor.sequence
+    || (message.sequence === messageCursor.sequence && message.revision > messageCursor.revision)
+  ) {
+    messageCursor = { sequence: message.sequence, revision: message.revision };
+  }
+  messages.scrollTop = messages.scrollHeight;
+}
+
+function placeMessageInOrder(element, sequence) {
+  const next = [...messages.querySelectorAll("[data-sequence]")].find(
+    (candidate) => candidate !== element && Number(candidate.dataset.sequence) > sequence,
+  );
+  messages.insertBefore(element, next || null);
 }
 
 function setAvatarState(state) {

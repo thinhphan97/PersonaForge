@@ -31,6 +31,7 @@ from avatar_chat.domain.errors import CharacterNotFound, SessionNotFound
 from avatar_chat.domain.models import (
     AvatarState,
     ChatMessage,
+    ChatMessageStatus,
     ChatRole,
     SessionStatus,
     SessionVisibility,
@@ -243,6 +244,7 @@ async def test_message_flow_changes_avatar_and_persists_history() -> None:
     assert [event.type for event in events] == [
         ChatEventType.USER_MESSAGE,
         ChatEventType.AVATAR_STATE,
+        ChatEventType.ASSISTANT_STARTED,
         ChatEventType.AVATAR_STATE,
         ChatEventType.ASSISTANT_CHUNK,
         ChatEventType.ASSISTANT_CHUNK,
@@ -251,8 +253,27 @@ async def test_message_flow_changes_avatar_and_persists_history() -> None:
     ]
     assert events[-2].avatar_state is AvatarState.IDLE
     assert events[-1].content == "Xin chào"
+    assistant_events = [
+        event
+        for event in events
+        if event.type
+        in {
+            ChatEventType.ASSISTANT_STARTED,
+            ChatEventType.ASSISTANT_CHUNK,
+            ChatEventType.ASSISTANT_COMPLETE,
+        }
+    ]
+    assert len({event.message_id for event in assistant_events}) == 1
+    assert [
+        event.content
+        for event in assistant_events
+        if event.type is ChatEventType.ASSISTANT_CHUNK
+    ] == ["Xin ", "Xin chào"]
     history = await conversations.list_recent(created.session_id, 10)
     assert [message.content for message in history] == ["Hello", "Xin chào"]
+    assert [message.sequence for message in history] == [1, 2]
+    assert history[1].status is ChatMessageStatus.COMPLETE
+    assert history[1].revision == 3
     session = await sessions.get(created.session_id)
     assert session is not None
     assert session.status is SessionStatus.READY
@@ -442,16 +463,23 @@ async def test_provider_failure_restores_idle_state() -> None:
         access,
     )
 
+    events = []
+    stream = handler.execute(USER_ID, created.session_id, "Hello")
     with pytest.raises(RuntimeError, match="provider failed"):
-        _ = [
-            event
-            async for event in handler.execute(USER_ID, created.session_id, "Hello")
-        ]
+        while True:
+            events.append(await anext(stream))
 
     session = await sessions.get(created.session_id)
     assert session is not None
     assert session.status is SessionStatus.READY
     assert session.avatar_state is AvatarState.IDLE
+    failed_history = await conversations.list_recent(created.session_id, 10)
+    assert failed_history[-1].status is ChatMessageStatus.FAILED
+    assert [event.type for event in events[-2:]] == [
+        ChatEventType.AVATAR_STATE,
+        ChatEventType.ASSISTANT_FAILED,
+    ]
+    assert events[-1].revision == failed_history[-1].revision
     assert avatar.states[-1] is AvatarState.IDLE
 
 

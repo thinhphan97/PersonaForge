@@ -24,6 +24,12 @@ class ChatRole(str, Enum):
     ASSISTANT = "assistant"
 
 
+class ChatMessageStatus(str, Enum):
+    STREAMING = "streaming"
+    COMPLETE = "complete"
+    FAILED = "failed"
+
+
 class UserStatus(str, Enum):
     ACTIVE = "active"
     DISABLED = "disabled"
@@ -100,6 +106,10 @@ class ChatMessage:
     content: str
     created_at: datetime
     author_user_id: str | None = None
+    sequence: int = 0
+    revision: int = 0
+    status: ChatMessageStatus = ChatMessageStatus.COMPLETE
+    updated_at: datetime | None = None
 
 
 @dataclass(slots=True)

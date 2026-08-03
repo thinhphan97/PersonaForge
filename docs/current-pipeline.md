@@ -35,7 +35,8 @@ Pipeline hiện giải quyết được các yêu cầu sau:
 flowchart LR
     U[Browser]
     API[avatar-chat\nFastAPI + application core]
-    R[(Redis Streams)]
+    R[(Redis Streams\nmedia commands)]
+    P[(Redis Pub/Sub\nchat events)]
     W[avatar-worker\nrender + A/V publisher]
     SFU[LiveKit SFU]
     DB[(Memory / SQL database)]
@@ -46,6 +47,7 @@ flowchart LR
     API <-->|session + messages| DB
     API -->|stream prompt/history| LLM
     LLM -->|reply chunks| API
+    API <-->|cross-replica chat events| P
     API -->|start/state/stop commands| R
     R -->|consumer group| W
     W -->|WebRTC publish audio + video| SFU
@@ -124,6 +126,7 @@ src/
 │   │       ├── sqlalchemy_repositories.py
 │   │       ├── replies.py            # Scripted + delay decorator
 │   │       ├── http_reply.py          # SSE/NDJSON model adapter
+│   │       ├── realtime_events.py     # Memory/Redis realtime event bus
 │   │       └── media/
 │   │           ├── aiortc_stream.py
 │   │           ├── livekit_room.py
@@ -192,7 +195,7 @@ Các invariant chính:
 - `MEDIA_STARTING` từ request khác trả conflict thay vì tạo hai publisher.
 - Repository dùng `version` làm optimistic concurrency control; stale update trả conflict.
 - `close()` idempotent: gọi nhiều lần vẫn giữ `CLOSED`.
-- Một `asyncio.Lock` theo `session_id` ngăn hai message chạy đồng thời.
+- Một `asyncio.Lock` theo `session_id` ngăn hai message chạy đồng thời trong một process.
 - Lock được bỏ khỏi lock map sau khi xử lý để không tăng bộ nhớ theo số session lịch sử.
 - Message thứ hai khi session đang xử lý trả domain error `SessionBusy`.
 - Nếu model/reply stream lỗi, use case cố gắng khôi phục cả domain và renderer về `idle`.
@@ -202,7 +205,8 @@ Các invariant chính:
 | Port | Trách nhiệm | Adapter hiện có |
 |---|---|---|
 | `SessionRepository` | Lưu/đọc/xóa session | In-memory, SQLAlchemy |
-| `ConversationRepository` | Append và lấy lịch sử chat | In-memory, SQLAlchemy |
+| `ConversationRepository` | Append/update draft, cursor catch-up | In-memory, SQLAlchemy |
+| `RealtimeEventBusPort` | Fan-out chat event giữa API replica | In-memory, Redis Pub/Sub |
 | `AvatarStreamPort` | Start, negotiate, đổi state, close media | aiortc, Redis command adapter |
 | `MediaRoomPort` | Provision room/token và close room | LiveKit token adapter |
 | `ReplyGeneratorPort` | Stream reply chunk | Scripted, HTTP SSE/NDJSON, delay decorator |
@@ -291,32 +295,43 @@ sequenceDiagram
     participant A as FastAPI WebSocket
     participant H as HandleMessage
     participant DB as Conversation repo
-    participant R as Redis Stream
+    participant P as Redis Pub/Sub
+    participant R as Redis Streams
     participant W as Render Worker
     participant M as Reply provider
 
     B->>A: {type:user_message, content:...}
     A->>H: execute(session_id, content)
-    H->>DB: append user message
+    H->>DB: append user message, cấp sequence
+    H->>P: user_message snapshot
+    P-->>B: user_message
     H->>R: avatar.state.set(thinking)
-    H-->>B: avatar_state=thinking
+    H->>P: avatar_state=thinking
     H->>H: đợi THINKING_MIN_DURATION
     H->>DB: list_recent(limit=30)
     H->>R: avatar.state.set(speaking)
-    H-->>B: avatar_state=speaking
+    H->>DB: append assistant draft(status=streaming)
+    H->>P: assistant_started(message_id, revision=0)
+    H->>P: avatar_state=speaking
     H->>M: stream_reply(history)
     loop từng chunk
         M-->>H: ReplyChunk
-        H-->>B: assistant_chunk
+        H->>DB: CAS update full content + revision
+        H->>P: assistant_chunk(full snapshot, revision)
     end
-    H->>DB: append assistant full reply
+    H->>DB: CAS update status=complete
     H->>R: avatar.state.set(idle)
-    H-->>B: avatar_state=idle
-    H-->>B: assistant_complete
+    H->>P: avatar_state=idle
+    H->>P: assistant_complete(message_id, revision)
+    P-->>B: events từ mọi API replica
 ```
 
 `THINKING_MIN_DURATION` đảm bảo clip thinking có thời gian xuất hiện. `REPLY_CHUNK_DELAY`
 là decorator áp dụng cho mọi reply provider, giúp kéo dài trạng thái speaking trong demo.
+Mỗi chunk là snapshot đầy đủ của message, không phải delta. Browser chỉ áp dụng revision mới
+hơn nên Redis delivery trùng hoặc event WebSocket đến sai thứ tự không làm nhân đôi text.
+Nếu WebSocket đứt, browser tự reconnect theo exponential backoff tối đa 10 giây rồi gọi
+history theo từng page với cursor cuối để lấy mọi message/revision đã lưu.
 
 ### 6.3. Đóng session
 
@@ -426,13 +441,19 @@ Client gửi:
 Server có thể gửi:
 
 ```json
+{"type":"user_message","content":"Xin chào","message_id":"m1","sequence":1,"revision":0,"author_user_id":"u1"}
 {"type":"avatar_state","content":null,"avatar_state":"thinking"}
+{"type":"assistant_started","content":"","message_id":"m2","sequence":2,"revision":0}
 {"type":"avatar_state","content":null,"avatar_state":"speaking"}
-{"type":"assistant_chunk","content":"Xin ","avatar_state":null}
-{"type":"assistant_chunk","content":"chào!","avatar_state":null}
+{"type":"assistant_chunk","content":"Xin ","message_id":"m2","sequence":2,"revision":1}
+{"type":"assistant_chunk","content":"Xin chào!","message_id":"m2","sequence":2,"revision":2}
 {"type":"avatar_state","content":null,"avatar_state":"idle"}
-{"type":"assistant_complete","content":"Xin chào!","avatar_state":null}
+{"type":"assistant_complete","content":"Xin chào!","message_id":"m2","sequence":2,"revision":3}
 ```
+
+Nếu provider lỗi sau khi đã tạo draft, server lưu `status=failed`, phát
+`avatar_state=idle` và `assistant_failed` với revision cuối để client không bị kẹt ở trạng
+thái streaming/speaking.
 
 Domain error được trả dưới dạng:
 
@@ -444,10 +465,12 @@ Domain error được trả dưới dạng:
 
 ```http
 GET /api/sessions/{session_id}/messages?limit=50
+GET /api/sessions/{session_id}/messages?after=12:3&limit=100
 DELETE /api/sessions/{session_id}
 ```
 
-`limit` bị giới hạn tối đa 100 ở inbound adapter.
+`after` có dạng `sequence:revision`. Endpoint public `/api/public/sessions/{id}/messages`
+cũng hỗ trợ cursor này. `limit` bị giới hạn tối đa 100 ở inbound adapter.
 
 ## 8. Redis command contract
 
@@ -797,7 +820,8 @@ Khi `DATABASE_URL` rỗng:
 - Session và conversation nằm trong dictionary của process.
 - Repository dùng `asyncio.Lock` và `deepcopy` để tránh mutation ngoài lock.
 - Dữ liệu mất khi restart.
-- Không phù hợp nhiều API replica vì mỗi replica có state riêng.
+- Không phù hợp nhiều API replica vì mỗi replica có state riêng; Redis Pub/Sub không thay thế
+  persistence chung.
 
 ### 14.2. SQLAlchemy
 
@@ -818,9 +842,10 @@ Hoặc:
 DATABASE_URL=postgresql+asyncpg://avatar:avatar@postgres:5432/avatar
 ```
 
-Schema session hiện dùng các cột `status`, `avatar_state` và `version`. `create_all()` không
-thay đổi table đã tồn tại; database được tạo bởi phiên bản cũ (cột `state`) phải được migrate
-hoặc reset trước khi chạy phiên bản này.
+`chat_messages` có `sequence` tăng theo session, `revision`, `message_status` và `updated_at`.
+Assistant draft được lưu ngay lúc bắt đầu và update bằng compare-and-swap trên revision.
+Schema session dùng `status`, `avatar_state` và `version`. `create_all()` không thay đổi table
+đã tồn tại; database cũ phải chạy `alembic upgrade head` trước khi chạy phiên bản này.
 
 Để scale production cần migration tool thay cho `create_all()` và cần xử lý ownership/locking
 session giữa nhiều API replica.
@@ -836,6 +861,7 @@ session giữa nhiều API replica.
 | `APP_PORT` | `8000` | Port Uvicorn trong process |
 | `APP_HTTP_PORT` | `8000` | Port publish ra host trong Compose |
 | `DATABASE_URL` | rỗng | Rỗng dùng memory; có giá trị dùng SQLAlchemy |
+| `AUTO_CREATE_SCHEMA` | `true` | Chỉ nên dùng local/fresh DB; production dùng Alembic |
 
 ### 15.2. Reply provider
 
@@ -869,6 +895,7 @@ session giữa nhiều API replica.
 | `LIVEKIT_RTC_UDP_PORT` | `7882` | WebRTC UDP host và container port |
 | `LIVEKIT_NODE_IP` | rỗng | IP SFU quảng bá cho browser ngoài host |
 | `REDIS_URL` | `redis://redis:6379/0` | Redis connection |
+| `REALTIME_EVENT_BUS` | `auto` | `auto`: Redis ở LiveKit, memory ở aiortc; hoặc ép `redis`/`memory` |
 | `RENDER_WORKER_ID` | `avatar-worker-1` | Stream/worker affinity |
 | `WORKER_ID` | từ `RENDER_WORKER_ID` | ID worker process |
 
@@ -923,7 +950,14 @@ LIVEKIT_HTTP_PORT=17880
 LIVEKIT_RTC_TCP_PORT=17881
 LIVEKIT_RTC_UDP_PORT=17882
 REDIS_URL=redis://redis:6379/0
+REALTIME_EVENT_BUS=auto
 RENDER_WORKER_ID=avatar-worker-1
+```
+
+Nếu dùng database persistent, migrate trước khi start API:
+
+```bash
+docker compose --profile livekit run --rm avatar-chat alembic upgrade head
 ```
 
 Nếu browser ở máy khác, lấy IP LAN của server:
@@ -1323,8 +1357,9 @@ Smoke test end-to-end cần xác nhận thêm ngoài automated test:
 - Room close dựa vào LiveKit tự cleanup.
 - Health endpoint chưa aggregate dependency readiness.
 - In-memory là mặc định và không hỗ trợ multi-replica API.
-- Session lock nằm trong process; optimistic version bảo vệ repository nhưng chưa thay thế
-  distributed ownership khi chạy nhiều API replica.
+- Redis Pub/Sub fan-out chat event giữa replica nhưng là kênh tạm thời; database cursor là
+  nguồn phục hồi khi client reconnect. Session lock nằm trong process; optimistic version
+  bảo vệ repository nhưng chưa thay distributed ownership khi hai replica đồng thời nhận chat.
 - Chưa TLS, TURN mặc định, quota hoặc production secret handling.
 - Frontend LiveKit SDK tải từ CDN và chưa pin/bundle version.
 - Chưa có metrics exporter/dashboard/alert.
@@ -1396,11 +1431,13 @@ Smoke test end-to-end cần xác nhận thêm ngoài automated test:
 3. LiveKit SFU là media router; worker không tạo peer riêng cho từng browser.
 4. Worker publish trực tiếp lên SFU để frame nặng không đi qua Core API.
 5. Redis Streams là command bus MVP vì giữ ordering theo worker stream và có ACK.
-6. Một stable audio/video track được giữ suốt session; state chỉ thay source/content.
-7. Audio sample timeline là master clock; video được pace theo configured FPS.
-8. Queue phải hữu hạn để kiểm soát latency và backpressure.
-9. Beep/flash và frame counter là observability nằm ngay trong media payload.
-10. Mọi external provider được thay bằng adapter và composition-root wiring.
+6. Redis Pub/Sub chỉ fan-out realtime; database `sequence:revision` mới là recovery source.
+7. Assistant streaming là persistent message snapshot với revision, không phải text delta.
+8. Một stable audio/video track được giữ suốt session; state chỉ thay source/content.
+9. Audio sample timeline là master clock; video được pace theo configured FPS.
+10. Queue phải hữu hạn để kiểm soát latency và backpressure.
+11. Beep/flash và frame counter là observability nằm ngay trong media payload.
+12. Mọi external provider được thay bằng adapter và composition-root wiring.
 
 Những quyết định này cho phép pipeline hiện tại tiếp tục chạy bằng clip demo, đồng thời mở
 đường thay clip decoder bằng model sinh avatar thật mà không viết lại session, chat, API hay

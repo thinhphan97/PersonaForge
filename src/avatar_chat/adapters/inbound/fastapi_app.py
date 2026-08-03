@@ -35,6 +35,7 @@ from avatar_chat.domain.errors import (
     AuthenticationRequired,
     ConcurrentSessionUpdate,
     DomainError,
+    InvalidInput,
     RateLimitExceeded,
     SessionBusy,
     SessionNotFound,
@@ -111,6 +112,9 @@ class PublicMessageResponse(BaseModel):
     role: str
     content: str
     created_at: datetime
+    sequence: int
+    revision: int
+    status: str
 
 
 class VisibilityRequest(BaseModel):
@@ -158,6 +162,9 @@ class MessageResponse(BaseModel):
     content: str
     created_at: datetime
     author_user_id: str | None
+    sequence: int
+    revision: int
+    status: str
 
 
 class ChatRequest(BaseModel):
@@ -268,8 +275,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.container = build_container(resolved)
         await app.state.container.startup()
-        yield
-        await app.state.container.shutdown()
+        try:
+            await app.state.container.realtime_events.subscribe(
+                lambda session_id, event: chat_hub.broadcast(
+                    session_id,
+                    event,
+                    app.state.container,
+                )
+            )
+            yield
+        finally:
+            await app.state.container.shutdown()
 
     app = FastAPI(title="Avatar Chat WebRTC", version="0.2.0", lifespan=lifespan)
     router = APIRouter(prefix="/api")
@@ -347,18 +363,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         session_id: str,
         container: ContainerDependency,
         limit: int = 100,
+        after: str | None = None,
     ) -> list[PublicMessageResponse]:
         assert container.get_public_conversation is not None
-        history = await container.get_public_conversation.execute(
-            session_id,
-            max(1, min(limit, 100)),
-        )
+        normalized_limit = max(1, min(limit, 100))
+        if after is None:
+            history = await container.get_public_conversation.execute(
+                session_id,
+                normalized_limit,
+            )
+        else:
+            sequence, revision = _parse_cursor(after)
+            history = await container.get_public_conversation.execute_after(
+                session_id,
+                sequence,
+                revision,
+                normalized_limit,
+            )
         return [
             PublicMessageResponse(
                 message_id=message.message_id,
                 role=message.role.value,
                 content=message.content,
                 created_at=message.created_at,
+                sequence=message.sequence,
+                revision=message.revision,
+                status=message.status.value,
             )
             for message in history
         ]
@@ -624,12 +654,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         auth: AuthDependency,
         container: ContainerDependency,
         limit: int = 50,
+        after: str | None = None,
     ) -> list[MessageResponse]:
-        history = await container.get_conversation.execute(
-            auth.user.user_id,
-            session_id,
-            min(limit, 100),
-        )
+        normalized_limit = max(1, min(limit, 100))
+        if after is None:
+            history = await container.get_conversation.execute(
+                auth.user.user_id,
+                session_id,
+                normalized_limit,
+            )
+        else:
+            sequence, revision = _parse_cursor(after)
+            history = await container.get_conversation.execute_after(
+                auth.user.user_id,
+                session_id,
+                sequence,
+                revision,
+                normalized_limit,
+            )
         return [_message_response(message) for message in history]
 
     @router.delete("/sessions/{session_id}", status_code=204)
@@ -669,7 +711,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     session_id,
                     request.content,
                 ):
-                    await chat_hub.broadcast(session_id, event, container)
+                    await container.realtime_events.publish(session_id, event)
         except WebSocketDisconnect:
             pass
         except DomainError as exc:
@@ -857,6 +899,10 @@ def _event_payload(event: ChatOutputEvent) -> dict[str, Any]:
         "type": event.type.value,
         "content": event.content,
         "avatar_state": event.avatar_state.value if event.avatar_state else None,
+        "message_id": event.message_id,
+        "sequence": event.sequence,
+        "revision": event.revision,
+        "author_user_id": event.author_user_id,
     }
 
 
@@ -867,4 +913,19 @@ def _message_response(message: ChatMessage) -> MessageResponse:
         content=message.content,
         created_at=message.created_at,
         author_user_id=message.author_user_id,
+        sequence=message.sequence,
+        revision=message.revision,
+        status=message.status.value,
     )
+
+
+def _parse_cursor(cursor: str) -> tuple[int, int]:
+    try:
+        sequence_text, revision_text = cursor.split(":", 1)
+        sequence = int(sequence_text)
+        revision = int(revision_text)
+    except (TypeError, ValueError) as exc:
+        raise InvalidInput("Invalid message cursor") from exc
+    if sequence < 0 or revision < 0:
+        raise InvalidInput("Invalid message cursor")
+    return sequence, revision

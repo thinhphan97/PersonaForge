@@ -1,10 +1,11 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime
 from typing import Protocol
 
 from avatar_chat.application.dto import (
     AccessTokenClaims,
     CharacterSummary,
+    ChatOutputEvent,
     MediaAccess,
     MediaProvisioning,
     RefreshTokenClaims,
@@ -40,9 +41,23 @@ class SessionRepository(Protocol):
 
 
 class ConversationRepository(Protocol):
-    async def append(self, message: ChatMessage) -> None: ...
+    async def append(self, message: ChatMessage) -> ChatMessage: ...
+
+    async def update(
+        self,
+        message: ChatMessage,
+        expected_revision: int,
+    ) -> ChatMessage: ...
 
     async def list_recent(self, session_id: str, limit: int) -> tuple[ChatMessage, ...]: ...
+
+    async def list_after(
+        self,
+        session_id: str,
+        sequence: int,
+        revision: int,
+        limit: int,
+    ) -> tuple[ChatMessage, ...]: ...
 
 
 class CharacterCatalogPort(Protocol):
@@ -112,6 +127,17 @@ class SecureTokenPort(Protocol):
     def generate(self) -> str: ...
 
     def hash(self, token: str) -> str: ...
+
+
+RealtimeEventHandler = Callable[[str, ChatOutputEvent], Awaitable[None]]
+
+
+class RealtimeEventBusPort(Protocol):
+    async def subscribe(self, handler: RealtimeEventHandler) -> None: ...
+
+    async def publish(self, session_id: str, event: ChatOutputEvent) -> None: ...
+
+    async def shutdown(self) -> None: ...
 
 
 class JwtTokenPort(Protocol):

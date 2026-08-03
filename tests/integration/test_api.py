@@ -89,6 +89,9 @@ async def test_auth_ownership_sharing_and_frontend() -> None:
             anonymous_public_messages = await guest.get(
                 f"/api/public/sessions/{session_id}/messages"
             )
+            invalid_message_cursor = await guest.get(
+                f"/api/public/sessions/{session_id}/messages?after=invalid"
+            )
             public_watch = await guest.get(f"/watch/{session_id}")
             logout = await guest.post("/api/auth/logout", headers=guest_headers)
             logged_out_me = await guest.get("/api/auth/me", headers=guest_headers)
@@ -116,6 +119,7 @@ async def test_auth_ownership_sharing_and_frontend() -> None:
     assert anonymous_public_view.status_code == 200
     assert anonymous_public_messages.status_code == 200
     assert anonymous_public_messages.json() == []
+    assert invalid_message_cursor.status_code == 400
     assert public_watch.status_code == 200
     assert "không cần đăng nhập" in public_watch.text
     assert 'href="/?login=1"' in public_watch.text

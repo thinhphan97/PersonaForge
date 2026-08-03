@@ -116,8 +116,10 @@ class ReplyChunk:
 class ChatEventType(str, Enum):
     AVATAR_STATE = "avatar_state"
     USER_MESSAGE = "user_message"
+    ASSISTANT_STARTED = "assistant_started"
     ASSISTANT_CHUNK = "assistant_chunk"
     ASSISTANT_COMPLETE = "assistant_complete"
+    ASSISTANT_FAILED = "assistant_failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,3 +127,7 @@ class ChatOutputEvent:
     type: ChatEventType
     content: str | None = None
     avatar_state: AvatarState | None = None
+    message_id: str | None = None
+    sequence: int | None = None
+    revision: int | None = None
+    author_user_id: str | None = None

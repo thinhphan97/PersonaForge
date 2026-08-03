@@ -46,6 +46,12 @@ Với database lâu dài, nên tắt `AUTO_CREATE_SCHEMA` và chạy migration:
 alembic upgrade head
 ```
 
+Trong Docker, image đã chứa cả `alembic.ini` và thư mục migration:
+
+```bash
+docker compose run --rm avatar-chat alembic upgrade head
+```
+
 ## Xác thực JWT và refresh token
 
 Frontend hỗ trợ register, login, logout và tự gia hạn đăng nhập. Server phát:
@@ -171,7 +177,9 @@ Chi tiết thiết kế và hướng tích hợp model thật nằm trong
 ## Giới hạn hiện tại
 
 - Nếu không cấu hình `DATABASE_URL`, session và lịch sử mất khi process restart.
-- Một session thuộc một process; chưa hỗ trợ scale ngang.
+- Chat event dùng Redis Pub/Sub trong LiveKit mode và browser tự catch-up từ database bằng
+  cursor `sequence:revision`. Muốn chạy nhiều API replica bắt buộc dùng database chung và
+  `REALTIME_EVENT_BUS=redis`; lock xử lý message vẫn chưa phải distributed lock.
 - Chưa có TURN mặc định; rate limit đăng nhập hiện lưu trong memory nên cần Redis khi scale.
 - Audio hiện là track im lặng 48 kHz; chưa có nội dung TTS.
 - Chế độ LiveKit hiện dùng một worker tĩnh qua `RENDER_WORKER_ID`; chưa có scheduler động.

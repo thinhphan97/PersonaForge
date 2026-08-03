@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -6,11 +7,12 @@ from avatar_chat.adapters.outbound.memory import (
     InMemoryConversationRepository,
     InMemorySessionRepository,
 )
-from avatar_chat.domain.errors import ConcurrentSessionUpdate
+from avatar_chat.domain.errors import ConcurrentMessageUpdate, ConcurrentSessionUpdate
 from avatar_chat.domain.models import (
     AvatarSession,
     AvatarState,
     ChatMessage,
+    ChatMessageStatus,
     ChatRole,
     SessionStatus,
     SessionVisibility,
@@ -54,6 +56,37 @@ async def test_conversation_repository_returns_recent_messages_in_order() -> Non
     messages = await repository.list_recent("s1", 2)
 
     assert [message.content for message in messages] == ["1", "2"]
+
+
+@pytest.mark.asyncio
+async def test_conversation_repository_updates_draft_and_resumes_from_cursor() -> None:
+    repository = InMemoryConversationRepository()
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    user = await repository.append(
+        ChatMessage("user", "s1", ChatRole.USER, "Hello", now)
+    )
+    draft = await repository.append(
+        ChatMessage(
+            "assistant",
+            "s1",
+            ChatRole.ASSISTANT,
+            "",
+            now,
+            status=ChatMessageStatus.STREAMING,
+        )
+    )
+    updated = await repository.update(
+        replace(draft, content="Xin chào", revision=1),
+        expected_revision=0,
+    )
+
+    after_user = await repository.list_after("s1", user.sequence, user.revision, 10)
+    after_draft = await repository.list_after("s1", draft.sequence, draft.revision, 10)
+
+    assert after_user == (updated,)
+    assert after_draft == (updated,)
+    with pytest.raises(ConcurrentMessageUpdate):
+        await repository.update(replace(updated, revision=2), expected_revision=0)
 
 
 @pytest.mark.asyncio

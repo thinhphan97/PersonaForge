@@ -13,6 +13,8 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install --no-cache-dir .
 
+COPY alembic.ini ./alembic.ini
+COPY migrations ./migrations
 COPY frontend ./frontend
 COPY scripts ./scripts
 RUN bash scripts/generate_demo_videos.sh

@@ -3,7 +3,8 @@ const status = document.querySelector("#public-status");
 const sessionId = decodeURIComponent(location.pathname.split("/").filter(Boolean).at(-1));
 let room;
 let conversationActive = true;
-const seenMessages = new Set();
+let messageCursor = { sequence: 0, revision: 0 };
+const messageStates = new Map();
 
 async function loadLiveKitClient() {
   if (window.LivekitClient) return;
@@ -61,7 +62,7 @@ async function syncConversation() {
   if (!conversationActive) return;
   try {
     const response = await fetch(
-      `/api/public/sessions/${encodeURIComponent(sessionId)}/messages?limit=100`,
+      `/api/public/sessions/${encodeURIComponent(sessionId)}/messages?limit=100&after=${messageCursor.sequence}:${messageCursor.revision}`,
     );
     if (response.status === 404) {
       conversationActive = false;
@@ -71,12 +72,31 @@ async function syncConversation() {
     const history = await response.json();
     const container = document.querySelector("#public-messages");
     for (const message of history) {
-      if (seenMessages.has(message.message_id)) continue;
-      seenMessages.add(message.message_id);
-      const bubble = document.createElement("div");
-      bubble.className = `message ${message.role}`;
-      bubble.textContent = message.content;
-      container.append(bubble);
+      const current = messageStates.get(message.message_id);
+      if (current && current.revision > message.revision) continue;
+      let bubble = current?.element;
+      if (!bubble) {
+        bubble = document.createElement("div");
+        bubble.className = `message ${message.role}`;
+        container.append(bubble);
+      }
+      bubble.dataset.sequence = String(message.sequence);
+      const next = [...container.querySelectorAll("[data-sequence]")].find(
+        (candidate) => (
+          candidate !== bubble && Number(candidate.dataset.sequence) > message.sequence
+        ),
+      );
+      container.insertBefore(bubble, next || null);
+      bubble.textContent = message.content || "";
+      bubble.classList.toggle("streaming", message.status === "streaming");
+      bubble.classList.toggle("failed", message.status === "failed");
+      messageStates.set(message.message_id, { revision: message.revision, element: bubble });
+      if (
+        message.sequence > messageCursor.sequence
+        || (message.sequence === messageCursor.sequence && message.revision > messageCursor.revision)
+      ) {
+        messageCursor = { sequence: message.sequence, revision: message.revision };
+      }
     }
     container.scrollTop = container.scrollHeight;
   } catch (error) {

@@ -65,3 +65,9 @@ class ConcurrentSessionUpdate(DomainError):
     def __init__(self, session_id: str) -> None:
         super().__init__(f"Session '{session_id}' was changed by another operation")
         self.session_id = session_id
+
+
+class ConcurrentMessageUpdate(DomainError):
+    def __init__(self, message_id: str) -> None:
+        super().__init__(f"Message '{message_id}' was changed by another operation")
+        self.message_id = message_id

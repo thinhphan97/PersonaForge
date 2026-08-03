@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from avatar_chat.domain.models import (
     AvatarSession,
     AvatarState,
     ChatMessage,
+    ChatMessageStatus,
     ChatRole,
     SessionStatus,
     SessionVisibility,
@@ -60,9 +62,29 @@ async def test_sqlalchemy_adapters_persist_session_and_messages(tmp_path: Path) 
 
     try:
         await sessions.save(session)
-        await conversations.append(message)
+        stored_message = await conversations.append(message)
+        draft = await conversations.append(
+            ChatMessage(
+                "m2",
+                "s1",
+                ChatRole.ASSISTANT,
+                "",
+                now,
+                status=ChatMessageStatus.STREAMING,
+            )
+        )
+        updated_draft = await conversations.update(
+            replace(draft, content="Hi", revision=1),
+            expected_revision=0,
+        )
         loaded_session = await sessions.get("s1")
         loaded_messages = await conversations.list_recent("s1", 10)
+        resumed = await conversations.list_after(
+            "s1",
+            stored_message.sequence,
+            stored_message.revision,
+            10,
+        )
     finally:
         await database.shutdown()
 
@@ -70,6 +92,9 @@ async def test_sqlalchemy_adapters_persist_session_and_messages(tmp_path: Path) 
     assert loaded_session.status is SessionStatus.READY
     assert loaded_session.avatar_state is AvatarState.IDLE
     assert loaded_messages[0].content == "Hello"
+    assert loaded_messages[1].content == updated_draft.content == "Hi"
+    assert loaded_messages[1].revision == 1
+    assert [message.message_id for message in resumed] == ["m2"]
 
 
 @pytest.mark.asyncio

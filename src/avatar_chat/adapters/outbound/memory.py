@@ -3,7 +3,7 @@ from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime
 
-from avatar_chat.domain.errors import ConcurrentSessionUpdate
+from avatar_chat.domain.errors import ConcurrentMessageUpdate, ConcurrentSessionUpdate
 from avatar_chat.domain.models import (
     AuditLog,
     AuthSession,
@@ -68,13 +68,49 @@ class InMemoryConversationRepository:
         self._items: dict[str, list[ChatMessage]] = defaultdict(list)
         self._lock = asyncio.Lock()
 
-    async def append(self, message: ChatMessage) -> None:
+    async def append(self, message: ChatMessage) -> ChatMessage:
         async with self._lock:
-            self._items[message.session_id].append(deepcopy(message))
+            stored = deepcopy(message)
+            stored.sequence = len(self._items[message.session_id]) + 1
+            stored.updated_at = stored.updated_at or stored.created_at
+            self._items[message.session_id].append(stored)
+            return deepcopy(stored)
+
+    async def update(
+        self,
+        message: ChatMessage,
+        expected_revision: int,
+    ) -> ChatMessage:
+        async with self._lock:
+            for index, current in enumerate(self._items.get(message.session_id, [])):
+                if current.message_id != message.message_id:
+                    continue
+                if current.revision != expected_revision:
+                    raise ConcurrentMessageUpdate(message.message_id)
+                stored = deepcopy(message)
+                self._items[message.session_id][index] = stored
+                return deepcopy(stored)
+        raise ConcurrentMessageUpdate(message.message_id)
 
     async def list_recent(self, session_id: str, limit: int) -> tuple[ChatMessage, ...]:
         async with self._lock:
             selected = self._items.get(session_id, [])[-max(0, limit) :]
+            return tuple(deepcopy(selected))
+
+    async def list_after(
+        self,
+        session_id: str,
+        sequence: int,
+        revision: int,
+        limit: int,
+    ) -> tuple[ChatMessage, ...]:
+        async with self._lock:
+            selected = [
+                message
+                for message in self._items.get(session_id, [])
+                if message.sequence > sequence
+                or (message.sequence == sequence and message.revision > revision)
+            ][: max(0, limit)]
             return tuple(deepcopy(selected))
 
 

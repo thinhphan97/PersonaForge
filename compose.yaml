@@ -32,6 +32,7 @@ services:
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REALTIME_EVENT_BUS: ${REALTIME_EVENT_BUS:-auto}
       RENDER_WORKER_ID: ${RENDER_WORKER_ID:-avatar-worker-1}
       AVATAR_CHARACTERS_ROOT: ${AVATAR_CHARACTERS_ROOT:-/app/assets/characters}
     restart: unless-stopped

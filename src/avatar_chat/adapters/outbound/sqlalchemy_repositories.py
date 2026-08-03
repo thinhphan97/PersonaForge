@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime
 
 from sqlalchemy import (
@@ -6,7 +7,9 @@ from sqlalchemy import (
     Integer,
     String,
     UniqueConstraint,
+    and_,
     delete,
+    or_,
     select,
     update,
 )
@@ -21,13 +24,14 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql import Select
 from sqlalchemy.sql.elements import ColumnElement
 
-from avatar_chat.domain.errors import ConcurrentSessionUpdate
+from avatar_chat.domain.errors import ConcurrentMessageUpdate, ConcurrentSessionUpdate
 from avatar_chat.domain.models import (
     AuditLog,
     AuthSession,
     AvatarSession,
     AvatarState,
     ChatMessage,
+    ChatMessageStatus,
     ChatRole,
     SessionShare,
     SessionStatus,
@@ -62,17 +66,22 @@ class AvatarSessionRow(Base):
 
 class ChatMessageRow(Base):
     __tablename__ = "chat_messages"
+    __table_args__ = (UniqueConstraint("session_id", "sequence"),)
 
     message_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     session_id: Mapped[str] = mapped_column(String(64), index=True)
     role: Mapped[str] = mapped_column(String(32))
     content: Mapped[str]
+    sequence: Mapped[int] = mapped_column(Integer)
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    message_status: Mapped[str] = mapped_column(String(16))
     author_user_id: Mapped[str | None] = mapped_column(
         String(64),
         ForeignKey("users.user_id"),
         nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class UserRow(Base):
@@ -261,41 +270,104 @@ class SqlAlchemyConversationRepository:
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
         self._sessions = sessions
 
-    async def append(self, message: ChatMessage) -> None:
+    async def append(self, message: ChatMessage) -> ChatMessage:
         async with self._sessions() as database:
+            await database.scalar(
+                select(AvatarSessionRow)
+                .where(AvatarSessionRow.session_id == message.session_id)
+                .with_for_update()
+            )
+            last_sequence = await database.scalar(
+                select(ChatMessageRow.sequence)
+                .where(ChatMessageRow.session_id == message.session_id)
+                .order_by(ChatMessageRow.sequence.desc())
+                .limit(1)
+            )
+            stored = replace(
+                message,
+                sequence=(last_sequence or 0) + 1,
+                updated_at=message.updated_at or message.created_at,
+            )
             database.add(
                 ChatMessageRow(
-                    message_id=message.message_id,
-                    session_id=message.session_id,
-                    role=message.role.value,
-                    content=message.content,
-                    author_user_id=message.author_user_id,
-                    created_at=message.created_at,
+                    message_id=stored.message_id,
+                    session_id=stored.session_id,
+                    role=stored.role.value,
+                    content=stored.content,
+                    sequence=stored.sequence,
+                    revision=stored.revision,
+                    message_status=stored.status.value,
+                    author_user_id=stored.author_user_id,
+                    created_at=stored.created_at,
+                    updated_at=stored.updated_at,
                 )
             )
             await database.commit()
+            return stored
+
+    async def update(
+        self,
+        message: ChatMessage,
+        expected_revision: int,
+    ) -> ChatMessage:
+        async with self._sessions() as database:
+            result = await database.execute(
+                update(ChatMessageRow)
+                .where(
+                    ChatMessageRow.message_id == message.message_id,
+                    ChatMessageRow.session_id == message.session_id,
+                    ChatMessageRow.revision == expected_revision,
+                )
+                .values(
+                    content=message.content,
+                    revision=message.revision,
+                    message_status=message.status.value,
+                    updated_at=message.updated_at or message.created_at,
+                )
+            )
+            if not isinstance(result, CursorResult) or result.rowcount != 1:
+                await database.rollback()
+                raise ConcurrentMessageUpdate(message.message_id)
+            await database.commit()
+            return message
 
     async def list_recent(self, session_id: str, limit: int) -> tuple[ChatMessage, ...]:
         statement = (
             select(ChatMessageRow)
             .where(ChatMessageRow.session_id == session_id)
-            .order_by(ChatMessageRow.created_at.desc(), ChatMessageRow.message_id.desc())
+            .order_by(ChatMessageRow.sequence.desc())
             .limit(max(0, limit))
         )
         async with self._sessions() as database:
             rows = list((await database.scalars(statement)).all())
         rows.reverse()
-        return tuple(
-            ChatMessage(
-                message_id=row.message_id,
-                session_id=row.session_id,
-                role=ChatRole(row.role),
-                content=row.content,
-                created_at=row.created_at,
-                author_user_id=row.author_user_id,
+        return tuple(_message_from_row(row) for row in rows)
+
+    async def list_after(
+        self,
+        session_id: str,
+        sequence: int,
+        revision: int,
+        limit: int,
+    ) -> tuple[ChatMessage, ...]:
+        statement = (
+            select(ChatMessageRow)
+            .where(
+                ChatMessageRow.session_id == session_id,
+                or_(
+                    ChatMessageRow.sequence > sequence,
+                    and_(
+                        ChatMessageRow.sequence == sequence,
+                        ChatMessageRow.revision > revision,
+                    ),
+                ),
             )
-            for row in rows
+            .order_by(ChatMessageRow.sequence.asc())
+            .limit(max(0, limit))
         )
+        async with self._sessions() as database:
+            rows = list((await database.scalars(statement)).all())
+        return tuple(_message_from_row(row) for row in rows)
 
 
 class SqlAlchemyUserRepository:
@@ -538,6 +610,21 @@ def _user_from_row(row: UserRow | None) -> User | None:
         password_hash=row.password_hash,
         status=UserStatus(row.status),
         created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _message_from_row(row: ChatMessageRow) -> ChatMessage:
+    return ChatMessage(
+        message_id=row.message_id,
+        session_id=row.session_id,
+        role=ChatRole(row.role),
+        content=row.content,
+        created_at=row.created_at,
+        author_user_id=row.author_user_id,
+        sequence=row.sequence,
+        revision=row.revision,
+        status=ChatMessageStatus(row.message_status),
         updated_at=row.updated_at,
     )
 

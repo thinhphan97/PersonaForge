@@ -16,6 +16,10 @@ from avatar_chat.adapters.outbound.memory import (
     InMemorySessionShareRepository,
     InMemoryUserRepository,
 )
+from avatar_chat.adapters.outbound.realtime_events import (
+    InMemoryRealtimeEventBus,
+    RedisRealtimeEventBus,
+)
 from avatar_chat.adapters.outbound.replies import DelayedReplyAdapter, ScriptedReplyAdapter
 from avatar_chat.adapters.outbound.sqlalchemy_repositories import (
     SqlAlchemyAuditLogRepository,
@@ -45,6 +49,7 @@ from avatar_chat.application.ports import (
     AuthSessionRepository,
     AvatarStreamPort,
     ConversationRepository,
+    RealtimeEventBusPort,
     ReplyGeneratorPort,
     SessionRepository,
     SessionShareRepository,
@@ -109,6 +114,7 @@ class Container:
     auth_cookie_secure: bool
     refresh_cookie_max_age: int
     allowed_origins: tuple[str, ...]
+    realtime_events: RealtimeEventBusPort
     provision_media: ProvisionMedia | None = None
     get_public_session: GetPublicSession | None = None
     get_public_conversation: GetPublicConversation | None = None
@@ -120,6 +126,7 @@ class Container:
             await lifecycle.startup()
 
     async def shutdown(self) -> None:
+        await self.realtime_events.shutdown()
         await self.avatar_stream.shutdown()
         for lifecycle in reversed(self.lifecycles):
             await lifecycle.shutdown()
@@ -219,6 +226,18 @@ def build_container(settings: Settings) -> Container:
     else:
         raise ValueError(f"Unsupported REPLY_PROVIDER: {settings.reply_provider}")
     replies = DelayedReplyAdapter(base_replies, settings.reply_chunk_delay_seconds)
+    use_redis_events = settings.realtime_event_bus == "redis" or (
+        settings.realtime_event_bus == "auto" and settings.media_provider == "livekit"
+    )
+    if settings.realtime_event_bus not in {"auto", "memory", "redis"}:
+        raise ValueError(
+            f"Unsupported REALTIME_EVENT_BUS: {settings.realtime_event_bus}"
+        )
+    realtime_events: RealtimeEventBusPort = (
+        RedisRealtimeEventBus(settings.redis_url)
+        if use_redis_events
+        else InMemoryRealtimeEventBus()
+    )
 
     return Container(
         register_user=RegisterUser(
@@ -293,6 +312,7 @@ def build_container(settings: Settings) -> Container:
         auth_cookie_secure=settings.auth_cookie_secure,
         refresh_cookie_max_age=int(refresh_ttl.total_seconds()),
         allowed_origins=settings.allowed_origins,
+        realtime_events=realtime_events,
         provision_media=provision_media,
         get_public_session=GetPublicSession(sessions),
         get_public_conversation=GetPublicConversation(sessions, conversations),

@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from avatar_chat.application.dto import (
     CharacterSummary,
@@ -34,6 +34,7 @@ from avatar_chat.domain.models import (
     AvatarSession,
     AvatarState,
     ChatMessage,
+    ChatMessageStatus,
     ChatRole,
     SessionAction,
     SessionStatus,
@@ -238,6 +239,7 @@ class HandleMessage:
                 session = await _require_session(self.sessions, session_id)
                 await self.access.require(actor_user_id, session, SessionAction.CHAT)
                 owns_avatar_state = False
+                assistant_message: ChatMessage | None = None
                 try:
                     await _transition_session(
                         self.sessions,
@@ -258,10 +260,14 @@ class HandleMessage:
                         created_at=self.clock.now(),
                         author_user_id=actor_user_id,
                     )
-                    await self.conversations.append(user_message)
+                    user_message = await self.conversations.append(user_message)
                     yield ChatOutputEvent(
                         type=ChatEventType.USER_MESSAGE,
                         content=normalized,
+                        message_id=user_message.message_id,
+                        sequence=user_message.sequence,
+                        revision=user_message.revision,
+                        author_user_id=actor_user_id,
                     )
                     yield ChatOutputEvent(
                         type=ChatEventType.AVATAR_STATE,
@@ -273,6 +279,23 @@ class HandleMessage:
                     history = await self.conversations.list_recent(
                         session_id,
                         self.history_limit,
+                    )
+                    assistant_message = await self.conversations.append(
+                        ChatMessage(
+                            message_id=self.ids.new_id(),
+                            session_id=session_id,
+                            role=ChatRole.ASSISTANT,
+                            content="",
+                            created_at=self.clock.now(),
+                            status=ChatMessageStatus.STREAMING,
+                        )
+                    )
+                    yield ChatOutputEvent(
+                        type=ChatEventType.ASSISTANT_STARTED,
+                        content="",
+                        message_id=assistant_message.message_id,
+                        sequence=assistant_message.sequence,
+                        revision=assistant_message.revision,
                     )
                     await _transition_session(
                         self.sessions,
@@ -292,28 +315,81 @@ class HandleMessage:
                     chunks: list[str] = []
                     async for chunk in self.replies.stream_reply(session_id, history):
                         chunks.append(chunk.text)
+                        expected_revision = assistant_message.revision
+                        assistant_message = replace(
+                            assistant_message,
+                            content="".join(chunks),
+                            revision=expected_revision + 1,
+                            updated_at=self.clock.now(),
+                        )
+                        assistant_message = await self.conversations.update(
+                            assistant_message,
+                            expected_revision,
+                        )
                         yield ChatOutputEvent(
                             type=ChatEventType.ASSISTANT_CHUNK,
-                            content=chunk.text,
+                            content=assistant_message.content,
+                            message_id=assistant_message.message_id,
+                            sequence=assistant_message.sequence,
+                            revision=assistant_message.revision,
                         )
 
                     full_reply = "".join(chunks).strip()
-                    if full_reply:
-                        await self.conversations.append(
-                            ChatMessage(
-                                message_id=self.ids.new_id(),
-                                session_id=session_id,
-                                role=ChatRole.ASSISTANT,
-                                content=full_reply,
-                                created_at=self.clock.now(),
+                    expected_revision = assistant_message.revision
+                    assistant_message = replace(
+                        assistant_message,
+                        content=full_reply,
+                        revision=expected_revision + 1,
+                        status=ChatMessageStatus.COMPLETE,
+                        updated_at=self.clock.now(),
+                    )
+                    assistant_message = await self.conversations.update(
+                        assistant_message,
+                        expected_revision,
+                    )
+                except BaseException as exc:
+                    failed_message: ChatMessage | None = None
+                    if (
+                        assistant_message is not None
+                        and assistant_message.status is ChatMessageStatus.STREAMING
+                    ):
+                        try:
+                            expected_revision = assistant_message.revision
+                            assistant_message = replace(
+                                assistant_message,
+                                revision=expected_revision + 1,
+                                status=ChatMessageStatus.FAILED,
+                                updated_at=self.clock.now(),
                             )
-                        )
-                except BaseException:
+                            failed_message = await self.conversations.update(
+                                assistant_message,
+                                expected_revision,
+                            )
+                        except BaseException:
+                            logger.exception(
+                                "Could not mark assistant message failed message=%s",
+                                assistant_message.message_id,
+                            )
                     if owns_avatar_state:
                         await self._restore_idle_safely(session)
+                    if isinstance(exc, Exception):
+                        if owns_avatar_state:
+                            yield ChatOutputEvent(
+                                type=ChatEventType.AVATAR_STATE,
+                                avatar_state=AvatarState.IDLE,
+                            )
+                        if failed_message is not None:
+                            yield ChatOutputEvent(
+                                type=ChatEventType.ASSISTANT_FAILED,
+                                content=failed_message.content,
+                                message_id=failed_message.message_id,
+                                sequence=failed_message.sequence,
+                                revision=failed_message.revision,
+                            )
                     raise
 
                 await self._restore_idle(session)
+                assert assistant_message is not None
                 yield ChatOutputEvent(
                     type=ChatEventType.AVATAR_STATE,
                     avatar_state=AvatarState.IDLE,
@@ -321,6 +397,9 @@ class HandleMessage:
                 yield ChatOutputEvent(
                     type=ChatEventType.ASSISTANT_COMPLETE,
                     content=full_reply,
+                    message_id=assistant_message.message_id,
+                    sequence=assistant_message.sequence,
+                    revision=assistant_message.revision,
                 )
         finally:
             if not lock.locked() and self._locks.get(session_id) is lock:
@@ -365,6 +444,23 @@ class GetConversation:
         await self.access.require(actor_user_id, session, SessionAction.VIEW)
         return await self.conversations.list_recent(session_id, limit)
 
+    async def execute_after(
+        self,
+        actor_user_id: str,
+        session_id: str,
+        sequence: int,
+        revision: int,
+        limit: int = 100,
+    ) -> tuple[ChatMessage, ...]:
+        session = await _require_session(self.sessions, session_id)
+        await self.access.require(actor_user_id, session, SessionAction.VIEW)
+        return await self.conversations.list_after(
+            session_id,
+            sequence,
+            revision,
+            limit,
+        )
+
 
 @dataclass(slots=True)
 class GetPublicConversation:
@@ -380,6 +476,23 @@ class GetPublicConversation:
         if session.visibility is not SessionVisibility.PUBLIC:
             raise SessionNotFound(session_id)
         return await self.conversations.list_recent(session_id, limit)
+
+    async def execute_after(
+        self,
+        session_id: str,
+        sequence: int,
+        revision: int,
+        limit: int = 100,
+    ) -> tuple[ChatMessage, ...]:
+        session = await _require_session(self.sessions, session_id)
+        if session.visibility is not SessionVisibility.PUBLIC:
+            raise SessionNotFound(session_id)
+        return await self.conversations.list_after(
+            session_id,
+            sequence,
+            revision,
+            limit,
+        )
 
 
 @dataclass(slots=True)

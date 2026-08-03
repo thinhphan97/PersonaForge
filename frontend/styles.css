@@ -65,6 +65,9 @@ header p { margin: 0; color: #9faaca; }
 .message { max-width: 85%; padding: 10px 13px; border-radius: 13px; white-space: pre-wrap; }
 .message.user { align-self: flex-end; background: #4567e8; }
 .message.assistant { align-self: flex-start; background: #232d49; }
+.message.streaming::after { content: " ▍"; color: #91a4ff; animation: pulse 1s infinite; }
+.message.failed { border: 1px solid #9f3d50; }
+@keyframes pulse { 50% { opacity: .25; } }
 #chat-form { display: flex; gap: 9px; padding: 14px; border-top: 1px solid #26304c; }
 #chat-form input { flex: 1; }
 
