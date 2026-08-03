@@ -574,9 +574,30 @@ function showPublicLink(publicPath) {
 }
 
 $("#copy-public-link").addEventListener("click", async () => {
-  await navigator.clipboard.writeText($("#public-link").value);
-  $("#copy-public-link").textContent = "Đã copy";
-  setTimeout(() => { $("#copy-public-link").textContent = "Copy URL"; }, 1200);
+  const button = $("#copy-public-link");
+  const field = $("#public-link");
+  let copied = false;
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(field.value);
+      copied = true;
+    } catch (error) {
+      console.warn("Clipboard API failed, using selection fallback", error);
+    }
+  }
+  if (!copied) {
+    try {
+      field.focus();
+      field.select();
+      field.setSelectionRange(0, field.value.length);
+      copied = document.execCommand("copy");
+      window.getSelection()?.removeAllRanges();
+    } catch (error) {
+      console.warn("Clipboard selection fallback failed", error);
+    }
+  }
+  button.textContent = copied ? "Đã copy" : "Nhấn Ctrl+C";
+  setTimeout(() => { button.textContent = "Copy URL"; }, 1600);
 });
 
 $("#share-session").addEventListener("click", async () => {
