@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from avatar_chat.application.dto import ChatOutputEvent, WebRtcOffer
 from avatar_chat.bootstrap.container import Container, build_container
 from avatar_chat.bootstrap.settings import Settings
-from avatar_chat.domain.errors import DomainError, SessionBusy
+from avatar_chat.domain.errors import ConcurrentSessionUpdate, DomainError, SessionBusy
 from avatar_chat.domain.models import AvatarState, ChatMessage
 
 
@@ -80,7 +80,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.exception_handler(DomainError)
     async def domain_error_handler(_request: Request, exc: DomainError) -> JSONResponse:
-        status = 409 if isinstance(exc, SessionBusy) else 400
+        status = (
+            409
+            if isinstance(exc, (SessionBusy, ConcurrentSessionUpdate))
+            else 400
+        )
         return JSONResponse(status_code=status, content={"detail": str(exc)})
 
     @router.get("/health")

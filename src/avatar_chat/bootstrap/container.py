@@ -139,7 +139,7 @@ def build_container(settings: Settings) -> Container:
             clock,
             thinking_min_duration_seconds=settings.thinking_min_duration_seconds,
         ),
-        get_conversation=GetConversation(conversations),
+        get_conversation=GetConversation(sessions, conversations),
         close_session=CloseSession(sessions, avatar_stream, clock, rooms),
         avatar_stream=avatar_stream,
         media_provider=settings.media_provider,

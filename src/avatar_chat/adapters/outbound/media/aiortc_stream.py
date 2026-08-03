@@ -99,7 +99,13 @@ class AiortcAvatarStreamAdapter:
             await self._discard_if_current(session_id, context)
             raise
 
-    async def change_state(self, session_id: str, state: AvatarState) -> None:
+    async def change_state(
+        self,
+        session_id: str,
+        state: AvatarState,
+        state_version: int,
+    ) -> None:
+        del state_version
         async with self._lock:
             context = self._peers.get(session_id)
         if context is None:

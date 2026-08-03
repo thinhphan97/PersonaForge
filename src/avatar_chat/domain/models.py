@@ -6,11 +6,16 @@ from avatar_chat.domain.errors import InvalidStateTransition
 
 
 class AvatarState(str, Enum):
-    CREATED = "created"
-    CONNECTED = "connected"
     IDLE = "idle"
     THINKING = "thinking"
     SPEAKING = "speaking"
+
+
+class SessionStatus(str, Enum):
+    CREATED = "created"
+    MEDIA_STARTING = "media_starting"
+    READY = "ready"
+    FAILED = "failed"
     CLOSED = "closed"
 
 
@@ -32,40 +37,79 @@ class ChatMessage:
 class AvatarSession:
     session_id: str
     character_id: str
-    state: AvatarState
+    status: SessionStatus
+    avatar_state: AvatarState
     created_at: datetime
     updated_at: datetime
+    version: int = 0
 
-    def connected(self, now: datetime) -> None:
-        self._transition(AvatarState.CONNECTED, {AvatarState.CREATED}, now)
-        self._transition(AvatarState.IDLE, {AvatarState.CONNECTED}, now)
+    def start_media(self, now: datetime) -> None:
+        self._transition_status(
+            SessionStatus.MEDIA_STARTING,
+            {SessionStatus.CREATED, SessionStatus.FAILED},
+            now,
+        )
+
+    def media_ready(self, now: datetime) -> None:
+        self._transition_status(
+            SessionStatus.READY,
+            {SessionStatus.MEDIA_STARTING},
+            now,
+        )
+        self.avatar_state = AvatarState.IDLE
+
+    def media_failed(self, now: datetime) -> None:
+        if self.status is SessionStatus.CLOSED:
+            return
+        self.status = SessionStatus.FAILED
+        self.avatar_state = AvatarState.IDLE
+        self.updated_at = now
 
     def start_thinking(self, now: datetime) -> None:
-        self._transition(AvatarState.THINKING, {AvatarState.IDLE}, now)
+        self._require_ready()
+        self._transition_avatar(AvatarState.THINKING, {AvatarState.IDLE}, now)
 
     def start_speaking(self, now: datetime) -> None:
-        self._transition(AvatarState.SPEAKING, {AvatarState.THINKING}, now)
+        self._require_ready()
+        self._transition_avatar(AvatarState.SPEAKING, {AvatarState.THINKING}, now)
 
     def become_idle(self, now: datetime) -> None:
-        self._transition(
+        self._require_ready()
+        self._transition_avatar(
             AvatarState.IDLE,
             {AvatarState.THINKING, AvatarState.SPEAKING},
             now,
         )
 
     def close(self, now: datetime) -> None:
-        if self.state is AvatarState.CLOSED:
+        if self.status is SessionStatus.CLOSED:
             return
-        self.state = AvatarState.CLOSED
+        self.status = SessionStatus.CLOSED
+        self.avatar_state = AvatarState.IDLE
         self.updated_at = now
 
-    def _transition(
+    def _require_ready(self) -> None:
+        if self.status is not SessionStatus.READY:
+            raise InvalidStateTransition(self.status, SessionStatus.READY)
+
+    def _transition_status(
+        self,
+        target: SessionStatus,
+        allowed: set[SessionStatus],
+        now: datetime,
+    ) -> None:
+        if self.status not in allowed:
+            raise InvalidStateTransition(self.status, target)
+        self.status = target
+        self.updated_at = now
+
+    def _transition_avatar(
         self,
         target: AvatarState,
         allowed: set[AvatarState],
         now: datetime,
     ) -> None:
-        if self.state not in allowed:
-            raise InvalidStateTransition(self.state, target)
-        self.state = target
+        if self.avatar_state not in allowed:
+            raise InvalidStateTransition(self.avatar_state, target)
+        self.avatar_state = target
         self.updated_at = now

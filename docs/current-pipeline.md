@@ -161,32 +161,39 @@ tests/                               # Unit, contract, integration, architecture
 
 ## 4. Domain và state machine
 
-`AvatarSession` là domain entity giữ trạng thái và thời gian cập nhật.
+`AvatarSession` là domain entity giữ riêng lifecycle của media và playback state. Tách hai
+khái niệm này tránh các transition mơ hồ như dùng cùng một enum cho `created` và `speaking`.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> created: POST /api/sessions
-    created --> connected: SDP negotiated hoặc media provisioned
-    connected --> idle: media initialized
-    idle --> thinking: nhận user message
-    thinking --> speaking: bắt đầu reply stream
-    thinking --> idle: lỗi/cleanup
-    speaking --> idle: reply hoàn tất hoặc lỗi
-    created --> closed: close
-    idle --> closed: close
-    thinking --> closed: close
-    speaking --> closed: close
-    closed --> [*]
+    state lifecycle {
+        [*] --> CREATED: POST /api/sessions
+        CREATED --> MEDIA_STARTING: provision/negotiate
+        MEDIA_STARTING --> READY: media thực sự sẵn sàng
+        MEDIA_STARTING --> FAILED: timeout/lỗi dependency
+        FAILED --> MEDIA_STARTING: retry provision
+        CREATED --> CLOSED: close
+        READY --> CLOSED: close
+        FAILED --> CLOSED: close
+    }
+    state playback {
+        [*] --> IDLE
+        IDLE --> THINKING: nhận user message
+        THINKING --> SPEAKING: bắt đầu reply stream
+        THINKING --> IDLE: lỗi/cleanup
+        SPEAKING --> IDLE: hoàn tất/lỗi
+    }
 ```
 
 Các invariant chính:
 
-- `connected()` chỉ hợp lệ từ `created`, sau đó lập tức đưa session về `idle`.
-- `start_thinking()` chỉ hợp lệ từ `idle`.
-- `start_speaking()` chỉ hợp lệ từ `thinking`.
-- `become_idle()` chỉ hợp lệ từ `thinking` hoặc `speaking`.
-- `close()` idempotent: gọi nhiều lần vẫn giữ `closed`.
+- Playback chỉ được đổi khi lifecycle là `READY`.
+- Provision idempotent: session đã `READY` chỉ cấp client token mới, không restart worker.
+- `MEDIA_STARTING` từ request khác trả conflict thay vì tạo hai publisher.
+- Repository dùng `version` làm optimistic concurrency control; stale update trả conflict.
+- `close()` idempotent: gọi nhiều lần vẫn giữ `CLOSED`.
 - Một `asyncio.Lock` theo `session_id` ngăn hai message chạy đồng thời.
+- Lock được bỏ khỏi lock map sau khi xử lý để không tăng bộ nhớ theo số session lịch sử.
 - Message thứ hai khi session đang xử lý trả domain error `SessionBusy`.
 - Nếu model/reply stream lỗi, use case cố gắng khôi phục cả domain và renderer về `idle`.
 
@@ -249,14 +256,18 @@ sequenceDiagram
     B->>A: WS /api/sessions/{id}/chat
     B->>A: POST /api/sessions/{id}/media/access
     A->>C: ProvisionMedia.execute(id)
+    C->>C: Persist MEDIA_STARTING (optimistic version)
     C->>C: Tạo client/publisher token
-    C->>R: avatar.session.start
-    C->>R: avatar.state.set(idle)
-    C-->>A: client MediaAccess
-    A-->>B: server_url + client token + room
+    C->>R: avatar.session.start(command_id)
     R-->>W: start command
     W->>L: Connect bằng publisher token
     W->>L: Publish avatar-audio + avatar-video
+    W->>R: avatar.session.ready(command_id)
+    R-->>C: correlated ready event
+    C->>C: Persist READY
+    C->>R: avatar.state.set(idle, state_version)
+    C-->>A: client MediaAccess
+    A-->>B: server_url + client token + room
     B->>L: Connect bằng subscriber token
     L-->>B: Subscribe audio + video WebRTC
 ```
@@ -444,7 +455,7 @@ Redis entry có field `data`, bên trong là JSON:
   "command_id": "<uuid>",
   "session_id": "<uuid>",
   "created_at": "2026-08-02T15:09:03+00:00",
-  "payload": {"state":"speaking"}
+  "payload": {"state":"speaking", "state_version":4}
 }
 ```
 
@@ -476,11 +487,13 @@ Nếu cùng `session_id` đã tồn tại, manager dừng session cũ trước k
 {
   "type": "avatar.state.set",
   "session_id": "<uuid>",
-  "payload": {"state":"idle|thinking|speaking"}
+  "payload": {"state":"idle|thinking|speaking", "state_version":5}
 }
 ```
 
-Worker chỉ cho phép ba render state trên. State command cho session chưa tồn tại bị lỗi.
+Worker chỉ cho phép ba render state trên. Worker bỏ qua command có `state_version` thấp hơn
+version đã áp dụng, nhờ đó retry hoặc delivery lệch thứ tự không làm avatar quay về state cũ.
+State command cho session chưa tồn tại bị lỗi.
 
 ### 8.3. `avatar.session.stop`
 
@@ -500,14 +513,16 @@ Stop idempotent nếu session không tồn tại.
 - Mỗi message được thử tối đa 3 lần.
 - Backoff lần lượt khoảng 250 ms và 500 ms.
 - Chỉ `XACK` sau khi dispatch thành công.
+- `command_id` được lưu 24 giờ; command đã xử lý được ACK mà không dispatch lại.
 - Message lỗi sau lần thứ ba vẫn nằm trong Pending Entries List.
 - Hiện chưa có dead-letter stream và chưa có job reclaim pending message.
 - Heartbeat key: `avatar:worker:{worker_id}`.
 - Heartbeat cập nhật mỗi 5 giây, TTL 15 giây.
 - Payload gồm `worker_id`, `status=ready`, `active_sessions`.
 
-Heartbeat hiện phục vụ quan sát; API chưa chờ heartbeat hoặc worker-ready event trước khi trả
-media access cho browser.
+Heartbeat hiện phục vụ quan sát. Với lệnh start, API chờ tối đa 15 giây cho event
+`avatar.session.ready` có cùng `command_id`; worker chỉ phát event này sau khi publish đủ hai
+track. Timeout/lỗi đưa lifecycle về `FAILED` và cleanup room/renderer.
 
 ## 9. Render Worker và LiveKit media pipeline
 
@@ -785,6 +800,10 @@ Hoặc:
 ```env
 DATABASE_URL=postgresql+asyncpg://avatar:avatar@postgres:5432/avatar
 ```
+
+Schema session hiện dùng các cột `status`, `avatar_state` và `version`. `create_all()` không
+thay đổi table đã tồn tại; database được tạo bởi phiên bản cũ (cột `state`) phải được migrate
+hoặc reset trước khi chạy phiên bản này.
 
 Để scale production cần migration tool thay cho `create_all()` và cần xử lý ownership/locking
 session giữa nhiều API replica.
@@ -1082,9 +1101,9 @@ Tìm:
 
 ### 19.7. Worker nhận state trước start
 
-Worker sẽ log `Render session not found` và retry. Kiểm tra ordering trên worker-specific stream
-và pending entries. Hiện chưa có worker-ready acknowledgement nên API có thể trả access trước
-khi publisher hoàn toàn ready.
+Worker sẽ log `Render session not found` và retry. Kiểm tra ordering trên worker-specific stream,
+`state_version` và pending entries. API chỉ gửi state idle sau correlated ready acknowledgement,
+nên lỗi này thường chỉ xuất hiện do command thủ công hoặc producer khác không theo protocol.
 
 ### 19.8. Inspect Redis
 
@@ -1104,7 +1123,7 @@ docker compose exec redis redis-cli XPENDING \
 | aiortc source đổi lúc recv | Generation loại frame cũ | Đã có unit/integration coverage |
 | aiortc peer failed/closed | Cleanup peer/tracks | Chưa reconnect tự động phía server |
 | Redis command lỗi | Retry 3 lần, không ACK | Chưa DLQ/reclaim/alert |
-| Render task crash | Xóa session khỏi manager, log exception | Chưa báo event về Core |
+| Render start lỗi | Phát correlated failed event, Core đặt `FAILED` và cleanup | Chưa tự reschedule |
 | Stop treo | Chờ 5 giây rồi cancel | Chưa force cleanup GPU resource cụ thể |
 | Worker chết | Heartbeat hết hạn sau tối đa 15 giây | API chưa reschedule session |
 | LiveKit room close | Client/worker SDK reconnect tùy trạng thái | Chưa session recovery orchestration |
@@ -1277,13 +1296,14 @@ Smoke test end-to-end cần xác nhận thêm ngoài automated test:
 - Video vẫn là ba clip thu sẵn, chưa có avatar generation/lip-sync.
 - Audio là silence/beep, chưa có TTS nội dung.
 - Một worker ID tĩnh, chưa scheduler/capacity management.
-- Chưa có event xác nhận media worker ready cho Core.
+- Worker-ready/error đã correlation theo `command_id`; chưa có scheduler để reschedule.
 - Command pending chưa được reclaim và chưa có DLQ.
 - Publisher token nằm trong Redis command.
 - Room close dựa vào LiveKit tự cleanup.
 - Health endpoint chưa aggregate dependency readiness.
 - In-memory là mặc định và không hỗ trợ multi-replica API.
-- Session lock nằm trong process, không phải distributed lock.
+- Session lock nằm trong process; optimistic version bảo vệ repository nhưng chưa thay thế
+  distributed ownership khi chạy nhiều API replica.
 - Chưa auth, TLS, TURN mặc định, quota hoặc production secret handling.
 - Frontend LiveKit SDK tải từ CDN và chưa pin/bundle version.
 - Chưa có metrics exporter/dashboard/alert.
@@ -1293,9 +1313,9 @@ Smoke test end-to-end cần xác nhận thêm ngoài automated test:
 
 ### Giai đoạn A — làm chắc MVP hiện tại
 
-- Thêm worker-ready/error event.
-- Thêm startup timeout và UI error rõ ràng.
-- Thêm pending reclaim, DLQ và command idempotency.
+- Hoàn thiện pending reclaim và DLQ (ready/error, timeout và idempotency đã có).
+- Thêm transactional outbox để commit domain state và publish command nguyên tử.
+- Thêm migration chính thức cho schema `status`, `avatar_state`, `version`.
 - Bundle/pin LiveKit JS SDK.
 - Thêm readiness check Redis/worker/LiveKit.
 - Bổ sung integration test Redis command → worker session.

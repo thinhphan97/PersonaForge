@@ -2,6 +2,7 @@ import asyncio
 from collections import defaultdict
 from copy import deepcopy
 
+from avatar_chat.domain.errors import ConcurrentSessionUpdate
 from avatar_chat.domain.models import AvatarSession, ChatMessage
 
 
@@ -15,8 +16,19 @@ class InMemorySessionRepository:
             session = self._items.get(session_id)
             return deepcopy(session) if session else None
 
-    async def save(self, session: AvatarSession) -> None:
+    async def save(
+        self,
+        session: AvatarSession,
+        expected_version: int | None = None,
+    ) -> None:
         async with self._lock:
+            current = self._items.get(session.session_id)
+            if expected_version is not None:
+                if current is None or current.version != expected_version:
+                    raise ConcurrentSessionUpdate(session.session_id)
+                session.version = expected_version + 1
+            elif current is not None:
+                raise ConcurrentSessionUpdate(session.session_id)
             self._items[session.session_id] = deepcopy(session)
 
     async def delete(self, session_id: str) -> None:
@@ -37,4 +49,3 @@ class InMemoryConversationRepository:
         async with self._lock:
             selected = self._items.get(session_id, [])[-max(0, limit) :]
             return tuple(deepcopy(selected))
-

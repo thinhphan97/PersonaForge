@@ -1,6 +1,7 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, String, delete, select
+from sqlalchemy import DateTime, Integer, String, delete, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -9,7 +10,14 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from avatar_chat.domain.models import AvatarSession, AvatarState, ChatMessage, ChatRole
+from avatar_chat.domain.errors import ConcurrentSessionUpdate
+from avatar_chat.domain.models import (
+    AvatarSession,
+    AvatarState,
+    ChatMessage,
+    ChatRole,
+    SessionStatus,
+)
 
 
 class Base(DeclarativeBase):
@@ -21,7 +29,9 @@ class AvatarSessionRow(Base):
 
     session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     character_id: Mapped[str] = mapped_column(String(100))
-    state: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(32))
+    avatar_state: Mapped[str] = mapped_column(String(32))
+    version: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
@@ -61,23 +71,53 @@ class SqlAlchemySessionRepository:
             return AvatarSession(
                 session_id=row.session_id,
                 character_id=row.character_id,
-                state=AvatarState(row.state),
+                status=SessionStatus(row.status),
+                avatar_state=AvatarState(row.avatar_state),
                 created_at=row.created_at,
                 updated_at=row.updated_at,
+                version=row.version,
             )
 
-    async def save(self, session: AvatarSession) -> None:
+    async def save(
+        self,
+        session: AvatarSession,
+        expected_version: int | None = None,
+    ) -> None:
         async with self._sessions() as database:
-            await database.merge(
-                AvatarSessionRow(
-                    session_id=session.session_id,
-                    character_id=session.character_id,
-                    state=session.state.value,
-                    created_at=session.created_at,
-                    updated_at=session.updated_at,
+            if expected_version is None:
+                database.add(
+                    AvatarSessionRow(
+                        session_id=session.session_id,
+                        character_id=session.character_id,
+                        status=session.status.value,
+                        avatar_state=session.avatar_state.value,
+                        version=session.version,
+                        created_at=session.created_at,
+                        updated_at=session.updated_at,
+                    )
                 )
-            )
+            else:
+                result = await database.execute(
+                    update(AvatarSessionRow)
+                    .where(
+                        AvatarSessionRow.session_id == session.session_id,
+                        AvatarSessionRow.version == expected_version,
+                    )
+                    .values(
+                        character_id=session.character_id,
+                        status=session.status.value,
+                        avatar_state=session.avatar_state.value,
+                        version=expected_version + 1,
+                        updated_at=session.updated_at,
+                    )
+                )
+                cursor = result  # SQLAlchemy returns CursorResult for UPDATE.
+                if not isinstance(cursor, CursorResult) or cursor.rowcount != 1:
+                    await database.rollback()
+                    raise ConcurrentSessionUpdate(session.session_id)
             await database.commit()
+            if expected_version is not None:
+                session.version = expected_version + 1
 
     async def delete(self, session_id: str) -> None:
         async with self._sessions() as database:

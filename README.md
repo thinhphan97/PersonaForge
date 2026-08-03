@@ -128,5 +128,6 @@ Chi tiết thiết kế và hướng tích hợp model thật nằm trong
 - Một session thuộc một process; chưa hỗ trợ scale ngang.
 - Chưa có authentication và TURN mặc định.
 - Audio hiện là track im lặng 48 kHz; chưa có nội dung TTS.
-- Chế độ LiveKit hiện dùng một worker tĩnh qua `RENDER_WORKER_ID`; chưa có scheduler động
-  hoặc event xác nhận worker ready.
+- Chế độ LiveKit hiện dùng một worker tĩnh qua `RENDER_WORKER_ID`; chưa có scheduler động.
+- Redis Streams chưa có pending reclaim/DLQ; readiness đã được xác nhận theo `command_id`
+  sau khi worker publish đủ audio và video track.

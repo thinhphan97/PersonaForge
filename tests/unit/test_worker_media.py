@@ -2,6 +2,7 @@ from avatar_chat.adapters.outbound.media.recorded_source import RecordedClipCata
 from avatar_chat.bootstrap.settings import Settings
 from avatar_chat.domain.models import AvatarState
 from avatar_worker.livekit_session import (
+    LiveKitRenderSession,
     _audio_frame,
     _to_livekit_video_frame,
     _video_publish_options,
@@ -87,3 +88,18 @@ def test_worker_keeps_custom_resolution_after_the_first_frame() -> None:
 
     assert {(frame.width, frame.height) for frame in frames} == {expected_size}
     assert all(len(frame.data) == expected_size[0] * expected_size[1] * 4 for frame in frames)
+
+
+def test_worker_ignores_out_of_order_avatar_state() -> None:
+    session = LiveKitRenderSession(
+        session_id="session-1",
+        livekit_url="ws://media.test",
+        publisher_token="token",
+        settings=WorkerSettings.from_env(),
+    )
+
+    session.set_state(AvatarState.SPEAKING, state_version=5)
+    session.set_state(AvatarState.IDLE, state_version=4)
+
+    assert session._state is AvatarState.SPEAKING
+    assert session._state_version == 5

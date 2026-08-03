@@ -20,3 +20,8 @@ class SessionBusy(DomainError):
         super().__init__(f"Session '{session_id}' is already handling a message")
         self.session_id = session_id
 
+
+class ConcurrentSessionUpdate(DomainError):
+    def __init__(self, session_id: str) -> None:
+        super().__init__(f"Session '{session_id}' was changed by another operation")
+        self.session_id = session_id

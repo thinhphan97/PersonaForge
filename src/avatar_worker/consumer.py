@@ -35,6 +35,11 @@ class RenderSessionManager:
             self._session_done(session_id, completed)
 
         task.add_done_callback(on_done)
+        try:
+            await session.wait_ready()
+        except BaseException:
+            await self.stop(session_id)
+            raise
 
     async def set_state(self, command: dict[str, Any]) -> None:
         session_id = _required_string(command, "session_id")
@@ -42,7 +47,10 @@ class RenderSessionManager:
         context = self._sessions.get(session_id)
         if context is None:
             raise RuntimeError(f"Render session not found: {session_id}")
-        context[0].set_state(AvatarState(_required_string(payload, "state")))
+        context[0].set_state(
+            AvatarState(_required_string(payload, "state")),
+            _required_int(payload, "state_version"),
+        )
 
     async def stop(self, session_id: str) -> None:
         context = self._sessions.pop(session_id, None)
@@ -109,6 +117,7 @@ class RedisRenderWorker:
         message_id: str,
         fields: dict[str, Any],
     ) -> None:
+        command: dict[str, Any] | None = None
         for attempt in range(1, 4):
             try:
                 raw = fields.get("data")
@@ -117,7 +126,13 @@ class RedisRenderWorker:
                 command = json.loads(raw)
                 if not isinstance(command, dict):
                     raise ValueError("Redis command data must be an object")
+                command_id = _required_string(command, "command_id")
+                processed_key = f"avatar:command:processed:{command_id}"
+                if await self._redis.exists(processed_key):
+                    await self._redis.xack(self._stream, self._group, message_id)
+                    return
                 await self._dispatch(command)
+                await self._redis.set(processed_key, "1", ex=86_400)
                 await self._redis.xack(self._stream, self._group, message_id)
                 return
             except Exception:
@@ -128,17 +143,47 @@ class RedisRenderWorker:
                 )
                 if attempt < 3:
                     await asyncio.sleep(0.25 * 2 ** (attempt - 1))
+        if command is not None:
+            await self._publish_event(
+                command,
+                "avatar.session.failed",
+                detail="Render command failed after three attempts",
+            )
 
     async def _dispatch(self, command: dict[str, Any]) -> None:
         command_type = _required_string(command, "type")
         if command_type == "avatar.session.start":
             await self._manager.start(command)
+            await self._publish_event(command, "avatar.session.ready")
         elif command_type == "avatar.state.set":
             await self._manager.set_state(command)
         elif command_type == "avatar.session.stop":
             await self._manager.stop(_required_string(command, "session_id"))
+            await self._publish_event(command, "avatar.session.stopped")
         else:
             raise ValueError(f"Unsupported render command: {command_type}")
+
+    async def _publish_event(
+        self,
+        command: dict[str, Any],
+        event_type: str,
+        detail: str | None = None,
+    ) -> None:
+        session_id = _required_string(command, "session_id")
+        event = {
+            "schema_version": 1,
+            "type": event_type,
+            "session_id": session_id,
+            "command_id": command.get("command_id"),
+        }
+        if detail is not None:
+            event["detail"] = detail
+        await self._redis.xadd(
+            f"avatar:events:{session_id}",
+            {"data": json.dumps(event)},
+            maxlen=100,
+            approximate=True,
+        )
 
     async def _ensure_group(self) -> None:
         try:
@@ -176,5 +221,12 @@ def _required_string(data: dict[str, Any], key: str) -> str:
 def _required_mapping(data: dict[str, Any], key: str) -> dict[str, Any]:
     value = data.get(key)
     if not isinstance(value, dict):
+        raise ValueError(f"Missing or invalid '{key}'")
+    return value
+
+
+def _required_int(data: dict[str, Any], key: str) -> int:
+    value = data.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
         raise ValueError(f"Missing or invalid '{key}'")
     return value

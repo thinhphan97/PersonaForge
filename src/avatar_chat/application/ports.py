@@ -14,7 +14,11 @@ from avatar_chat.domain.models import AvatarSession, AvatarState, ChatMessage
 class SessionRepository(Protocol):
     async def get(self, session_id: str) -> AvatarSession | None: ...
 
-    async def save(self, session: AvatarSession) -> None: ...
+    async def save(
+        self,
+        session: AvatarSession,
+        expected_version: int | None = None,
+    ) -> None: ...
 
     async def delete(self, session_id: str) -> None: ...
 
@@ -36,7 +40,12 @@ class AvatarStreamPort(Protocol):
 
     async def negotiate(self, session_id: str, offer: WebRtcOffer) -> WebRtcAnswer: ...
 
-    async def change_state(self, session_id: str, state: AvatarState) -> None: ...
+    async def change_state(
+        self,
+        session_id: str,
+        state: AvatarState,
+        state_version: int,
+    ) -> None: ...
 
     async def close(self, session_id: str) -> None: ...
 

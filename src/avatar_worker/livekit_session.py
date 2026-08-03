@@ -30,20 +30,59 @@ class LiveKitRenderSession:
         self._publisher_token = publisher_token
         self._settings = settings
         self._state = AvatarState.IDLE
+        self._state_version = -1
         self._stop = asyncio.Event()
+        self._ready = asyncio.Event()
+        self._finished = asyncio.Event()
+        self._startup_error: Exception | None = None
 
-    def set_state(self, state: AvatarState) -> None:
+    def set_state(self, state: AvatarState, state_version: int) -> None:
         if state not in {
             AvatarState.IDLE,
             AvatarState.THINKING,
             AvatarState.SPEAKING,
         }:
             raise ValueError(f"Unsupported render state: {state.value}")
+        if state_version <= self._state_version:
+            logger.info(
+                "Ignoring stale avatar state session=%s version=%s current_version=%s",
+                self.session_id,
+                state_version,
+                self._state_version,
+            )
+            return
         self._state = state
-        logger.info("Avatar state session=%s state=%s", self.session_id, state.value)
+        self._state_version = state_version
+        logger.info(
+            "Avatar state session=%s state=%s version=%s",
+            self.session_id,
+            state.value,
+            state_version,
+        )
 
     async def stop(self) -> None:
         self._stop.set()
+
+    async def wait_ready(self, timeout_seconds: float = 15) -> None:
+        ready = asyncio.create_task(self._ready.wait())
+        finished = asyncio.create_task(self._finished.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {ready, finished},
+                timeout=timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if ready in done and self._ready.is_set():
+                return
+            if self._startup_error is not None:
+                raise RuntimeError("LiveKit publisher failed to start") from self._startup_error
+            if finished in done:
+                raise RuntimeError("LiveKit publisher stopped before becoming ready")
+            raise TimeoutError(f"LiveKit publisher was not ready after {timeout_seconds}s")
+        finally:
+            ready.cancel()
+            finished.cancel()
+            await asyncio.gather(ready, finished, return_exceptions=True)
 
     async def run(self) -> None:
         settings = self._settings
@@ -77,9 +116,14 @@ class LiveKitRenderSession:
                 video_track,
                 _video_publish_options(settings),
             )
+            self._ready.set()
             logger.info("LiveKit media ready session=%s", self.session_id)
             await self._publish_timeline(synchronizer, recorded)
+        except Exception as exc:
+            self._startup_error = exc
+            raise
         finally:
+            self._finished.set()
             recorded.close()
             await synchronizer.aclose()
             with contextlib.suppress(Exception):
