@@ -2,12 +2,19 @@ import httpx
 import pytest
 
 from avatar_chat.adapters.inbound.fastapi_app import create_app
+from avatar_chat.application.dto import ChatEventType, ChatOutputEvent
 
 
 @pytest.mark.asyncio
 async def test_auth_ownership_sharing_and_frontend() -> None:
     app = create_app()
     async with app.router.lifespan_context(app):
+        realtime_events: list[tuple[str, ChatOutputEvent]] = []
+
+        async def capture_event(session_id: str, event: ChatOutputEvent) -> None:
+            realtime_events.append((session_id, event))
+
+        await app.state.container.realtime_events.subscribe(capture_event)
         transport = httpx.ASGITransport(app=app)
         async with (
             httpx.AsyncClient(transport=transport, base_url="http://test") as owner,
@@ -64,10 +71,18 @@ async def test_auth_ownership_sharing_and_frontend() -> None:
             allowed_history = await guest.get(
                 f"/api/sessions/{session_id}/messages", headers=guest_headers
             )
+            viewer_snapshot = await guest.get(
+                f"/api/sessions/{session_id}",
+                headers=guest_headers,
+            )
             upgraded_share = await owner.post(
                 f"/api/sessions/{session_id}/shares",
                 headers=owner_headers,
                 json={"username": "guest", "permission": "interactor"},
+            )
+            interactor_snapshot = await guest.get(
+                f"/api/sessions/{session_id}",
+                headers=guest_headers,
             )
             shared_sessions = await guest.get(
                 "/api/sessions/shared-with-me",
@@ -78,6 +93,16 @@ async def test_auth_ownership_sharing_and_frontend() -> None:
                 headers=guest_headers,
             )
             made_public = await owner.patch(
+                f"/api/sessions/{session_id}/visibility",
+                headers=owner_headers,
+                json={"visibility": "public"},
+            )
+            made_private = await owner.patch(
+                f"/api/sessions/{session_id}/visibility",
+                headers=owner_headers,
+                json={"visibility": "private"},
+            )
+            made_public_again = await owner.patch(
                 f"/api/sessions/{session_id}/visibility",
                 headers=owner_headers,
                 json={"visibility": "public"},
@@ -136,10 +161,19 @@ async def test_auth_ownership_sharing_and_frontend() -> None:
     assert denied_history.status_code == 403
     assert shared.json()["permission"] == "viewer"
     assert allowed_history.status_code == 200
+    assert viewer_snapshot.json()["access_role"] == "viewer"
+    assert viewer_snapshot.json()["can_chat"] is False
     assert upgraded_share.json()["permission"] == "interactor"
+    assert interactor_snapshot.json()["access_role"] == "interactor"
+    assert interactor_snapshot.json()["can_chat"] is True
     assert shared_sessions.json()[0]["can_chat"] is True
     assert denied_close.status_code == 403
     assert made_public.json()["visibility"] == "public"
+    assert made_public.json()["version"] > 0
+    assert made_private.json()["visibility"] == "private"
+    assert made_private.json()["public_url"] is None
+    assert made_private.json()["version"] > made_public.json()["version"]
+    assert made_public_again.json()["version"] > made_private.json()["version"]
     assert made_public.json()["public_url"] == f"/watch/{session_id}"
     assert anonymous_public_view.status_code == 200
     assert anonymous_public_messages.status_code == 200
@@ -162,6 +196,23 @@ async def test_auth_ownership_sharing_and_frontend() -> None:
     assert logout.status_code == 204
     assert logged_out_me.status_code == 401
     assert "Avatar WebRTC Chat" in frontend.text
+    event_types = [
+        event.type
+        for event_session, event in realtime_events
+        if event_session == session_id
+    ]
+    assert event_types.count(ChatEventType.SESSION_SHARES_UPDATED) == 2
+    assert event_types.count(ChatEventType.SESSION_UPDATED) == 3
+    assert ChatEventType.SESSION_CLOSED in event_types
+    visibility_event = max(
+        (
+            event
+            for _, event in realtime_events
+            if event.type is ChatEventType.SESSION_UPDATED
+        ),
+        key=lambda event: event.session_version or 0,
+    )
+    assert visibility_event.session_version == made_public_again.json()["version"]
 
 
 @pytest.mark.asyncio

@@ -57,6 +57,7 @@ from avatar_chat.application.ports import (
 )
 from avatar_chat.application.session_access import (
     ChangeSessionVisibility,
+    GetSessionSummary,
     ListOwnedSessions,
     ListPublicSessions,
     ListSessionShares,
@@ -107,6 +108,7 @@ class Container:
     list_shared_sessions: ListSharedSessions
     list_public_sessions: ListPublicSessions
     change_visibility: ChangeSessionVisibility
+    get_session_summary: GetSessionSummary
     share_session: ShareSession
     list_session_shares: ListSessionShares
     revoke_session_share: RevokeSessionShare
@@ -301,6 +303,7 @@ def build_container(settings: Settings) -> Container:
         change_visibility=ChangeSessionVisibility(
             sessions, access, audit, ids, clock, shares, rooms
         ),
+        get_session_summary=GetSessionSummary(sessions, shares, access),
         share_session=ShareSession(
             sessions, users, shares, access, audit, ids, clock
         ),

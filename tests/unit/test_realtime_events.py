@@ -71,6 +71,15 @@ async def test_chat_hub_broadcasts_to_all_authorized_local_clients() -> None:
     assert revoked.payloads == []
     assert revoked.closed is True
 
+    update = ChatOutputEvent(
+        ChatEventType.SESSION_UPDATED,
+        session_version=7,
+    )
+    await hub.broadcast("session-1", update, container)  # type: ignore[arg-type]
+    assert first.payloads[-1]["type"] == "session_updated"
+    assert first.payloads[-1]["session_version"] == 7
+    assert second.payloads[-1] == first.payloads[-1]
+
 
 @pytest.mark.asyncio
 async def test_in_memory_event_bus_fans_out_and_event_serialization_round_trips() -> None:
@@ -91,7 +100,12 @@ async def test_in_memory_event_bus_fans_out_and_event_serialization_round_trips(
     await bus.publish("session-1", event)
     restored = _event_from_payload(_event_payload(event))
     closed = ChatOutputEvent(ChatEventType.SESSION_CLOSED)
+    session_update = ChatOutputEvent(
+        ChatEventType.SESSION_UPDATED,
+        session_version=9,
+    )
 
     assert received == [("session-1", event)]
     assert restored == event
     assert _event_from_payload(_event_payload(closed)) == closed
+    assert _event_from_payload(_event_payload(session_update)) == session_update

@@ -91,6 +91,7 @@ class CreateSessionResponse(BaseModel):
     media_access_url: str | None
     chat_url: str
     public_url: str | None
+    version: int
 
 
 class SessionResponse(BaseModel):
@@ -103,6 +104,7 @@ class SessionResponse(BaseModel):
     can_chat: bool
     media_provider: str
     public_url: str | None
+    version: int
 
 
 class PublicSessionResponse(BaseModel):
@@ -110,6 +112,7 @@ class PublicSessionResponse(BaseModel):
     character_id: str
     status: str
     media_provider: str
+    version: int
 
 
 class PublicMessageResponse(BaseModel):
@@ -317,18 +320,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.exception_handler(DomainError)
     async def domain_error_handler(_request: Request, exc: DomainError) -> JSONResponse:
         headers: dict[str, str] = {}
-        if isinstance(exc, (AuthenticationRequired, AuthenticationFailed)):
+        if isinstance(exc, AuthenticationRequired | AuthenticationFailed):
             status = 401
             headers["WWW-Authenticate"] = "Bearer"
         elif isinstance(exc, AccessDenied):
             status = 403
         elif isinstance(exc, RateLimitExceeded):
             status = 429
-        elif isinstance(exc, (SessionNotFound, UserNotFound)):
+        elif isinstance(exc, SessionNotFound | UserNotFound):
             status = 404
         elif isinstance(
             exc,
-            (SessionBusy, SessionClosed, ConcurrentSessionUpdate, UserAlreadyExists),
+            SessionBusy | SessionClosed | ConcurrentSessionUpdate | UserAlreadyExists,
         ):
             status = 409
         else:
@@ -358,6 +361,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             character_id=session.character_id,
             status=session.status.value,
             media_provider=container.media_provider,
+            version=session.version,
         )
 
     @router.get(
@@ -550,6 +554,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             container.media_provider,
         )
 
+    @router.get("/sessions/{session_id}", response_model=SessionResponse)
+    async def session_snapshot(
+        session_id: str,
+        auth: AuthDependency,
+        container: ContainerDependency,
+    ) -> SessionResponse:
+        return _session_response(
+            await container.get_session_summary.execute(
+                auth.user.user_id,
+                session_id,
+            ),
+            container.media_provider,
+        )
+
     @router.patch("/sessions/{session_id}/visibility", response_model=SessionResponse)
     async def change_visibility(
         session_id: str,
@@ -562,6 +580,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             session_id,
             body.visibility,
         )
+        await _publish_realtime_event_safely(
+            container,
+            session_id,
+            ChatOutputEvent(
+                type=ChatEventType.SESSION_UPDATED,
+                session_version=summary.version,
+            ),
+        )
         return _session_response(summary, container.media_provider)
 
     @router.post("/sessions/{session_id}/shares", response_model=ShareResponse)
@@ -571,14 +597,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         auth: MutationAuthDependency,
         container: ContainerDependency,
     ) -> ShareResponse:
-        return _share_response(
-            await container.share_session.execute(
-                auth.user.user_id,
-                session_id,
-                body.username,
-                body.permission,
-            )
+        share = await container.share_session.execute(
+            auth.user.user_id,
+            session_id,
+            body.username,
+            body.permission,
         )
+        await _publish_realtime_event_safely(
+            container,
+            session_id,
+            ChatOutputEvent(type=ChatEventType.SESSION_SHARES_UPDATED),
+        )
+        return _share_response(share)
 
     @router.get("/sessions/{session_id}/shares", response_model=list[ShareResponse])
     async def list_shares(
@@ -605,6 +635,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             auth.user.user_id,
             session_id,
             user_id,
+        )
+        await _publish_realtime_event_safely(
+            container,
+            session_id,
+            ChatOutputEvent(type=ChatEventType.SESSION_SHARES_UPDATED),
         )
 
     @router.post(
@@ -686,13 +721,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         container: ContainerDependency,
     ) -> None:
         await container.close_session.execute(auth.user.user_id, session_id)
-        try:
-            await container.realtime_events.publish(
-                session_id,
-                ChatOutputEvent(type=ChatEventType.SESSION_CLOSED),
-            )
-        except Exception:
-            logger.exception("Could not publish session closed event session=%s", session_id)
+        await _publish_realtime_event_safely(
+            container,
+            session_id,
+            ChatOutputEvent(type=ChatEventType.SESSION_CLOSED),
+        )
 
     @app.websocket("/api/sessions/{session_id}/chat")
     async def chat(websocket: WebSocket, session_id: str) -> None:
@@ -708,6 +741,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 session_id,
                 1,
             )
+        except AccessDenied:
+            await websocket.close(code=1008, reason="Access revoked")
+            return
         except DomainError:
             await websocket.close(code=1008, reason="Authentication required")
             return
@@ -850,6 +886,7 @@ def _create_session_response(
             if visibility is SessionVisibility.PUBLIC
             else None
         ),
+        version=0,
     )
 
 
@@ -875,6 +912,7 @@ def _session_response(summary: SessionSummary, media_provider: str) -> SessionRe
             if summary.visibility is SessionVisibility.PUBLIC
             else None
         ),
+        version=summary.version,
     )
 
 
@@ -915,7 +953,23 @@ def _event_payload(event: ChatOutputEvent) -> dict[str, Any]:
         "sequence": event.sequence,
         "revision": event.revision,
         "author_user_id": event.author_user_id,
+        "session_version": event.session_version,
     }
+
+
+async def _publish_realtime_event_safely(
+    container: Container,
+    session_id: str,
+    event: ChatOutputEvent,
+) -> None:
+    try:
+        await container.realtime_events.publish(session_id, event)
+    except Exception:
+        logger.exception(
+            "Could not publish realtime event session=%s type=%s",
+            session_id,
+            event.type.value,
+        )
 
 
 def _message_response(message: ChatMessage) -> MessageResponse:

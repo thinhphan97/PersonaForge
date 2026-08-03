@@ -41,7 +41,9 @@ async function api(path, options = {}, mutation = false, retry = true) {
   }
   if (!response.ok) {
     const payload = await response.json().catch(() => ({ detail: response.statusText }));
-    throw new Error(payload.detail || response.statusText);
+    const error = new Error(payload.detail || response.statusText);
+    error.status = response.status;
+    throw error;
   }
   return response;
 }
@@ -193,6 +195,7 @@ $("#create-session").addEventListener("click", async () => {
   session.access_role = "owner";
   session.can_chat = true;
   session.status = "created";
+  session.version = 0;
   await loadSessions("mine");
   await openSession(session);
 });
@@ -346,7 +349,9 @@ function connectChat(chatPath) {
     chatReconnectAttempt = 0;
     chatReady = true;
     updateControls();
-    catchUpHistory().catch((error) => addMessage(error.message, "assistant"));
+    refreshCurrentSession({ refreshList: true })
+      .then(() => catchUpHistory())
+      .catch((error) => addMessage(error.message, "assistant"));
   };
   socket.onclose = async ({ code, reason }) => {
     if (chatSocket !== socket) return;
@@ -354,7 +359,7 @@ function connectChat(chatPath) {
     chatReady = false;
     updateControls();
     if (reason === "Access revoked") {
-      addMessage("Quyền truy cập phiên đã bị thu hồi.", "assistant");
+      await handleSessionAccessRevoked();
       return;
     }
     if (code === 1008 && !await refreshAccessToken()) {
@@ -423,6 +428,18 @@ function updateControls() {
 function handleChatEvent(event) {
   if (event.type === "session_closed") {
     markCurrentSessionClosed().catch((error) => console.warn(error));
+    return;
+  }
+  if (event.type === "session_updated") {
+    refreshCurrentSession({
+      minimumVersion: event.session_version,
+      refreshList: true,
+    }).catch((error) => console.warn(error));
+    return;
+  }
+  if (event.type === "session_shares_updated") {
+    refreshCurrentSession({ refreshShares: true, refreshList: true })
+      .catch((error) => console.warn(error));
     return;
   }
   if (event.type === "avatar_state") return setAvatarState(event.avatar_state);
@@ -525,6 +542,73 @@ function renderSessionClosed() {
   updateControls();
 }
 
+async function refreshCurrentSession({
+  minimumVersion,
+  refreshShares = false,
+  refreshList = false,
+} = {}) {
+  if (!currentSession) return;
+  const sessionId = currentSession.session_id;
+  let snapshot;
+  try {
+    snapshot = await (await api(`/api/sessions/${sessionId}`)).json();
+  } catch (error) {
+    if (error.status === 403 || error.status === 404) {
+      await handleSessionAccessRevoked();
+      return;
+    }
+    throw error;
+  }
+  if (currentSession?.session_id !== sessionId) return;
+  if (minimumVersion != null && snapshot.version < minimumVersion) return;
+  if ((currentSession.version ?? 0) > snapshot.version) return;
+  applySessionSnapshot(snapshot);
+  if (snapshot.status === "closed") {
+    await markCurrentSessionClosed();
+    return;
+  }
+  if (refreshShares && snapshot.access_role === "owner") await loadShares();
+  if (refreshList) await loadSessions(activeSessionList);
+}
+
+function applySessionSnapshot(snapshot) {
+  if (!currentSession || currentSession.session_id !== snapshot.session_id) return;
+  if ((currentSession.version ?? 0) > snapshot.version) return;
+  currentSession = snapshot;
+  const isOwner = snapshot.owner_user_id === currentUser.user_id;
+  $("#session-access").textContent = `${snapshot.access_role} · ${snapshot.visibility}`;
+  $("#session-visibility").value = snapshot.visibility;
+  $("#owner-controls").hidden = !isOwner;
+  $("#share-controls").hidden = !isOwner;
+  showPublicLink(snapshot.public_url);
+  updateSessionCard(snapshot);
+  updateControls();
+}
+
+function updateSessionCard(session) {
+  const card = [...document.querySelectorAll(".session-card")].find(
+    (item) => item.dataset.sessionId === session.session_id,
+  );
+  if (!card) return;
+  card.classList.toggle("is-closed", session.status === "closed");
+  card.innerHTML = `<strong>${escapeHtml(session.character_id)}</strong><span>${escapeHtml(session.access_role)} · ${escapeHtml(session.visibility)} · ${escapeHtml(session.status)}</span>`;
+}
+
+async function handleSessionAccessRevoked() {
+  if (!currentSession) return;
+  const sessionId = currentSession.session_id;
+  currentSession = { ...currentSession, can_chat: false };
+  await disconnectCurrent();
+  if (currentSession?.session_id !== sessionId) return;
+  $("#session-access").textContent = "Quyền truy cập đã bị thu hồi";
+  $("#owner-controls").hidden = true;
+  $("#share-controls").hidden = true;
+  showPublicLink(undefined);
+  input.placeholder = "Bạn không còn quyền truy cập session này";
+  addMessage("Quyền truy cập phiên đã bị thu hồi.", "assistant");
+  await loadSessions(activeSessionList);
+}
+
 async function markCurrentSessionClosed() {
   if (sessionClosePromise) return sessionClosePromise;
   sessionClosePromise = (async () => {
@@ -559,9 +643,8 @@ $("#session-visibility").addEventListener("change", async (event) => {
       true,
     )
   ).json();
-  currentSession = updated;
-  $("#session-access").textContent = `owner · ${updated.visibility}`;
-  showPublicLink(updated.public_url);
+  applySessionSnapshot(updated);
+  await loadSessions(activeSessionList);
 });
 
 function showPublicLink(publicPath) {

@@ -67,7 +67,7 @@ class RedisRealtimeEventBus:
             self._listener = None
         if self._pubsub is not None:
             await self._pubsub.unsubscribe(self._channel)
-            await self._pubsub.aclose()  # type: ignore[no-untyped-call]
+            await self._pubsub.aclose()
             self._pubsub = None
         await self._redis.aclose()
 
@@ -100,6 +100,7 @@ def _event_payload(event: ChatOutputEvent) -> dict[str, object | None]:
         "sequence": event.sequence,
         "revision": event.revision,
         "author_user_id": event.author_user_id,
+        "session_version": event.session_version,
     }
 
 
@@ -113,6 +114,7 @@ def _event_from_payload(payload: dict[str, object]) -> ChatOutputEvent:
         sequence=_optional_int(payload.get("sequence")),
         revision=_optional_int(payload.get("revision")),
         author_user_id=_optional_string(payload.get("author_user_id")),
+        session_version=_optional_int(payload.get("session_version")),
     )
 
 

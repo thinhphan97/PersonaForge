@@ -397,6 +397,7 @@ Session API gồm:
 GET    /api/sessions/mine
 GET    /api/sessions/shared-with-me
 GET    /api/sessions/public
+GET    /api/sessions/{id}
 PATCH  /api/sessions/{id}/visibility
 POST   /api/sessions/{id}/shares
 GET    /api/sessions/{id}/shares
@@ -406,6 +407,12 @@ DELETE /api/sessions/{id}/shares/{user_id}
 Owner chuyển public về private sẽ revoke anonymous LiveKit participants nhưng giữ owner và
 user còn share. Thu hồi share sẽ revoke participant tương ứng. Public API cố ý trả `404` khi
 session private để không làm lộ sự tồn tại của session.
+
+Mỗi `SessionResponse` có `version`. Sau visibility mutation, API publish `session_updated` với
+version mới; sau share mutation, API publish `session_shares_updated`. Browser nhận event sẽ
+gọi `GET /api/sessions/{id}` để lấy snapshot theo quyền của chính user, thay vì tin một payload
+quyền dùng chung. Event đi qua memory bus hoặc Redis Pub/Sub nên hoạt động cả khi hai browser
+kết nối vào hai API replica khác nhau.
 
 ### 7.3. Danh sách nhân vật
 
@@ -791,8 +798,11 @@ kiểm tra** để bỏ mute và nghe beep.
 3. Khi mở session: load history, mở WebSocket và chọn media client theo provider.
 4. Chỉ enable input khi actor có `can_chat` và WebSocket đang ready.
 5. Khi WebSocket đứt: disable input, reconnect backoff 0,5–10 giây và catch-up theo cursor.
-6. Khi access JWT được rotate: đóng socket cũ và kết nối lại bằng token mới.
-7. Khi nhận `session_closed` hoặc mở card có `status=closed`: ngắt media/socket, khóa toàn bộ
+6. Sau khi WebSocket mở/reconnect: tải lại session snapshot và message cursor catch-up.
+7. Khi nhận `session_updated`/`session_shares_updated`: reconcile snapshot theo `version`, cập
+   nhật visibility, public URL, card và quyền chat trên mọi browser đang mở session.
+8. Khi access JWT được rotate: đóng socket cũ và kết nối lại bằng token mới.
+9. Khi nhận `session_closed` hoặc mở card có `status=closed`: ngắt media/socket, khóa toàn bộ
    session controls, giữ transcript read-only và hiện thông báo thay cho avatar.
 
 Trong aiortc mode:

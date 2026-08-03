@@ -116,6 +116,27 @@ class ListPublicSessions:
 
 
 @dataclass(slots=True)
+class GetSessionSummary:
+    sessions: SessionRepository
+    shares: SessionShareRepository
+    access: SessionAccessPolicy
+
+    async def execute(self, user_id: str, session_id: str) -> SessionSummary:
+        session = await _session(self.sessions, session_id)
+        await self.access.require(user_id, session, SessionAction.VIEW)
+        if session.owner_user_id == user_id:
+            return _summary(session, "owner", True)
+        share = await self.shares.get(session_id, user_id)
+        if share is not None:
+            return _summary(
+                session,
+                share.permission.value,
+                share.permission is SharePermission.INTERACTOR,
+            )
+        return _summary(session, "public", False)
+
+
+@dataclass(slots=True)
 class ChangeSessionVisibility:
     sessions: SessionRepository
     access: SessionAccessPolicy
@@ -280,6 +301,7 @@ def _summary(
         session.status,
         access_role,
         can_chat and session.status is not SessionStatus.CLOSED,
+        session.version,
     )
 
 

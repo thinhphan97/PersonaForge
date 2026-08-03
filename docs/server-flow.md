@@ -242,14 +242,45 @@ sequenceDiagram
         B->>WS: reconnect bằng access JWT mới
     end
     WS-->>B: connected
+    B->>API: GET /sessions/{id}
+    API-->>B: actor-specific session snapshot + version
     B->>API: GET messages với cursor sequence:revision, limit 100
     API->>DB: list_after(cursor)
     DB-->>B: snapshot mới hơn cursor
     B->>B: reconcile và lặp page nếu đủ 100 item
 ```
 
-Redis Pub/Sub không lưu event. Sau reconnect, `ConversationRepository` mới là source of truth.
+Redis Pub/Sub không lưu event. Sau reconnect, `SessionRepository` và `ConversationRepository`
+mới là source of truth.
 Public Watch không dùng chat WebSocket; trang poll endpoint public mỗi giây với cùng cursor.
+
+### 6.1. Đồng bộ cấu hình giữa nhiều browser
+
+```mermaid
+sequenceDiagram
+    participant A as Browser A
+    participant API as FastAPI
+    participant DB as SessionRepository
+    participant E as Redis Pub/Sub
+    participant B as Browser B
+
+    A->>API: PATCH visibility public thành private
+    API->>DB: optimistic save và tăng version
+    API->>E: session_updated, session_version
+    E-->>A: invalidation event
+    E-->>B: invalidation event
+    B->>API: GET /sessions/{id}
+    API-->>B: visibility private, public_url null, version mới
+    B->>B: ẩn Copy URL và cập nhật card/select
+```
+
+Event chỉ là tín hiệu invalidation, không mang `access_role` hay `can_chat`, vì hai user trên
+cùng session có thể có quyền khác nhau. Endpoint snapshot tính lại owner/interactor/viewer/public
+theo access token của từng browser. Frontend bỏ snapshot có version cũ hơn state đang giữ.
+
+`session_shares_updated` dùng cùng cơ chế. Owner tab reload danh sách share; interactor/viewer
+reload snapshot để bật/tắt chat. Nếu share bị thu hồi trên private session, hub đóng WebSocket
+với reason `Access revoked`, frontend ngắt media và xóa các quyền điều khiển.
 
 ## 7. Video/audio pipeline
 

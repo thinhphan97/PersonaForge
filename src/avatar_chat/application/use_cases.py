@@ -192,6 +192,7 @@ class GetPublicSession:
             session.session_id,
             session.character_id,
             session.status,
+            session.version,
         )
 
 

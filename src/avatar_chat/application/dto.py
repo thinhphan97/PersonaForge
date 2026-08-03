@@ -72,6 +72,7 @@ class SessionSummary:
     status: SessionStatus
     access_role: str
     can_chat: bool
+    version: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +80,7 @@ class PublicSessionInfo:
     session_id: str
     character_id: str
     status: SessionStatus
+    version: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +117,8 @@ class ReplyChunk:
 
 class ChatEventType(str, Enum):
     SESSION_CLOSED = "session_closed"
+    SESSION_UPDATED = "session_updated"
+    SESSION_SHARES_UPDATED = "session_shares_updated"
     AVATAR_STATE = "avatar_state"
     USER_MESSAGE = "user_message"
     ASSISTANT_STARTED = "assistant_started"
@@ -132,3 +136,4 @@ class ChatOutputEvent:
     sequence: int | None = None
     revision: int | None = None
     author_user_id: str | None = None
+    session_version: int | None = None
