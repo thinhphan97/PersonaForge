@@ -2,7 +2,12 @@ from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Protocol
 
-from avatar_chat.application.dto import ReplyChunk, WebRtcAnswer, WebRtcOffer
+from avatar_chat.application.dto import (
+    MediaProvisioning,
+    ReplyChunk,
+    WebRtcAnswer,
+    WebRtcOffer,
+)
 from avatar_chat.domain.models import AvatarSession, AvatarState, ChatMessage
 
 
@@ -21,6 +26,14 @@ class ConversationRepository(Protocol):
 
 
 class AvatarStreamPort(Protocol):
+    async def start(
+        self,
+        session_id: str,
+        character_id: str,
+        room_name: str,
+        publisher_token: str,
+    ) -> None: ...
+
     async def negotiate(self, session_id: str, offer: WebRtcOffer) -> WebRtcAnswer: ...
 
     async def change_state(self, session_id: str, state: AvatarState) -> None: ...
@@ -28,6 +41,12 @@ class AvatarStreamPort(Protocol):
     async def close(self, session_id: str) -> None: ...
 
     async def shutdown(self) -> None: ...
+
+
+class MediaRoomPort(Protocol):
+    async def provision(self, session_id: str) -> MediaProvisioning: ...
+
+    async def close(self, session_id: str) -> None: ...
 
 
 class ReplyGeneratorPort(Protocol):
@@ -44,4 +63,3 @@ class IdGenerator(Protocol):
 
 class Clock(Protocol):
     def now(self) -> datetime: ...
-

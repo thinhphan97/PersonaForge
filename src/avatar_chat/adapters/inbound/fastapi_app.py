@@ -22,6 +22,8 @@ class CreateSessionResponse(BaseModel):
     session_id: str
     character_id: str
     offer_url: str
+    media_provider: str
+    media_access_url: str | None
     chat_url: str
 
 
@@ -33,6 +35,14 @@ class SessionDescriptionRequest(BaseModel):
 class SessionDescriptionResponse(BaseModel):
     sdp: str
     type: str
+    avatar_state: str
+
+
+class MediaAccessResponse(BaseModel):
+    provider: str
+    server_url: str
+    access_token: str
+    room_name: str
     avatar_state: str
 
 
@@ -87,7 +97,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             session_id=result.session_id,
             character_id=result.character_id,
             offer_url=f"/api/sessions/{result.session_id}/webrtc/offer",
+            media_provider=container.media_provider,
+            media_access_url=(
+                f"/api/sessions/{result.session_id}/media/access"
+                if container.media_provider == "livekit"
+                else None
+            ),
             chat_url=f"/api/sessions/{result.session_id}/chat",
+        )
+
+    @router.post(
+        "/sessions/{session_id}/media/access",
+        response_model=MediaAccessResponse,
+    )
+    async def provision_media(
+        session_id: str,
+        container: ContainerDependency,
+    ) -> MediaAccessResponse | JSONResponse:
+        if container.provision_media is None:
+            return JSONResponse(
+                status_code=409,
+                content={"detail": "Media access endpoint requires livekit mode"},
+            )
+        access = await container.provision_media.execute(session_id)
+        return MediaAccessResponse(
+            provider=access.provider,
+            server_url=access.server_url,
+            access_token=access.access_token,
+            room_name=access.room_name,
+            avatar_state=AvatarState.IDLE.value,
         )
 
     @router.post(
@@ -98,7 +136,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         session_id: str,
         body: SessionDescriptionRequest,
         container: ContainerDependency,
-    ) -> SessionDescriptionResponse:
+    ) -> SessionDescriptionResponse | JSONResponse:
+        if container.media_provider != "aiortc":
+            return JSONResponse(
+                status_code=409,
+                content={"detail": "SDP offer endpoint requires aiortc mode"},
+            )
         answer = await container.negotiate_stream.execute(
             session_id,
             WebRtcOffer(sdp=body.sdp, type=body.type),

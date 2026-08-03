@@ -2,6 +2,7 @@
 
 Tài liệu kiến trúc:
 
+- Tổng hợp đầy đủ pipeline hiện tại: [docs/current-pipeline.md](docs/current-pipeline.md).
 - Sơ đồ luồng server hiện tại: [docs/server-flow.md](docs/server-flow.md).
 - Đề xuất Render Worker stream trực tiếp tới client/SFU:
   [docs/direct-worker-streaming.md](docs/direct-worker-streaming.md).
@@ -81,9 +82,51 @@ hoặc model avatar mới mà không sửa domain/use case. Trong aiortc adapter
 `SwitchableAvatarVideoTrack` giữ nguyên track WebRTC và đổi clip phía sau nên không cần
 renegotiate khi avatar đổi trạng thái.
 
+### Render Worker publish trực tiếp qua LiveKit
+
+Chế độ này tách media khỏi Core API:
+
+```text
+Browser <-- WebRTC --> LiveKit SFU <-- WebRTC --> avatar-worker
+Browser <-- HTTP/WS --> avatar-chat <-- Redis Streams --> avatar-worker
+```
+
+Chạy đầy đủ bằng Docker:
+
+```bash
+cp .env.example .env
+sed -i 's/MEDIA_PROVIDER=aiortc/MEDIA_PROVIDER=livekit/' .env
+docker compose --profile livekit up --build
+```
+
+Sau đó mở <http://localhost:8000>. Các giá trị `devkey/secret` trong `.env.example` chỉ
+dành cho local. Frontend demo tải LiveKit browser SDK từ jsDelivr nên trình duyệt cần truy
+cập Internet; production nên pin version và bundle SDK cùng frontend.
+
+Nếu port mặc định đã bị chiếm, đổi đồng thời `APP_HTTP_PORT`, `LIVEKIT_HTTP_PORT` và phần
+port trong `LIVEKIT_URL`; `LIVEKIT_WORKER_URL=ws://livekit:7880` vẫn giữ nguyên vì đây là
+địa chỉ nội bộ Docker.
+
+Worker hiện dùng lại các clip `idle`, `thinking`, `speaking`, nhưng chạy trong process riêng.
+Nó publish một audio track PCM mono 48 kHz theo frame 20 ms và video theo
+`WORKER_VIDEO_FPS`. `rtc.AVSynchronizer`, audio queue 50 ms và video queue hữu hạn giữ
+cadence/A-V sync; log `Media cadence` xuất `fps` và `av_drift_ms` mỗi năm giây.
+
+Chạy worker ngoài Docker, khi Redis và LiveKit đã có sẵn:
+
+```bash
+REDIS_URL=redis://localhost:6379/0 \
+python -m avatar_worker.main
+```
+
+Chi tiết thiết kế và hướng tích hợp model thật nằm trong
+[docs/direct-worker-streaming.md](docs/direct-worker-streaming.md).
+
 ## Giới hạn hiện tại
 
 - Nếu không cấu hình `DATABASE_URL`, session và lịch sử mất khi process restart.
 - Một session thuộc một process; chưa hỗ trợ scale ngang.
 - Chưa có authentication và TURN mặc định.
 - Audio hiện là track im lặng 48 kHz; chưa có nội dung TTS.
+- Chế độ LiveKit hiện dùng một worker tĩnh qua `RENDER_WORKER_ID`; chưa có scheduler động
+  hoặc event xác nhận worker ready.

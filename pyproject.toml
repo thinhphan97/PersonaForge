@@ -14,7 +14,10 @@ dependencies = [
     "av>=14,<16",
     "fastapi>=0.115,<1",
     "httpx>=0.28,<1",
+    "livekit>=1.0,<2",
+    "livekit-api>=1.0,<2",
     "pydantic>=2.10,<3",
+    "redis>=5.2,<7",
     "sqlalchemy[asyncio]>=2.0,<3",
     "uvicorn[standard]>=0.34,<1",
 ]
@@ -44,4 +47,4 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 [tool.mypy]
 python_version = "3.10"
 strict = true
-packages = ["avatar_chat"]
+packages = ["avatar_chat", "avatar_worker"]

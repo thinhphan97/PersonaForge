@@ -3,7 +3,9 @@ from typing import Protocol, cast
 
 from avatar_chat.adapters.outbound.http_reply import HttpStreamingReplyAdapter
 from avatar_chat.adapters.outbound.media.aiortc_stream import AiortcAvatarStreamAdapter
+from avatar_chat.adapters.outbound.media.livekit_room import LiveKitMediaRoomAdapter
 from avatar_chat.adapters.outbound.media.recorded_source import RecordedClipCatalog
+from avatar_chat.adapters.outbound.media.redis_render import RedisAvatarStreamAdapter
 from avatar_chat.adapters.outbound.memory import (
     InMemoryConversationRepository,
     InMemorySessionRepository,
@@ -27,6 +29,7 @@ from avatar_chat.application.use_cases import (
     GetConversation,
     HandleMessage,
     NegotiateStream,
+    ProvisionMedia,
 )
 from avatar_chat.bootstrap.settings import Settings
 
@@ -46,6 +49,8 @@ class Container:
     get_conversation: GetConversation
     close_session: CloseSession
     avatar_stream: AvatarStreamPort
+    media_provider: str
+    provision_media: ProvisionMedia | None = None
     lifecycles: tuple[InfrastructureLifecycle, ...] = ()
 
     async def startup(self) -> None:
@@ -72,16 +77,41 @@ def build_container(settings: Settings) -> Container:
         conversations = InMemoryConversationRepository()
     ids = UuidGenerator()
     clock = SystemClock()
-    catalog = RecordedClipCatalog(settings.avatar_clips)
-    avatar_stream = AiortcAvatarStreamAdapter(
-        catalog=catalog,
-        ice_server_urls=settings.ice_server_urls,
-        ice_username=settings.ice_username,
-        ice_credential=settings.ice_credential,
-        sync_debug_enabled=settings.av_sync_debug,
-        sync_interval_seconds=settings.av_sync_interval_seconds,
-        sync_pulse_duration_seconds=settings.av_sync_pulse_duration_seconds,
-    )
+    provision_media: ProvisionMedia | None = None
+    rooms: LiveKitMediaRoomAdapter | None = None
+    if settings.media_provider == "aiortc":
+        catalog = RecordedClipCatalog(settings.avatar_clips)
+        avatar_stream: AvatarStreamPort = AiortcAvatarStreamAdapter(
+            catalog=catalog,
+            ice_server_urls=settings.ice_server_urls,
+            ice_username=settings.ice_username,
+            ice_credential=settings.ice_credential,
+            sync_debug_enabled=settings.av_sync_debug,
+            sync_interval_seconds=settings.av_sync_interval_seconds,
+            sync_pulse_duration_seconds=settings.av_sync_pulse_duration_seconds,
+        )
+    elif settings.media_provider == "livekit":
+        if not all(
+            (settings.livekit_url, settings.livekit_api_key, settings.livekit_api_secret)
+        ):
+            raise ValueError(
+                "LIVEKIT_URL, LIVEKIT_API_KEY and LIVEKIT_API_SECRET are required "
+                "when MEDIA_PROVIDER=livekit"
+            )
+        livekit_url = cast(str, settings.livekit_url)
+        rooms = LiveKitMediaRoomAdapter(
+            server_url=livekit_url,
+            api_key=cast(str, settings.livekit_api_key),
+            api_secret=cast(str, settings.livekit_api_secret),
+        )
+        avatar_stream = RedisAvatarStreamAdapter(
+            redis_url=settings.redis_url,
+            worker_id=settings.render_worker_id,
+            livekit_url=settings.livekit_worker_url or livekit_url,
+        )
+        provision_media = ProvisionMedia(sessions, avatar_stream, rooms, clock)
+    else:
+        raise ValueError(f"Unsupported MEDIA_PROVIDER: {settings.media_provider}")
 
     replies: ReplyGeneratorPort
     if settings.reply_provider == "http":
@@ -110,7 +140,9 @@ def build_container(settings: Settings) -> Container:
             thinking_min_duration_seconds=settings.thinking_min_duration_seconds,
         ),
         get_conversation=GetConversation(conversations),
-        close_session=CloseSession(sessions, avatar_stream, clock),
+        close_session=CloseSession(sessions, avatar_stream, clock, rooms),
         avatar_stream=avatar_stream,
+        media_provider=settings.media_provider,
+        provision_media=provision_media,
         lifecycles=lifecycles,
     )

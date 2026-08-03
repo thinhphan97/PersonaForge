@@ -2,7 +2,7 @@ services:
   avatar-chat:
     build: .
     ports:
-      - "8000:8000"
+      - "${APP_HTTP_PORT:-8000}:8000"
     environment:
       DATABASE_URL: ${DATABASE_URL:-}
       REPLY_PROVIDER: ${REPLY_PROVIDER:-scripted}
@@ -16,4 +16,57 @@ services:
       WEBRTC_ICE_SERVERS: ${WEBRTC_ICE_SERVERS:-}
       WEBRTC_ICE_USERNAME: ${WEBRTC_ICE_USERNAME:-}
       WEBRTC_ICE_CREDENTIAL: ${WEBRTC_ICE_CREDENTIAL:-}
+      MEDIA_PROVIDER: ${MEDIA_PROVIDER:-aiortc}
+      LIVEKIT_URL: ${LIVEKIT_URL:-}
+      LIVEKIT_WORKER_URL: ${LIVEKIT_WORKER_URL:-}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      RENDER_WORKER_ID: ${RENDER_WORKER_ID:-avatar-worker-1}
     restart: unless-stopped
+
+  avatar-worker:
+    build: .
+    command: ["python", "-m", "avatar_worker.main"]
+    profiles: ["livekit"]
+    environment:
+      WORKER_ID: ${RENDER_WORKER_ID:-avatar-worker-1}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      WORKER_VIDEO_WIDTH: ${WORKER_VIDEO_WIDTH:-640}
+      WORKER_VIDEO_HEIGHT: ${WORKER_VIDEO_HEIGHT:-360}
+      WORKER_VIDEO_FPS: ${WORKER_VIDEO_FPS:-25}
+      WORKER_VIDEO_BITRATE: ${WORKER_VIDEO_BITRATE:-1500000}
+      WORKER_AUDIO_SAMPLE_RATE: ${WORKER_AUDIO_SAMPLE_RATE:-48000}
+      WORKER_AUDIO_FRAME_DURATION: ${WORKER_AUDIO_FRAME_DURATION:-0.02}
+      WORKER_VIDEO_QUEUE_MS: ${WORKER_VIDEO_QUEUE_MS:-80}
+      AV_SYNC_DEBUG: ${AV_SYNC_DEBUG:-true}
+      AV_SYNC_INTERVAL: ${AV_SYNC_INTERVAL:-2.0}
+      AV_SYNC_PULSE_DURATION: ${AV_SYNC_PULSE_DURATION:-0.1}
+    depends_on:
+      redis:
+        condition: service_healthy
+      livekit:
+        condition: service_started
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    profiles: ["livekit"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  livekit:
+    image: livekit/livekit-server:latest
+    profiles: ["livekit"]
+    command: ["--dev", "--bind", "0.0.0.0"]
+    environment:
+      NODE_IP: ${LIVEKIT_NODE_IP:-}
+      UDP_PORT: ${LIVEKIT_RTC_UDP_PORT:-7882}
+      LIVEKIT_RTC_TCP_PORT: ${LIVEKIT_RTC_TCP_PORT:-7881}
+    ports:
+      - "${LIVEKIT_HTTP_PORT:-7880}:7880"
+      - "${LIVEKIT_RTC_TCP_PORT:-7881}:${LIVEKIT_RTC_TCP_PORT:-7881}"
+      - "${LIVEKIT_RTC_UDP_PORT:-7882}:${LIVEKIT_RTC_UDP_PORT:-7882}/udp"

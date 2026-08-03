@@ -6,6 +6,7 @@ from avatar_chat.application.dto import (
     ChatEventType,
     ChatOutputEvent,
     CreateSessionResult,
+    MediaAccess,
     WebRtcAnswer,
     WebRtcOffer,
 )
@@ -14,6 +15,7 @@ from avatar_chat.application.ports import (
     Clock,
     ConversationRepository,
     IdGenerator,
+    MediaRoomPort,
     ReplyGeneratorPort,
     SessionRepository,
 )
@@ -53,6 +55,32 @@ class NegotiateStream:
         await self.avatar.change_state(session_id, AvatarState.IDLE)
         await self.sessions.save(session)
         return answer
+
+
+@dataclass(slots=True)
+class ProvisionMedia:
+    sessions: SessionRepository
+    avatar: AvatarStreamPort
+    rooms: MediaRoomPort
+    clock: Clock
+
+    async def execute(self, session_id: str) -> MediaAccess:
+        session = await _require_session(self.sessions, session_id)
+        provisioning = await self.rooms.provision(session_id)
+        try:
+            await self.avatar.start(
+                session_id=session.session_id,
+                character_id=session.character_id,
+                room_name=provisioning.client.room_name,
+                publisher_token=provisioning.publisher_token,
+            )
+            session.connected(self.clock.now())
+            await self.avatar.change_state(session_id, AvatarState.IDLE)
+            await self.sessions.save(session)
+        except BaseException:
+            await self.rooms.close(session_id)
+            raise
+        return provisioning.client
 
 
 @dataclass(slots=True)
@@ -167,15 +195,20 @@ class CloseSession:
     sessions: SessionRepository
     avatar: AvatarStreamPort
     clock: Clock
+    rooms: MediaRoomPort | None = None
 
     async def execute(self, session_id: str) -> None:
         session = await self.sessions.get(session_id)
         if session is None:
             await self.avatar.close(session_id)
+            if self.rooms is not None:
+                await self.rooms.close(session_id)
             return
         session.close(self.clock.now())
         await self.sessions.save(session)
         await self.avatar.close(session_id)
+        if self.rooms is not None:
+            await self.rooms.close(session_id)
 
 
 async def _require_session(

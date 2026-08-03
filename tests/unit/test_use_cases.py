@@ -9,11 +9,18 @@ from avatar_chat.adapters.outbound.memory import (
 )
 from avatar_chat.application.dto import (
     ChatEventType,
+    MediaAccess,
+    MediaProvisioning,
     ReplyChunk,
     WebRtcAnswer,
     WebRtcOffer,
 )
-from avatar_chat.application.use_cases import CreateSession, HandleMessage, NegotiateStream
+from avatar_chat.application.use_cases import (
+    CreateSession,
+    HandleMessage,
+    NegotiateStream,
+    ProvisionMedia,
+)
 from avatar_chat.domain.models import AvatarState, ChatMessage
 
 
@@ -34,6 +41,18 @@ class SequentialIds:
 class FakeAvatarStream:
     def __init__(self) -> None:
         self.states: list[AvatarState] = []
+        self.started: list[tuple[str, str, str, str]] = []
+
+    async def start(
+        self,
+        session_id: str,
+        character_id: str,
+        room_name: str,
+        publisher_token: str,
+    ) -> None:
+        self.started.append(
+            (session_id, character_id, room_name, publisher_token)
+        )
 
     async def negotiate(self, session_id: str, offer: WebRtcOffer) -> WebRtcAnswer:
         assert session_id
@@ -60,6 +79,22 @@ class FakeReplies:
         assert messages[-1].content == "Hello"
         yield ReplyChunk("Xin ")
         yield ReplyChunk("chào")
+
+
+class FakeMediaRooms:
+    async def provision(self, session_id: str) -> MediaProvisioning:
+        return MediaProvisioning(
+            client=MediaAccess(
+                provider="livekit",
+                server_url="ws://media.test",
+                access_token="client-token",
+                room_name=f"avatar-{session_id}",
+            ),
+            publisher_token="publisher-token",
+        )
+
+    async def close(self, session_id: str) -> None:
+        del session_id
 
 
 @pytest.mark.asyncio
@@ -104,6 +139,36 @@ async def test_message_flow_changes_avatar_and_persists_history() -> None:
     assert events[-1].content == "Xin chào"
     history = await conversations.list_recent(created.session_id, 10)
     assert [message.content for message in history] == ["Hello", "Xin chào"]
+    session = await sessions.get(created.session_id)
+    assert session is not None
+    assert session.state is AvatarState.IDLE
+
+
+@pytest.mark.asyncio
+async def test_livekit_media_provision_starts_worker_and_connects_session() -> None:
+    sessions = InMemorySessionRepository()
+    ids = SequentialIds()
+    clock = FixedClock()
+    avatar = FakeAvatarStream()
+    created = await CreateSession(sessions, ids, clock).execute("default")
+
+    access = await ProvisionMedia(
+        sessions,
+        avatar,
+        FakeMediaRooms(),
+        clock,
+    ).execute(created.session_id)
+
+    assert access.provider == "livekit"
+    assert avatar.started == [
+        (
+            created.session_id,
+            "default",
+            f"avatar-{created.session_id}",
+            "publisher-token",
+        )
+    ]
+    assert avatar.states == [AvatarState.IDLE]
     session = await sessions.get(created.session_id)
     assert session is not None
     assert session.state is AvatarState.IDLE

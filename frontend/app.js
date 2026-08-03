@@ -9,6 +9,7 @@ const audioToggle = document.querySelector("#audio-toggle");
 
 let sessionId;
 let peer;
+let livekitRoom;
 let chatSocket;
 let streamingBubble;
 let chatReady = false;
@@ -27,7 +28,52 @@ async function start() {
   sessionId = session.session_id;
 
   connectChat(session.chat_url);
-  await connectWebRtc(session.offer_url);
+  if (session.media_provider === "livekit") {
+    await connectLiveKit(session.media_access_url);
+  } else {
+    await connectWebRtc(session.offer_url);
+  }
+}
+
+async function connectLiveKit(accessUrl) {
+  await loadLiveKitClient();
+  const response = await fetch(accessUrl, { method: "POST" });
+  if (!response.ok) throw new Error(await response.text());
+  const access = await response.json();
+
+  const { Room, RoomEvent } = window.LivekitClient;
+  // The avatar worker publishes one fixed-resolution layer. Do not let the
+  // subscriber request a smaller adaptive layer after the first frame.
+  livekitRoom = new Room({ adaptiveStream: false, dynacast: false });
+  livekitRoom.on(RoomEvent.TrackSubscribed, (track) => {
+    if (track.kind !== "audio" && track.kind !== "video") return;
+    remoteStream.addTrack(track.mediaStreamTrack);
+    video.srcObject = remoteStream;
+  });
+  livekitRoom.on(RoomEvent.ConnectionStateChanged, (state) => {
+    connectionLabel.textContent = `LiveKit: ${state}`;
+  });
+  livekitRoom.on(RoomEvent.Disconnected, () => {
+    mediaReady = false;
+    updateControls();
+  });
+
+  await livekitRoom.connect(access.server_url, access.access_token);
+  setAvatarState(access.avatar_state ?? "idle");
+  mediaReady = true;
+  updateControls();
+}
+
+async function loadLiveKitClient() {
+  if (window.LivekitClient) return;
+  await new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src =
+      "https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js";
+    script.onload = resolve;
+    script.onerror = () => reject(new Error("Không tải được LiveKit browser SDK"));
+    document.head.append(script);
+  });
 }
 
 async function connectWebRtc(offerUrl) {
@@ -145,6 +191,7 @@ function waitForIceGathering(connection) {
 window.addEventListener("beforeunload", () => {
   chatSocket?.close();
   peer?.close();
+  livekitRoom?.disconnect();
 });
 
 start().catch((error) => {

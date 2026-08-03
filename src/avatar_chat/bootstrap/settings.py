@@ -6,6 +6,12 @@ from avatar_chat.domain.models import AvatarState
 
 
 def _project_root() -> Path:
+    configured = os.getenv("PROJECT_ROOT")
+    if configured:
+        return Path(configured).resolve()
+    working_directory = Path.cwd()
+    if working_directory.joinpath("pyproject.toml").is_file():
+        return working_directory
     return Path(__file__).resolve().parents[3]
 
 
@@ -26,6 +32,13 @@ class Settings:
     av_sync_debug: bool
     av_sync_interval_seconds: float
     av_sync_pulse_duration_seconds: float
+    media_provider: str
+    livekit_url: str | None
+    livekit_worker_url: str | None
+    livekit_api_key: str | None
+    livekit_api_secret: str | None
+    redis_url: str
+    render_worker_id: str
     avatar_clips: dict[AvatarState, Path]
 
     @classmethod
@@ -58,6 +71,13 @@ class Settings:
             av_sync_pulse_duration_seconds=float(
                 os.getenv("AV_SYNC_PULSE_DURATION", "0.1")
             ),
+            media_provider=os.getenv("MEDIA_PROVIDER", "aiortc").lower(),
+            livekit_url=os.getenv("LIVEKIT_URL") or None,
+            livekit_worker_url=os.getenv("LIVEKIT_WORKER_URL") or None,
+            livekit_api_key=os.getenv("LIVEKIT_API_KEY") or None,
+            livekit_api_secret=os.getenv("LIVEKIT_API_SECRET") or None,
+            redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+            render_worker_id=os.getenv("RENDER_WORKER_ID", "avatar-worker-1"),
             avatar_clips={
                 AvatarState.IDLE: Path(
                     os.getenv("AVATAR_IDLE_VIDEO", default_assets / "idle.mp4")

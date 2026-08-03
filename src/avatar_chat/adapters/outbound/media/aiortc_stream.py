@@ -52,6 +52,16 @@ class AiortcAvatarStreamAdapter:
         self._sync_interval_seconds = sync_interval_seconds
         self._sync_pulse_duration_seconds = sync_pulse_duration_seconds
 
+    async def start(
+        self,
+        session_id: str,
+        character_id: str,
+        room_name: str,
+        publisher_token: str,
+    ) -> None:
+        # In-process aiortc sessions are started by SDP negotiation.
+        del session_id, character_id, room_name, publisher_token
+
     async def negotiate(self, session_id: str, offer: WebRtcOffer) -> WebRtcAnswer:
         await self.close(session_id)
         peer = RTCPeerConnection(configuration=self._configuration)

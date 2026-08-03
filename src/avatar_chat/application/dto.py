@@ -23,6 +23,20 @@ class CreateSessionResult:
 
 
 @dataclass(frozen=True, slots=True)
+class MediaAccess:
+    provider: str
+    server_url: str
+    access_token: str
+    room_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class MediaProvisioning:
+    client: MediaAccess
+    publisher_token: str
+
+
+@dataclass(frozen=True, slots=True)
 class ReplyChunk:
     text: str
 
