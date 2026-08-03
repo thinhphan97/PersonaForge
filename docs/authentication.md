@@ -58,6 +58,15 @@ REST client cũng retry đúng một lần sau HTTP 401. Các refresh đồng th
 để tránh tự gây replay. Sau rotation, frontend kết nối lại WebSocket với access JWT mới qua
 `Sec-WebSocket-Protocol`.
 
+Nếu WebSocket mất do network/API restart, frontend reconnect theo backoff và lấy message bị lỡ
+từ database cursor. Nếu server đóng với code `1008` vì token hết hạn, frontend thử refresh
+trước khi reconnect. Nếu quyền session đã bị thu hồi, frontend dừng reconnect session đó.
+
+Cookie thuộc browser profile/origin, không thuộc tài khoản của ứng dụng. Cửa sổ ẩn danh mới
+trong cùng một phiên incognito có thể dùng chung cookie với các cửa sổ incognito khác; chỉ khi
+đóng toàn bộ phiên incognito thì cookie mới bị xóa. Public Watch không dùng refresh cookie để
+đăng nhập thay owner; link “Đăng nhập” mở UI login cưỡng bức bằng `?login=1`.
+
 ## Endpoint
 
 | Endpoint | Credential | Chức năng |

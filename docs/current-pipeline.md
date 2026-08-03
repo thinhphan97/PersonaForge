@@ -117,7 +117,9 @@ src/
 │   ├── application/
 │   │   ├── dto.py                    # DTO đi qua boundary
 │   │   ├── ports.py                  # Interface/Protocol
-│   │   └── use_cases.py              # Business orchestration
+│   │   ├── auth_use_cases.py         # Register/login/refresh/logout
+│   │   ├── session_access.py         # Visibility/share/access policy
+│   │   └── use_cases.py              # Chat + media orchestration
 │   ├── adapters/
 │   │   ├── inbound/
 │   │   │   └── fastapi_app.py        # REST, WS, static frontend
@@ -149,6 +151,8 @@ src/
 frontend/
 ├── index.html
 ├── app.js                            # Session, aiortc/LiveKit, chat UI
+├── public-watch.html                 # Anonymous read-only watch UI
+├── public-watch.js                   # Public media + cursor polling
 └── styles.css
 
 assets/characters/
@@ -206,6 +210,12 @@ Các invariant chính:
 |---|---|---|
 | `SessionRepository` | Lưu/đọc/xóa session | In-memory, SQLAlchemy |
 | `ConversationRepository` | Append/update draft, cursor catch-up | In-memory, SQLAlchemy |
+| `UserRepository` | User lookup/persistence | In-memory, SQLAlchemy |
+| `AuthSessionRepository` | Refresh rotation/revoke/replay state | In-memory, SQLAlchemy |
+| `SessionShareRepository` | Viewer/interactor grants | In-memory, SQLAlchemy |
+| `AuditLogRepository` | Ghi mutation visibility/share | In-memory, SQLAlchemy |
+| `JwtTokenPort` | Issue/decode access và refresh JWT | PyJWT adapter |
+| `PasswordHasherPort` | Hash/verify password | Argon2 adapter |
 | `RealtimeEventBusPort` | Fan-out chat event giữa API replica | In-memory, Redis Pub/Sub |
 | `AvatarStreamPort` | Start, negotiate, đổi state, close media | aiortc, Redis command adapter |
 | `MediaRoomPort` | Provision room/token và close room | LiveKit token adapter |
@@ -215,11 +225,14 @@ Các invariant chính:
 
 Các use case độc lập framework:
 
+- `RegisterUser`, `LoginUser`, `RefreshAccessToken`, `LogoutUser`, `LogoutAll`
 - `CreateSession`
+- `ListOwnedSessions`, `ListSharedSessions`, `ListPublicSessions`
+- `ChangeSessionVisibility`, `ShareSession`, `RevokeSessionShare`
 - `NegotiateStream`
-- `ProvisionMedia`
+- `ProvisionMedia`, `ProvisionPublicMedia`
 - `HandleMessage`
-- `GetConversation`
+- `GetConversation`, `GetPublicConversation`
 - `CloseSession`
 
 ### 5.1. Cách thay dependency bên ngoài
@@ -335,7 +348,7 @@ history theo từng page với cursor cuối để lấy mọi message/revision 
 
 ### 6.3. Đóng session
 
-Khi browser đóng WebSocket hoặc gọi `DELETE /api/sessions/{id}`:
+Chỉ owner gọi `DELETE /api/sessions/{id}` mới đóng session:
 
 1. Domain session chuyển sang `closed` nếu còn tồn tại.
 2. `RedisAvatarStreamAdapter` gửi `avatar.session.stop`.
@@ -345,6 +358,8 @@ Khi browser đóng WebSocket hoặc gọi `DELETE /api/sessions/{id}`:
 6. Room tự biến mất sau khi participant cuối cùng rời room.
 
 `LiveKitMediaRoomAdapter.close()` hiện chưa gọi RoomService để xóa room cưỡng bức.
+Đóng WebSocket chỉ gỡ connection khỏi local hub, không đóng domain session hay media. Browser
+có thể reconnect/catch-up và các viewer khác không bị gián đoạn.
 
 ## 7. API và WebSocket contract
 
@@ -360,7 +375,39 @@ GET /api/health
 
 Endpoint này mới kiểm tra process API, chưa kiểm tra Redis, worker hoặc LiveKit readiness.
 
-### 7.2. Danh sách nhân vật
+### 7.2. Xác thực và quyền session
+
+Các endpoint `/api/auth/register`, `/login`, `/refresh`, `/me`, `/logout` và `/logout-all`
+dùng access JWT ngắn hạn, refresh rotation, cookie `HttpOnly` và CSRF. REST mutation yêu cầu
+cả Bearer token và `X-CSRF-Token`; WebSocket gửi access JWT qua subprotocol thay vì query URL.
+
+Ma trận quyền hiện tại:
+
+| Actor | VIEW transcript/media | CHAT | MANAGE visibility/share/close |
+|---|---:|---:|---:|
+| Owner | Có | Có | Có |
+| Share `interactor` | Có | Có | Không |
+| Share `viewer` | Có | Không | Không |
+| User chỉ dựa vào public visibility | Có | Không | Không |
+| Anonymous `/watch/{id}` | Có khi public, chỉ đọc | Không | Không |
+
+Session API gồm:
+
+```http
+GET    /api/sessions/mine
+GET    /api/sessions/shared-with-me
+GET    /api/sessions/public
+PATCH  /api/sessions/{id}/visibility
+POST   /api/sessions/{id}/shares
+GET    /api/sessions/{id}/shares
+DELETE /api/sessions/{id}/shares/{user_id}
+```
+
+Owner chuyển public về private sẽ revoke anonymous LiveKit participants nhưng giữ owner và
+user còn share. Thu hồi share sẽ revoke participant tương ứng. Public API cố ý trả `404` khi
+session private để không làm lộ sự tồn tại của session.
+
+### 7.3. Danh sách nhân vật
 
 ```http
 GET /api/characters
@@ -377,7 +424,7 @@ GET /api/characters
 Catalog filesystem chỉ công bố thư mục có đủ ba clip. `character_id` không tồn tại bị từ chối
 trước khi tạo session; Core chỉ phụ thuộc `CharacterCatalogPort` nên có thể thay bằng DB/S3.
 
-### 7.3. Tạo session
+### 7.4. Tạo session
 
 ```http
 POST /api/sessions
@@ -401,7 +448,7 @@ Response:
 
 Trong aiortc mode, `media_access_url` là `null`; frontend dùng `offer_url`.
 
-### 7.4. Provision LiveKit media
+### 7.5. Provision LiveKit media
 
 ```http
 POST /api/sessions/{session_id}/media/access
@@ -419,7 +466,7 @@ POST /api/sessions/{session_id}/media/access
 
 Gọi endpoint này trong aiortc mode trả `409`.
 
-### 7.5. aiortc SDP signaling
+### 7.6. aiortc SDP signaling
 
 ```http
 POST /api/sessions/{session_id}/webrtc/offer
@@ -430,7 +477,7 @@ Content-Type: application/json
 
 Response chứa SDP answer và `avatar_state=idle`. Gọi endpoint trong LiveKit mode trả `409`.
 
-### 7.6. Chat WebSocket
+### 7.7. Chat WebSocket
 
 Client gửi:
 
@@ -461,7 +508,7 @@ Domain error được trả dưới dạng:
 {"type":"error","detail":"..."}
 ```
 
-### 7.7. Lịch sử và cleanup
+### 7.8. Lịch sử và cleanup
 
 ```http
 GET /api/sessions/{session_id}/messages?limit=50
@@ -737,12 +784,14 @@ kiểm tra** để bỏ mute và nghe beep.
 
 ## 12. Frontend pipeline
 
-`frontend/app.js` tự chạy `start()` khi trang tải:
+`frontend/app.js` khởi động theo vòng đời sau:
 
-1. `POST /api/sessions`.
-2. Mở WebSocket chat cùng origin.
-3. Chọn media client theo `session.media_provider`.
-4. Chỉ enable input khi cả `chatReady` và `mediaReady` đều true.
+1. Thử refresh bằng CSRF cookie; nếu không thành công mới hiển thị login/register.
+2. Load nhân vật và ba danh sách session: owner, shared, public.
+3. Khi mở session: load history, mở WebSocket và chọn media client theo provider.
+4. Chỉ enable input khi actor có `can_chat` và WebSocket đang ready.
+5. Khi WebSocket đứt: disable input, reconnect backoff 0,5–10 giây và catch-up theo cursor.
+6. Khi access JWT được rotate: đóng socket cũ và kết nối lại bằng token mới.
 
 Trong aiortc mode:
 
@@ -762,7 +811,12 @@ Trong LiveKit mode:
 - Bắt `TrackSubscribed` và add media track vào video element.
 - Hiển thị `ConnectionStateChanged` lên UI.
 
-Khi unload, frontend đóng chat socket, aiortc peer và LiveKit room.
+Khi chuyển session/logout, frontend hủy reconnect timer, đóng chat socket, aiortc peer và
+LiveKit room. Đóng socket phía browser không đóng server session.
+
+Trang `/watch/{session_id}` không tự refresh/login vào account owner. Nó gọi các endpoint
+public không credential, subscribe LiveKit bằng anonymous token, poll transcript theo cursor
+mỗi giây và không render form chat.
 
 ## 13. Reply/model pipeline
 
@@ -817,7 +871,7 @@ Adapter bỏ dòng trống/comment, xử lý prefix `data:`, dừng ở `[DONE]`
 
 Khi `DATABASE_URL` rỗng:
 
-- Session và conversation nằm trong dictionary của process.
+- User, auth session, avatar session, share, audit và conversation nằm trong memory của process.
 - Repository dùng `asyncio.Lock` và `deepcopy` để tránh mutation ngoài lock.
 - Dữ liệu mất khi restart.
 - Không phù hợp nhiều API replica vì mỗi replica có state riêng; Redis Pub/Sub không thay thế
@@ -825,10 +879,14 @@ Khi `DATABASE_URL` rỗng:
 
 ### 14.2. SQLAlchemy
 
-Khi có `DATABASE_URL`, composition root dùng repository SQLAlchemy async. Hai table:
+Khi có `DATABASE_URL`, composition root dùng repository SQLAlchemy async. Các table:
 
+- `users`
+- `auth_sessions`
 - `avatar_sessions`
 - `chat_messages`
+- `session_shares`
+- `audit_logs`
 
 Schema được `create_all()` khi API startup. Ví dụ:
 
@@ -847,8 +905,8 @@ Assistant draft được lưu ngay lúc bắt đầu và update bằng compare-a
 Schema session dùng `status`, `avatar_state` và `version`. `create_all()` không thay đổi table
 đã tồn tại; database cũ phải chạy `alembic upgrade head` trước khi chạy phiên bản này.
 
-Để scale production cần migration tool thay cho `create_all()` và cần xử lý ownership/locking
-session giữa nhiều API replica.
+Production dùng Alembic thay cho `create_all()` và vẫn cần distributed ownership/locking khi
+nhiều API replica có thể đồng thời nhận chat cho cùng session.
 
 ## 15. Cấu hình đầy đủ
 
@@ -863,7 +921,20 @@ session giữa nhiều API replica.
 | `DATABASE_URL` | rỗng | Rỗng dùng memory; có giá trị dùng SQLAlchemy |
 | `AUTO_CREATE_SCHEMA` | `true` | Chỉ nên dùng local/fresh DB; production dùng Alembic |
 
-### 15.2. Reply provider
+### 15.2. Authentication và browser security
+
+| Biến | Mặc định | Ý nghĩa |
+|---|---|---|
+| `REFRESH_COOKIE_NAME` | `avatar_refresh` | Tên refresh cookie HttpOnly |
+| `AUTH_COOKIE_SECURE` | `false` | Production HTTPS phải đặt `true` |
+| `JWT_SECRET` | development secret | Secret HS256, phải thay trong production |
+| `JWT_ISSUER` | `avatar-chat` | JWT issuer |
+| `JWT_AUDIENCE` | `avatar-chat-browser` | JWT audience |
+| `ACCESS_TOKEN_TTL_MINUTES` | `15` | TTL access JWT |
+| `REFRESH_TOKEN_TTL_DAYS` | `7` | TTL refresh JWT/server auth session |
+| `ALLOWED_ORIGINS` | localhost ports | Origin được phép dùng API/WebSocket |
+
+### 15.3. Reply provider
 
 | Biến | Mặc định | Ý nghĩa |
 |---|---|---|
@@ -873,7 +944,7 @@ session giữa nhiều API replica.
 | `REPLY_HTTP_URL` | rỗng | URL model streaming |
 | `REPLY_HTTP_TOKEN` | rỗng | Bearer token tùy chọn |
 
-### 15.3. Media selection và aiortc
+### 15.4. Media selection và aiortc
 
 | Biến | Mặc định | Ý nghĩa |
 |---|---|---|
@@ -882,7 +953,7 @@ session giữa nhiều API replica.
 | `WEBRTC_ICE_USERNAME` | rỗng | TURN username |
 | `WEBRTC_ICE_CREDENTIAL` | rỗng | TURN credential |
 
-### 15.4. LiveKit, Redis và worker affinity
+### 15.5. LiveKit, Redis và worker affinity
 
 | Biến | Mặc định mẫu | Ý nghĩa |
 |---|---|---|
@@ -904,7 +975,7 @@ SFU phải quảng bá đúng cặp `LIVEKIT_NODE_IP:LIVEKIT_RTC_*_PORT`; chỉ 
 container port khác mà không đổi advertised candidate sẽ làm signaling thành công nhưng media
 ICE timeout.
 
-### 15.5. Worker media
+### 15.6. Worker media
 
 | Biến | Mặc định | Ý nghĩa |
 |---|---:|---|
@@ -916,7 +987,7 @@ ICE timeout.
 | `WORKER_AUDIO_FRAME_DURATION` | `0.02` | Audio frame duration giây |
 | `WORKER_VIDEO_QUEUE_MS` | `80` | Video queue của synchronizer |
 
-### 15.6. Debug và clip
+### 15.7. Debug và clip
 
 | Biến | Mặc định | Ý nghĩa |
 |---|---|---|
@@ -1170,10 +1241,11 @@ docker compose exec redis redis-cli XPENDING \
 
 | Failure | Hành vi hiện tại | Khoảng trống |
 |---|---|---|
-| Reply provider lỗi | Use case restore idle, WS gửi lỗi | Chưa retry/circuit breaker |
+| Reply provider lỗi | Persist draft `failed`, restore idle, phát `assistant_failed` | Chưa retry/circuit breaker |
 | Clip EOF | Tự loop/reopen | Model frame source cần policy riêng |
 | aiortc source đổi lúc recv | Generation loại frame cũ | Đã có unit/integration coverage |
-| aiortc peer failed/closed | Cleanup peer/tracks | Chưa reconnect tự động phía server |
+| Chat WebSocket mất | Browser reconnect backoff + DB cursor catch-up | Không giữ avatar-state event trong DB |
+| aiortc peer failed/closed | Cleanup peer/tracks | Browser chưa tự renegotiate aiortc media |
 | Redis command lỗi | Retry 3 lần, không ACK | Chưa DLQ/reclaim/alert |
 | Render start lỗi | Phát correlated failed event, Core đặt `FAILED` và cleanup | Chưa tự reschedule |
 | Stop treo | Chờ 5 giây rồi cancel | Chưa force cleanup GPU resource cụ thể |

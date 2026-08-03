@@ -1,4 +1,8 @@
-# Đề xuất Worker stream WebRTC trực tiếp tới Client
+# Worker stream WebRTC trực tiếp qua SFU
+
+> Trạng thái tài liệu: kiến trúc giai đoạn 2 đã được triển khai bằng
+> `avatar-worker + Redis Streams + LiveKit SFU`. Các phần scheduler động, GPU model,
+> distributed recovery và production hardening bên dưới vẫn là thiết kế mục tiêu.
 
 ## 1. Mục tiêu
 
@@ -14,9 +18,9 @@ Kiến trúc mục tiêu cần đáp ứng:
 - Có thể thay runtime WebRTC, message broker hoặc model bằng adapter mới mà không sửa domain.
 - Có backpressure, worker affinity, heartbeat, fallback và khả năng phục hồi khi worker lỗi.
 
-## 2. Hiện trạng và giới hạn
+## 2. Hai runtime hiện có và giới hạn
 
-Hiện tại `AiortcAvatarStreamAdapter` chạy cùng process FastAPI và implement
+Runtime local `AiortcAvatarStreamAdapter` chạy cùng process FastAPI và implement
 `AvatarStreamPort`:
 
 ```text
@@ -33,6 +37,17 @@ Thiết kế này phù hợp với MVP nhưng khi đưa model sinh video vào s�
 - khó scale API và GPU worker theo hai chính sách độc lập;
 - `AvatarStreamPort` đang gộp hai trách nhiệm: signaling media và điều khiển render;
 - một process phải vừa xử lý nghiệp vụ vừa quản lý vòng đời frame/codec/ICE.
+
+Runtime khuyến nghị hiện đã có đường tách process:
+
+```text
+Browser <-- WebRTC --> LiveKit <-- WebRTC --> avatar-worker
+Browser <-- REST/WS --> avatar-chat <-- Redis Streams --> avatar-worker
+API replica <-------- Redis Pub/Sub --------> API replica
+```
+
+Worker hiện phát clip thu sẵn và audio silence/beep. Một `RENDER_WORKER_ID` tĩnh được dùng
+thay cho scheduler; Redis pending reclaim/DLQ và model GPU thật chưa được triển khai.
 
 ## 3. Kiến trúc mục tiêu khuyến nghị
 
@@ -620,13 +635,14 @@ flowchart TB
     SFU --> TURN
 ```
 
-Core API có thể stateless nếu session mapping nằm trong PostgreSQL/Redis. WebSocket cần
-pub/sub hoặc routing theo session khi chạy nhiều replica. GPU worker được scale theo GPU
-capacity và không nằm chung pod/container với API.
+API replica hiện dùng Redis Pub/Sub để fan-out WebSocket và PostgreSQL/cursor để recovery.
+API vẫn chưa hoàn toàn stateless vì lock xử lý message và login rate limit nằm trong process;
+production cần distributed ownership/lock hoặc routing theo session. GPU worker được scale
+theo GPU capacity và không nằm chung pod/container với API.
 
 ## 17. Kế hoạch triển khai theo giai đoạn
 
-### Giai đoạn 1 - Tách abstraction, không đổi hành vi
+### Giai đoạn 1 - Tách abstraction, không đổi hành vi — hoàn thành một phần
 
 1. Tách `AvatarStreamPort` thành `MediaSessionPort` và `AvatarRenderPort`.
 2. Tạo adapter compatibility dùng lại `AiortcAvatarStreamAdapter` và video thu sẵn.
@@ -636,15 +652,18 @@ capacity và không nằm chung pod/container với API.
 
 Kết quả: ứng dụng vẫn chạy một process như hiện tại nhưng core đã sẵn sàng cho worker ngoài.
 
-### Giai đoạn 2 - Worker process riêng trên một host
+Hiện đã có `AvatarStreamPort`, `MediaRoomPort`, adapter aiortc/Redis/LiveKit và composition
+root. `WorkerSchedulerPort`, worker assignment động và các field generation/worker/room trong
+domain session chưa có; LiveKit MVP tạm dùng `RENDER_WORKER_ID` cấu hình tĩnh.
+
+### Giai đoạn 2 - Worker process riêng trên một host — đã có MVP LiveKit
 
 1. Tạo `avatar_worker` và command handler độc lập.
 2. Dùng Redis Streams cho command/event và heartbeat.
 3. Ban đầu worker vẫn phát video thu sẵn để kiểm chứng lifecycle.
-4. Chọn một trong hai đường media:
-   - nhanh: aiortc worker kết nối trực tiếp client;
-   - bền vững: worker publish vào LiveKit ngay từ giai đoạn này.
-5. Chạy chaos test: kill worker, duplicate command, broker reconnect và session timeout.
+4. Đường media đã chọn và triển khai: worker publish vào LiveKit SFU.
+5. Chạy chaos test: kill worker, duplicate command, broker reconnect và session timeout —
+   chưa hoàn thiện.
 
 Kết quả: CPU/GPU/media đã tách khỏi Core, dù chưa có model sinh avatar thật.
 

@@ -3,13 +3,14 @@
 Tài liệu kiến trúc:
 
 - Tổng hợp đầy đủ pipeline hiện tại: [docs/current-pipeline.md](docs/current-pipeline.md).
-- Sơ đồ luồng server hiện tại: [docs/server-flow.md](docs/server-flow.md).
 - Xác thực JWT và refresh rotation: [docs/authentication.md](docs/authentication.md).
-- Đề xuất Render Worker stream trực tiếp tới client/SFU:
+- Luồng auth, phân quyền, chat/reconnect và media hiện tại: [docs/server-flow.md](docs/server-flow.md).
+- Thiết kế Render Worker/SFU và lộ trình model GPU:
   [docs/direct-worker-streaming.md](docs/direct-worker-streaming.md).
 
-MVP nhân vật ảo theo Hexagonal Architecture. FastAPI nhận signaling/chat, aiortc phát
-video theo các trạng thái `idle`, `thinking`, `speaking`, và core không phụ thuộc framework.
+MVP nhân vật ảo theo Hexagonal Architecture. FastAPI nhận signaling/chat; media có thể chạy
+trực tiếp bằng aiortc hoặc qua Render Worker + LiveKit SFU. Video chuyển giữa các trạng thái
+`idle`, `thinking`, `speaking`, và core không phụ thuộc framework.
 Server đồng thời phát một audio track PCM im lặng; track này là điểm thay thế dành cho TTS.
 Mỗi frame video có bộ đếm sáu chữ số ở góc trái để quan sát stream còn đang chạy.
 Trạng thái `thinking` được giữ tối thiểu một giây và có thể chỉnh bằng

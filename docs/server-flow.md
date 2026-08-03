@@ -1,319 +1,300 @@
-# Luồng xử lý Avatar Chat WebRTC Server
+# Luồng xử lý Avatar Chat WebRTC Server hiện tại
 
-Tài liệu này mô tả luồng xử lý hiện tại của server theo kiến trúc Hexagonal
-(Ports & Adapters). Core không phụ thuộc FastAPI, aiortc, SQLAlchemy hay model service.
+Tài liệu này phản ánh implementation hiện tại trong repository. Hệ thống dùng Hexagonal
+Architecture: domain/application không import FastAPI, SQLAlchemy, Redis, aiortc, LiveKit hay
+SDK model. Mọi dependency bên ngoài được nối tại `bootstrap/container.py`.
 
-## 1. Kiến trúc tổng thể
+## 1. Thành phần và ranh giới
 
 ```mermaid
 flowchart LR
-    Browser[Browser client]
+    B[Browser]
 
-    subgraph Inbound[Driving adapters]
-        HTTP[FastAPI REST]
-        WS[FastAPI WebSocket]
+    subgraph API[FastAPI inbound]
+        REST[REST API]
+        WS[Authenticated WebSocket]
+        HUB[Local connection hub]
     end
 
-    subgraph Core[Application core]
-        UC1[CreateSession]
-        UC2[NegotiateStream]
-        UC3[HandleMessage]
-        UC4[GetConversation]
-        UC5[CloseSession]
-        Domain[AvatarSession state machine]
-
-        P1[[SessionRepository]]
-        P2[[ConversationRepository]]
-        P3[[ReplyGeneratorPort]]
-        P4[[AvatarStreamPort]]
+    subgraph CORE[Application and Domain]
+        AUTH[Auth use cases]
+        ACCESS[SessionAccessPolicy]
+        CHAT[HandleMessage]
+        MEDIAUC[Media use cases]
+        SESSION[AvatarSession state machine]
+        PORTS[Ports / Protocols]
     end
 
-    subgraph Outbound[Driven adapters]
-        Memory[In-memory repositories]
+    subgraph DATA[Persistence adapters]
+        MEM[In-memory repositories]
         SQL[SQLAlchemy repositories]
-        Scripted[Scripted reply]
-        Model[HTTP streaming model]
-        WebRTC[AiortcAvatarStreamAdapter]
+        DB[(PostgreSQL / SQLite)]
     end
 
-    Browser -->|REST| HTTP
-    Browser <-->|Chat events| WS
-    HTTP --> UC1
-    HTTP --> UC2
-    HTTP --> UC4
-    HTTP --> UC5
-    WS --> UC3
+    subgraph EVENTS[Control and realtime]
+        PUB[(Redis Pub/Sub\nchat fan-out)]
+        STREAM[(Redis Streams\nrender commands/events)]
+    end
 
-    UC1 --> Domain
-    UC2 --> Domain
-    UC3 --> Domain
-    UC5 --> Domain
+    subgraph MEDIA[Media plane]
+        AIO[aiortc in API]
+        WORKER[avatar-worker]
+        SFU[LiveKit SFU]
+    end
 
-    UC1 --> P1
-    UC2 --> P1
-    UC3 --> P1
-    UC3 --> P2
-    UC3 --> P3
-    UC2 --> P4
-    UC3 --> P4
-    UC5 --> P4
+    MODEL[Scripted / HTTP reply provider]
 
-    Memory -.-> P1
-    Memory -.-> P2
-    SQL -.-> P1
-    SQL -.-> P2
-    Scripted -.-> P3
-    Model -.-> P3
-    WebRTC -.-> P4
-
-    WebRTC -->|SRTP audio/video| Browser
+    B <-->|REST| REST
+    B <-->|chat/events| WS
+    REST --> AUTH
+    REST --> ACCESS
+    REST --> MEDIAUC
+    WS --> AUTH
+    WS --> ACCESS
+    WS --> CHAT
+    CHAT --> SESSION
+    CHAT --> PORTS
+    MEDIAUC --> SESSION
+    MEDIAUC --> PORTS
+    PORTS --> MEM
+    PORTS --> SQL
+    PORTS --> MODEL
+    SQL --> DB
+    WS --> PUB --> HUB --> B
+    MEDIAUC --> STREAM --> WORKER --> SFU --> B
+    MEDIAUC --> AIO --> B
 ```
 
-Dependency được nối duy nhất tại `bootstrap/container.py`. Thay database, model service
-hoặc WebRTC runtime chỉ cần thêm adapter và đổi composition root.
+Hai loại Redis có mục đích khác nhau:
 
-## 2. Khởi tạo session và WebRTC
+- Redis Streams giữ command/event điều khiển Render Worker và có ACK/retry.
+- Redis Pub/Sub fan-out chat event giữa API replica; database và cursor mới là nguồn recovery.
+
+## 2. Xác thực browser
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant API as FastAPI
+    participant Auth as Auth use case
+    participant Repo as AuthSessionRepository
+
+    B->>API: register hoặc login
+    API->>Auth: xác minh user/password
+    Auth->>Repo: lưu auth session + hash refresh JWT
+    API-->>B: access JWT trong JSON
+    API-->>B: refresh JWT HttpOnly + CSRF cookie
+
+    B->>API: REST + Authorization Bearer + CSRF khi mutation
+    API->>Auth: decode JWT, kiểm tra sid/user/revoked/expiry
+
+    B->>API: POST /auth/refresh + cookie + X-CSRF-Token
+    Auth->>Repo: CAS rotate refresh session
+    API-->>B: access JWT và refresh cookie mới
+
+    B->>API: WebSocket subprotocol avatar-chat, bearer.access-JWT
+    API->>Auth: xác thực access JWT trước accept và trước mỗi message
+```
+
+Access token chỉ nằm trong memory của trang. Refresh token chỉ nằm trong cookie `HttpOnly`,
+không được trả cho JavaScript. Logout thu hồi auth session server-side nên REST và WebSocket
+mất quyền ngay. Chi tiết nằm trong [authentication.md](authentication.md).
+
+## 3. Quyền session
+
+| Actor | Xem session/transcript/media | Gửi chat | Đổi public/private | Quản lý share | Đóng session |
+|---|---:|---:|---:|---:|---:|
+| Owner | Có | Có | Có | Có | Có |
+| Shared `interactor` | Có | Có | Không | Không | Không |
+| Shared `viewer` | Có | Không | Không | Không | Không |
+| User đăng nhập xem public | Có | Không, trừ khi có share `interactor` | Không | Không | Không |
+| Anonymous qua `/watch/{id}` | Có, chỉ khi public | Không | Không | Không | Không |
+
+`public` không đồng nghĩa có quyền chat. Anonymous watch không render input gửi tin nhắn.
+Khi owner chuyển public về private, participant anonymous bị ngắt khỏi LiveKit; các user còn
+share hợp lệ vẫn được giữ. Khi thu hồi share, participant tương ứng cũng bị revoke khỏi room.
+
+## 4. Tạo session và khởi tạo media
+
+### 4.1. aiortc mode
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant API as FastAPI
+    participant Core as CreateSession / NegotiateStream
+    participant Repo as SessionRepository
+    participant AIO as AiortcAvatarStreamAdapter
+
+    B->>API: POST /api/sessions + character_id + visibility
+    API->>Core: create(owner_user_id, ...)
+    Core->>Repo: save status=created, avatar=idle
+    API-->>B: session_id + offer_url + chat_url
+
+    B->>API: POST /sessions/{id}/webrtc/offer
+    API->>Core: require owner + CSRF
+    Core->>Repo: status created -> media_starting
+    Core->>AIO: stable video/audio tracks + SDP answer
+    Core->>Repo: status ready, avatar idle
+    API-->>B: SDP answer
+    AIO-->>B: WebRTC audio/video
+```
+
+aiortc mode phù hợp local và owner duy nhất. Viewer chia sẻ nhiều người cần LiveKit mode.
+
+### 4.2. LiveKit mode
+
+```mermaid
+sequenceDiagram
+    participant B as Authenticated browser
+    participant API as FastAPI
+    participant Core as ProvisionMedia
+    participant DB as SessionRepository
+    participant R as Redis Streams
+    participant W as avatar-worker
+    participant L as LiveKit
+
+    B->>API: POST /sessions/{id}/media/access
+    API->>Core: require VIEW, nếu chưa READY thì require MANAGE
+    Core->>DB: created/failed -> media_starting
+    Core->>L: tạo publisher/subscriber token giới hạn room
+    Core->>R: avatar.session.start(command_id)
+    R->>W: command cho RENDER_WORKER_ID
+    W->>L: publish stable audio + video tracks
+    W->>R: avatar.session.ready(command_id)
+    Core->>DB: media_starting -> ready
+    API-->>B: subscriber token + room URL
+    B->>L: subscribe audio/video qua WebRTC
+```
+
+Provision idempotent khi session đã `ready`: API chỉ cấp subscriber token mới, không restart
+worker. Anonymous chỉ dùng endpoint `/api/public/sessions/{id}/media/access` khi session đang
+public và ready.
+
+## 5. Chat, persistent streaming và fan-out
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant B as Browser
-    participant API as FastAPI adapter
-    participant CS as CreateSession
-    participant Repo as SessionRepository
-    participant NS as NegotiateStream
-    participant Avatar as AvatarStreamPort / aiortc
+    participant B1 as Browser gửi
+    participant API1 as API replica 1
+    participant H as HandleMessage
+    participant DB as ConversationRepository
+    participant M as Reply provider
+    participant P as Redis Pub/Sub
+    participant API2 as API replica 2
+    participant B2 as Browser khác
 
-    B->>API: POST /api/sessions
-    API->>CS: execute(character_id)
-    CS->>CS: Tạo AvatarSession(CREATED)
-    CS->>Repo: save(session)
-    Repo-->>CS: saved
-    CS-->>API: session_id + character_id
-    API-->>B: offer_url + chat_url
+    B1->>API1: WS user_message
+    API1->>API1: xác thực token + quyền CHAT
+    API1->>H: execute(actor, session, content)
+    H->>DB: append USER và cấp sequence=1
+    H->>P: user_message snapshot
+    P-->>API1: event
+    P-->>API2: event
+    API1-->>B1: user_message
+    API2-->>B2: user_message
 
-    B->>B: Tạo RTCPeerConnection
-    B->>B: addTransceiver(video, recvonly)
-    B->>B: addTransceiver(audio, recvonly)
-    B->>B: createOffer + ICE gathering
-    B->>API: POST /webrtc/offer (SDP offer)
-    API->>NS: execute(session_id, offer)
-    NS->>Repo: get(session_id)
-    Repo-->>NS: AvatarSession(CREATED)
-    NS->>Avatar: negotiate(session_id, offer)
+    H->>DB: session idle -> thinking
+    H->>P: avatar_state=thinking
+    H->>H: chờ THINKING_MIN_DURATION
+    H->>DB: append ASSISTANT draft, sequence=2, revision=0, streaming
+    H->>P: assistant_started
+    H->>DB: session thinking -> speaking
+    H->>P: avatar_state=speaking
 
-    Avatar->>Avatar: Tạo RTCPeerConnection
-    Avatar->>Avatar: Tạo shared MediaClock
-    Avatar->>Avatar: Mở idle.mp4 và preload frame đầu
-    Avatar->>Avatar: Thêm video track + audio track
-    Avatar->>Avatar: setRemoteDescription
-    Avatar->>Avatar: createAnswer + setLocalDescription
-    Avatar-->>NS: SDP answer
-
-    NS->>NS: session.connected() → IDLE
-    NS->>Avatar: change_state(IDLE)
-    NS->>Repo: save(session)
-    NS-->>API: SDP answer
-    API-->>B: SDP answer + avatar_state=idle
-    B->>B: setRemoteDescription
-    B->>B: Badge chuyển thành idle
-    Avatar-->>B: WebRTC video + audio
-```
-
-## 3. Luồng chat và trạng thái avatar
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant B as Browser
-    participant WS as WebSocket adapter
-    participant HM as HandleMessage
-    participant Sessions as SessionRepository
-    participant History as ConversationRepository
-    participant Reply as ReplyGeneratorPort
-    participant Media as AvatarStreamPort
-
-    B->>WS: user_message
-    WS->>HM: execute(session_id, content)
-    HM->>Sessions: get(session_id)
-    HM->>History: append(USER message)
-
-    HM->>HM: IDLE → THINKING
-    HM->>Sessions: save(THINKING)
-    HM->>Media: change_state(THINKING)
-    HM-->>WS: avatar_state=thinking
-    WS-->>B: avatar_state=thinking
-    HM->>HM: Chờ THINKING_MIN_DURATION
-
-    HM->>History: list_recent()
-    HM->>HM: THINKING → SPEAKING
-    HM->>Sessions: save(SPEAKING)
-    HM->>Media: change_state(SPEAKING)
-    HM-->>WS: avatar_state=speaking
-    WS-->>B: avatar_state=speaking
-
-    loop Mỗi reply chunk
-        HM->>Reply: stream_reply(...)
-        Reply-->>HM: ReplyChunk
-        HM-->>WS: assistant_chunk
-        WS-->>B: assistant_chunk
+    H->>M: stream_reply(history)
+    loop mỗi chunk
+        M-->>H: text chunk
+        H->>DB: CAS update full content, revision + 1
+        H->>P: assistant_chunk full snapshot
+        P-->>B1: cùng message_id/sequence/revision
+        P-->>B2: cùng message_id/sequence/revision
     end
 
-    HM->>History: append(ASSISTANT message)
-    HM->>HM: SPEAKING → IDLE
-    HM->>Sessions: save(IDLE)
-    HM->>Media: change_state(IDLE)
-    HM-->>WS: avatar_state=idle
-    WS-->>B: avatar_state=idle
-    HM-->>WS: assistant_complete
-    WS-->>B: assistant_complete
+    H->>DB: CAS status=complete, revision + 1
+    H->>DB: session speaking -> idle
+    H->>P: avatar_state=idle + assistant_complete
 ```
 
-Mỗi session có một `asyncio.Lock`. Nếu một message khác đến trong khi message hiện tại
-đang xử lý, core trả `SessionBusy` thay vì làm hỏng state machine.
+Chunk là toàn bộ content hiện tại, không phải delta. Browser reconcile theo `message_id` và
+chỉ nhận revision không cũ hơn; vì thế event trùng hoặc đến lệch thứ tự không nhân đôi text.
+Sequence quyết định thứ tự bubble. Một lock theo session chặn message đồng thời trong cùng
+process; repository version/revision phát hiện stale write.
 
-## 4. State machine
+Nếu provider lỗi sau khi draft được tạo, core lưu `status=failed`, khôi phục renderer/domain
+về `idle`, rồi phát `avatar_state=idle` và `assistant_failed`.
 
-```mermaid
-stateDiagram-v2
-    [*] --> CREATED: POST /sessions
-    CREATED --> CONNECTED: SDP negotiation thành công
-    CONNECTED --> IDLE: Media tracks sẵn sàng
-    IDLE --> THINKING: Nhận user message
-    THINKING --> SPEAKING: Hết minimum delay và bắt đầu reply
-    SPEAKING --> IDLE: Reply hoàn tất
-    THINKING --> IDLE: Reply provider lỗi
-    SPEAKING --> IDLE: Reply provider lỗi
-    CREATED --> CLOSED: Đóng session
-    CONNECTED --> CLOSED: Đóng session
-    IDLE --> CLOSED: Đóng session
-    THINKING --> CLOSED: Đóng session
-    SPEAKING --> CLOSED: Đóng session
-    CLOSED --> [*]
-```
-
-## 5. Video track, đổi clip và khôi phục EOF
-
-`SwitchableAvatarVideoTrack` là outbound track ổn định. Việc đổi clip không thay track và
-không yêu cầu SDP renegotiation.
-
-```mermaid
-flowchart TD
-    Sender[RTCRtpSender gọi recv]
-    Read[Đọc frame từ source hiện tại]
-    EOF{MediaStreamError / EOF?}
-    Changed{Generation đã đổi?}
-    Restart[Mở lại clip của state hiện tại]
-    Discard[Bỏ frame cũ]
-    Timestamp[Gán PTS từ shared MediaClock 90 kHz]
-    Counter[Vẽ frame counter góc trái]
-    Pulse{Đang trong sync pulse?}
-    Flash[Vẽ ô trắng góc phải]
-    Encode[Trả frame cho WebRTC encoder]
-
-    Sender --> Read
-    Read --> EOF
-    EOF -->|Không| Changed
-    EOF -->|Có| Changed
-    Changed -->|Source cũ| Discard
-    Discard --> Read
-    Changed -->|Source hiện tại bị EOF| Restart
-    Restart --> Read
-    Changed -->|Frame hợp lệ| Timestamp
-    Timestamp --> Counter
-    Counter --> Pulse
-    Pulse -->|Có| Flash
-    Pulse -->|Không| Encode
-    Flash --> Encode
-    Encode --> Sender
-```
-
-Khi đổi state:
-
-```mermaid
-sequenceDiagram
-    participant Core as HandleMessage
-    participant Track as SwitchableAvatarVideoTrack
-    participant New as MediaPlayer mới
-    participant Old as MediaPlayer cũ
-    participant Sender as RTCRtpSender
-
-    Core->>Track: switch(new_state)
-    Track->>New: Mở clip tương ứng
-    Track->>New: recv() preload frame đầu
-    New-->>Track: first_frame
-    Track->>Track: Swap source + tăng generation
-    alt Sender còn đang đọc source cũ
-        Track->>Track: Đánh dấu source cũ là retired
-        Sender->>Track: Hoàn tất lượt đọc cũ
-        Track->>Old: stop() sau khi active read = 0
-    else Không còn active read
-        Track->>Old: stop() ngay
-    end
-    Track-->>Core: Source mới đã sẵn sàng
-```
-
-Wrapper tự mở lại clip khi PyAV báo EOF ở cuối video 3 giây. Vì vậy frame counter tiếp tục
-tăng qua nhiều vòng clip và qua mọi lần đổi trạng thái.
-
-## 6. Audio câm và A/V sync debug
-
-```mermaid
-flowchart LR
-    Clock[Shared MediaClock]
-    VPTS[Video PTS = elapsed × 90,000]
-    APTS[Audio PTS = elapsed × 48,000]
-    Video[Switchable video track]
-    Audio[Silent / debug audio track]
-    Flash[Ô trắng 100 ms]
-    Beep[Beep 1 kHz 100 ms]
-    PC[RTCPeerConnection]
-    Browser[Browser MediaStream]
-
-    Clock --> VPTS --> Video
-    Clock --> APTS --> Audio
-    Clock -->|Mỗi AV_SYNC_INTERVAL| Flash --> Video
-    Clock -->|Cùng thời điểm| Beep --> Audio
-    Video --> PC
-    Audio --> PC
-    PC --> Browser
-```
-
-Mặc định debug sync được bật:
-
-```env
-AV_SYNC_DEBUG=true
-AV_SYNC_INTERVAL=2.0
-AV_SYNC_PULSE_DURATION=0.1
-```
-
-Browser khởi động video ở chế độ muted. Người dùng phải bấm **Bật âm thanh kiểm tra** để
-nghe beep do chính sách autoplay của trình duyệt.
-
-## 7. Đóng session và cleanup
+## 6. Reconnect và catch-up
 
 ```mermaid
 sequenceDiagram
     participant B as Browser
-    participant API as FastAPI / WebSocket
-    participant Close as CloseSession
-    participant Repo as SessionRepository
-    participant Media as AiortcAvatarStreamAdapter
+    participant WS as WebSocket
+    participant API as REST API
+    participant DB as ConversationRepository
 
-    alt Browser gọi DELETE
-        B->>API: DELETE /api/sessions/{id}
-    else WebSocket disconnect
-        B--xAPI: WebSocketDisconnect
+    WS--xB: mất mạng / API restart
+    B->>B: disable input, backoff 0.5s -> tối đa 10s
+    B->>WS: reconnect với access JWT hiện tại
+    alt WebSocket trả 1008 do token hết hạn
+        B->>API: rotate refresh token
+        B->>WS: reconnect bằng access JWT mới
     end
-    API->>Close: execute(session_id)
-    Close->>Repo: get(session_id)
-    Close->>Close: session.close() → CLOSED
-    Close->>Repo: save(CLOSED)
-    Close->>Media: close(session_id)
-    Media->>Media: Stop current + retired video sources
-    Media->>Media: Stop audio track
-    Media->>Media: Close RTCPeerConnection
+    WS-->>B: connected
+    B->>API: GET messages với cursor sequence:revision, limit 100
+    API->>DB: list_after(cursor)
+    DB-->>B: snapshot mới hơn cursor
+    B->>B: reconcile và lặp page nếu đủ 100 item
 ```
 
-Khi ứng dụng shutdown, container gọi `avatar_stream.shutdown()` để đóng toàn bộ peer còn
-tồn tại, sau đó mới dispose database engine.
+Redis Pub/Sub không lưu event. Sau reconnect, `ConversationRepository` mới là source of truth.
+Public Watch không dùng chat WebSocket; trang poll endpoint public mỗi giây với cùng cursor.
+
+## 7. Video/audio pipeline
+
+Cả hai media runtime giữ một video track và một audio track ổn định trong suốt session. State
+chỉ đổi nguồn frame `idle`, `thinking`, `speaking`, không renegotiate track.
+
+- Mỗi frame được normalize về resolution cấu hình và có frame counter góc trái.
+- Audio PCM mono 48 kHz chạy liên tục; hiện là silence hoặc beep debug.
+- Shared media clock/`AVSynchronizer` giữ cadence và A/V sync.
+- `AV_SYNC_DEBUG` tạo beep 1 kHz và flash trắng trên cùng timeline.
+- Worker dùng bounded queue; audio timeline là master clock và video chạy theo FPS cấu hình.
+
+## 8. Đóng session và cleanup
+
+Đóng WebSocket **không đóng session**. Điều này là chủ ý để browser reconnect và catch-up mà
+không làm dừng media của các viewer khác.
+
+```mermaid
+sequenceDiagram
+    participant O as Owner browser
+    participant API as FastAPI
+    participant C as CloseSession
+    participant DB as SessionRepository
+    participant Media as aiortc / Redis worker adapter
+    participant Room as LiveKit
+
+    O->>API: DELETE /api/sessions/{id} + Bearer + CSRF
+    API->>C: require MANAGE
+    C->>DB: status -> closed, avatar -> idle
+    C->>Media: close / avatar.session.stop
+    C->>Room: close room nếu có
+    API-->>O: 204
+```
+
+Khi application shutdown, container dừng realtime event bus, media adapter và database theo
+thứ tự. Worker process và LiveKit có lifecycle container riêng.
+
+## 9. Nguồn dữ liệu và giới hạn scale hiện tại
+
+- Không có `DATABASE_URL`: toàn bộ user/session/message/share/auth state ở memory và mất khi
+  restart; không dùng được cho nhiều replica.
+- Có database chung + `REALTIME_EVENT_BUS=redis`: history và realtime fan-out dùng được giữa
+  replica.
+- Lock xử lý chat vẫn nằm trong process. Hai replica cùng nhận chat cho một session có thể
+  cạnh tranh; optimistic version/CAS sẽ từ chối stale write nhưng chưa thay distributed lock.
+- Login rate limiter còn in-memory theo replica.
+- Redis Streams chưa có pending reclaim/DLQ; worker vẫn dùng một `RENDER_WORKER_ID` tĩnh.
+- Health endpoint hiện mới xác nhận API process, chưa aggregate Redis/DB/worker/LiveKit.
