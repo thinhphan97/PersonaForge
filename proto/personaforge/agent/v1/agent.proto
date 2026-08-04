@@ -5,6 +5,7 @@ package personaforge.agent.v1;
 service AgentRuntime {
   rpc ExecuteTurn(AgentTurnRequest) returns (stream AgentEvent);
   rpc CancelTurn(CancelTurnRequest) returns (CancelTurnResponse);
+  rpc GetRuntimeStatus(RuntimeStatusRequest) returns (RuntimeStatusResponse);
 }
 
 message ChatMessage {
@@ -40,4 +41,19 @@ message CancelTurnRequest {
 
 message CancelTurnResponse {
   bool cancelled = 1;
+}
+
+message RuntimeStatusRequest {}
+
+message RuntimeStatusResponse {
+  int64 active_turns = 1;
+  int64 queued_turns = 2;
+  int64 max_concurrent_turns = 3;
+  int64 max_queued_turns = 4;
+  int64 accepted_total = 5;
+  int64 rejected_total = 6;
+  int64 completed_total = 7;
+  int64 failed_total = 8;
+  int64 cancelled_total = 9;
+  bool ready = 10;
 }

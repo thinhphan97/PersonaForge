@@ -11,6 +11,7 @@ from personaforge_agent.adapters.outbound.delegation_tokens import JwtDelegation
 from personaforge_agent.adapters.outbound.scripted_model import (
     ScriptedLanguageModelAdapter,
 )
+from personaforge_agent.application.admission import TurnAdmissionController
 from personaforge_agent.application.execute_turn import ExecuteAgentTurn
 from personaforge_agent.bootstrap.settings import AgentSettings
 
@@ -29,6 +30,25 @@ async def serve(settings: AgentSettings | None = None) -> None:
         resolved.delegation_issuer,
         resolved.delegation_audience,
     )
+    health_service = health.aio.HealthServicer()
+    service_name = "personaforge.agent.v1.AgentRuntime"
+
+    async def capacity_changed(ready: bool) -> None:
+        status = (
+            health_pb2.HealthCheckResponse.SERVING
+            if ready
+            else health_pb2.HealthCheckResponse.NOT_SERVING
+        )
+        await health_service.set(service_name, status)
+
+    admission = TurnAdmissionController(
+        resolved.max_concurrent_turns,
+        resolved.max_queued_turns,
+        resolved.max_concurrent_per_user,
+        resolved.max_concurrent_per_session,
+        resolved.queue_timeout_seconds,
+        capacity_changed,
+    )
     server = grpc.aio.server(
         options=(
             ("grpc.keepalive_time_ms", 10_000),
@@ -37,12 +57,10 @@ async def serve(settings: AgentSettings | None = None) -> None:
         )
     )
     agent_pb2_grpc.add_AgentRuntimeServicer_to_server(
-        AgentRuntimeGrpcService(execute, verifier),
+        AgentRuntimeGrpcService(execute, verifier, admission),
         server,
     )
-    health_service = health.aio.HealthServicer()
     health_pb2_grpc.add_HealthServicer_to_server(health_service, server)
-    service_name = "personaforge.agent.v1.AgentRuntime"
     await health_service.set(service_name, health_pb2.HealthCheckResponse.SERVING)
     address = f"{resolved.host}:{resolved.port}"
     server.add_insecure_port(address)

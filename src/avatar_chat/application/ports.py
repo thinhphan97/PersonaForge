@@ -299,6 +299,14 @@ class AgentAuthorizationPort(Protocol):
     ) -> AgentAuthorizationScope: ...
 
 
+class SessionTurnLockLease(Protocol):
+    async def release(self) -> None: ...
+
+
+class SessionTurnLockPort(Protocol):
+    async def acquire(self, session_id: str) -> SessionTurnLockLease | None: ...
+
+
 class IdGenerator(Protocol):
     def new_id(self) -> str: ...
 

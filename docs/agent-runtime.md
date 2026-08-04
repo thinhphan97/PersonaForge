@@ -86,6 +86,67 @@ chưa có token và có deadline ở Core. Cấu hình mặc định:
 đăng ký chuẩn `grpc.health.v1.Health`; Docker healthcheck kiểm tra service name
 `personaforge.agent.v1.AgentRuntime`.
 
+## Concurrency, queue và backpressure
+
+Mỗi `ExecuteTurn` là một asyncio task riêng. `TurnAdmissionController` kiểm soát trước khi
+task được phép gọi model:
+
+```text
+gRPC request
+    -> verify delegated JWT
+    -> reject duplicate turn_id
+    -> bounded admission queue
+    -> global/user/session capacity slot
+    -> ExecuteAgentTurn
+```
+
+Các giới hạn mặc định:
+
+```env
+AGENT_MAX_CONCURRENT_TURNS=20
+AGENT_MAX_QUEUED_TURNS=100
+AGENT_MAX_CONCURRENT_PER_USER=3
+AGENT_MAX_CONCURRENT_PER_SESSION=1
+AGENT_QUEUE_TIMEOUT=10
+```
+
+Queue chọn ticket hợp lệ đầu tiên thay vì khóa cứng theo đầu hàng: nếu user ở đầu queue đã
+hết quota, turn của user khác vẫn có thể dùng capacity còn trống. Queue đầy hoặc chờ quá
+`AGENT_QUEUE_TIMEOUT` trả gRPC `RESOURCE_EXHAUSTED`. Duplicate `turn_id` đang active trả
+`ALREADY_EXISTS`. Client disconnect và `CancelTurn` đều đánh thức cancellation path.
+
+Readiness chuyển sang `NOT_SERVING` khi toàn bộ execution slot và queue đều đầy, rồi tự trở
+lại `SERVING` khi có capacity. RPC `GetRuntimeStatus` cung cấp snapshot:
+
+- active/queued và capacity;
+- accepted/rejected total;
+- completed/failed/cancelled total;
+- cờ `ready`.
+
+Các counter hiện nằm trong từng Agent process và reset khi restart. Khi production cần lịch
+sử hoặc tổng hợp nhiều replica, scrape/export snapshot sang Prometheus/OpenTelemetry.
+
+## Khóa turn giữa nhiều Core replica
+
+Core vẫn có local lock để từ chối hai message đồng thời trong một process. Khi dùng
+PostgreSQL, `PostgresAdvisorySessionTurnLock` còn giữ một session-level advisory lock trên
+connection riêng trong toàn bộ turn. Vì vậy hai API replica dùng chung database không thể
+cùng thay đổi transcript/avatar state của một session.
+
+```env
+SESSION_TURN_LOCK_TIMEOUT=0
+```
+
+Giá trị `0` thử lock một lần và trả `SessionBusy` ngay. Có thể đặt số giây dương để đợi ngắn.
+Lock key là signed 64-bit BLAKE2b của namespace + session ID; lock được commit ngoài
+transaction business và luôn unlock/close connection trong `finally`. SQLite/in-memory chỉ
+dùng local process lock, không được dùng để scale nhiều Core replica.
+
+Mỗi advisory lock giữ một PostgreSQL connection trong suốt turn. Vì vậy Core mặc định đặt
+`DATABASE_POOL_SIZE=20`, `DATABASE_MAX_OVERFLOW=10`; khi thay đổi concurrency cần đảm bảo
+pool có ít nhất số active turn dự kiến cộng phần dư cho query auth/chat thông thường, đồng thời
+không vượt `max_connections` của PostgreSQL trên tổng số Core replica.
+
 ## Delegated authorization
 
 Core ký HS256 JWT bằng `AGENT_DELEGATION_SECRET`. Claims quan trọng:

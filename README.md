@@ -141,6 +141,11 @@ Mở <http://localhost:8000>, tạo/kết nối session rồi chat như bình th
 `ExecuteTurn` và nhận event `turn_started`, `heartbeat`, `text_delta`, `turn_completed` qua
 cùng một HTTP/2 stream. Healthcheck của Compose gọi chuẩn gRPC Health Checking.
 
+Agent mặc định chạy tối đa 20 turn, queue 100 turn, tối đa 3 turn/user và 1 turn/session.
+Queue đầy hoặc timeout trả `RESOURCE_EXHAUSTED`; health chuyển `NOT_SERVING` khi không còn
+execution/queue capacity. Điều chỉnh bằng nhóm biến `AGENT_MAX_*` và `AGENT_QUEUE_TIMEOUT`
+trong `.env`.
+
 Agent demo dùng `ScriptedLanguageModelAdapter`. Khi tích hợp LLM thật, implement
 `LanguageModelPort` trong `personaforge_agent/adapters/outbound` và wire provider trong
 `personaforge_agent/main.py`; Core API không cần thay đổi.
@@ -252,7 +257,8 @@ cũng reconcile snapshot định kỳ để tránh giữ UI cũ.
 - Nếu không cấu hình `DATABASE_URL`, session và lịch sử mất khi process restart.
 - Chat event dùng Redis Pub/Sub trong LiveKit mode và browser tự catch-up từ database bằng
   cursor `sequence:revision`. Muốn chạy nhiều API replica bắt buộc dùng database chung và
-  `REALTIME_EVENT_BUS=redis`; lock xử lý message vẫn chưa phải distributed lock.
+  `REALTIME_EVENT_BUS=redis`. PostgreSQL mode dùng advisory lock theo session để ngăn hai
+  replica chạy hai turn cùng lúc; memory/SQLite mode chỉ có local lock.
 - Chưa có TURN mặc định; rate limit đăng nhập hiện lưu trong memory nên cần Redis khi scale.
 - Audio hiện là track im lặng 48 kHz; chưa có nội dung TTS.
 - Agent Runtime đã tách process và bảo vệ bằng delegated JWT, nhưng TTS/Avatar model thật

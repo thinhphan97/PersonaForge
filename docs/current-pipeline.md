@@ -223,6 +223,7 @@ Các invariant chính:
 | `AgentRuntimePort` | Stream event của một Agent turn | gRPC, legacy local bridge |
 | `AgentTurnRepository` | Lưu lifecycle/sequence của turn | In-memory, SQLAlchemy |
 | `AgentDelegationTokenPort` | Cấp JWT scope hẹp cho Agent | PyJWT HS256 adapter |
+| `SessionTurnLockPort` | Serialize turn giữa Core replica | PostgreSQL advisory lock |
 | `ReplyGeneratorPort` | Provider local cũ sau compatibility bridge | Scripted, HTTP SSE/NDJSON |
 | `IdGenerator` | Sinh ID | UUID |
 | `Clock` | Cấp thời gian | System clock |
@@ -842,7 +843,10 @@ video được thay bằng thông báo kết thúc và không retry cấp media 
 `AGENT_RUNTIME_PROVIDER=grpc` tách model orchestration khỏi Core. Core tạo `AgentTurn`, cấp
 delegated JWT ngắn hạn và gọi server-streaming `ExecuteTurn`. Agent phát
 `turn_started/heartbeat/text_delta/turn_completed`; Core persist sequence và transcript trước
-khi fan-out cho browser. Chi tiết nằm tại [agent-runtime.md](agent-runtime.md).
+khi fan-out cho browser. Admission controller giới hạn global/user/session concurrency, dùng
+bounded queue và trả `RESOURCE_EXHAUSTED` khi quá tải. PostgreSQL advisory lock đảm bảo một
+session chỉ có một turn trên toàn bộ Core replica. Chi tiết nằm tại
+[agent-runtime.md](agent-runtime.md).
 
 ### 13.2. Scripted provider local tương thích
 

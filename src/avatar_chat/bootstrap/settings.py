@@ -22,6 +22,8 @@ class Settings:
     port: int
     database_url: str | None
     auto_create_schema: bool
+    database_pool_size: int
+    database_max_overflow: int
     refresh_cookie_name: str
     auth_cookie_secure: bool
     jwt_secret: str
@@ -42,6 +44,7 @@ class Settings:
     agent_delegation_secret: str
     agent_delegation_issuer: str
     agent_delegation_audience: str
+    session_turn_lock_timeout_seconds: float
     ice_server_urls: tuple[str, ...]
     ice_username: str | None
     ice_credential: str | None
@@ -76,6 +79,8 @@ class Settings:
             database_url=os.getenv("DATABASE_URL") or None,
             auto_create_schema=os.getenv("AUTO_CREATE_SCHEMA", "true").lower()
             in {"1", "true", "yes", "on"},
+            database_pool_size=int(os.getenv("DATABASE_POOL_SIZE", "20")),
+            database_max_overflow=int(os.getenv("DATABASE_MAX_OVERFLOW", "10")),
             refresh_cookie_name=os.getenv("REFRESH_COOKIE_NAME", "avatar_refresh"),
             auth_cookie_secure=os.getenv("AUTH_COOKIE_SECURE", "false").lower()
             in {"1", "true", "yes", "on"},
@@ -115,6 +120,9 @@ class Settings:
             ),
             agent_delegation_audience=os.getenv(
                 "AGENT_DELEGATION_AUDIENCE", "personaforge-agent"
+            ),
+            session_turn_lock_timeout_seconds=float(
+                os.getenv("SESSION_TURN_LOCK_TIMEOUT", "0")
             ),
             ice_server_urls=ice_urls,
             ice_username=os.getenv("WEBRTC_ICE_USERNAME"),

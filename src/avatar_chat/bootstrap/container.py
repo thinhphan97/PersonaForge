@@ -30,6 +30,9 @@ from avatar_chat.adapters.outbound.realtime_events import (
     RedisRealtimeEventBus,
 )
 from avatar_chat.adapters.outbound.replies import DelayedReplyAdapter, ScriptedReplyAdapter
+from avatar_chat.adapters.outbound.session_turn_locks import (
+    PostgresAdvisorySessionTurnLock,
+)
 from avatar_chat.adapters.outbound.sqlalchemy_repositories import (
     SqlAlchemyAgentTurnRepository,
     SqlAlchemyAuthSessionRepository,
@@ -66,6 +69,7 @@ from avatar_chat.application.ports import (
     SessionMutationPort,
     SessionRepository,
     SessionShareRepository,
+    SessionTurnLockPort,
     UserRepository,
 )
 from avatar_chat.application.session_access import (
@@ -161,10 +165,13 @@ def build_container(settings: Settings) -> Container:
     mutations: SessionMutationPort
     outbox: RealtimeOutboxRepository
     agent_turns: AgentTurnRepository
+    turn_locks: SessionTurnLockPort | None = None
     if settings.database_url:
         database = SqlAlchemyDatabase(
             settings.database_url,
             auto_create_schema=settings.auto_create_schema,
+            pool_size=settings.database_pool_size,
+            max_overflow=settings.database_max_overflow,
         )
         sessions = SqlAlchemySessionRepository(database.sessions)
         conversations = SqlAlchemyConversationRepository(database.sessions)
@@ -175,6 +182,11 @@ def build_container(settings: Settings) -> Container:
         sql_mutations = SqlAlchemySessionMutationUnitOfWork(database.sessions)
         mutations = sql_mutations
         outbox = sql_mutations
+        if database.engine.dialect.name == "postgresql":
+            turn_locks = PostgresAdvisorySessionTurnLock(
+                database.engine,
+                settings.session_turn_lock_timeout_seconds,
+            )
         lifecycles = (cast(InfrastructureLifecycle, database),)
     else:
         sessions = InMemorySessionRepository()
@@ -342,6 +354,7 @@ def build_container(settings: Settings) -> Container:
             access,
             thinking_min_duration_seconds=settings.thinking_min_duration_seconds,
             authorization=DenyAllAgentAuthorizationAdapter(),
+            turn_locks=turn_locks,
         ),
         get_conversation=GetConversation(sessions, conversations, access),
         close_session=CloseSession(

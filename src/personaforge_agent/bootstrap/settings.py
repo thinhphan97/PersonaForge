@@ -9,6 +9,11 @@ class AgentSettings:
     provider: str
     chunk_delay_seconds: float
     heartbeat_interval_seconds: float
+    max_concurrent_turns: int
+    max_queued_turns: int
+    max_concurrent_per_user: int
+    max_concurrent_per_session: int
+    queue_timeout_seconds: float
     delegation_secret: str
     delegation_issuer: str
     delegation_audience: str
@@ -23,6 +28,15 @@ class AgentSettings:
             heartbeat_interval_seconds=float(
                 os.getenv("AGENT_HEARTBEAT_INTERVAL", "5")
             ),
+            max_concurrent_turns=int(os.getenv("AGENT_MAX_CONCURRENT_TURNS", "20")),
+            max_queued_turns=int(os.getenv("AGENT_MAX_QUEUED_TURNS", "100")),
+            max_concurrent_per_user=int(
+                os.getenv("AGENT_MAX_CONCURRENT_PER_USER", "3")
+            ),
+            max_concurrent_per_session=int(
+                os.getenv("AGENT_MAX_CONCURRENT_PER_SESSION", "1")
+            ),
+            queue_timeout_seconds=float(os.getenv("AGENT_QUEUE_TIMEOUT", "10")),
             delegation_secret=os.getenv(
                 "AGENT_DELEGATION_SECRET",
                 "development-agent-delegation-secret-change-me",

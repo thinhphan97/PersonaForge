@@ -127,7 +127,7 @@ class GrpcAgentRuntimeAdapter:
                     )
                 except StopAsyncIteration:
                     return
-                except TimeoutError:
+                except asyncio.TimeoutError:
                     call.cancel()
                     raise TimeoutError(
                         f"Agent turn became idle: {request.turn_id}"

@@ -30,7 +30,12 @@ from avatar_chat.application.use_cases import (
     ProvisionMedia,
     ProvisionPublicMedia,
 )
-from avatar_chat.domain.errors import CharacterNotFound, SessionClosed, SessionNotFound
+from avatar_chat.domain.errors import (
+    CharacterNotFound,
+    SessionBusy,
+    SessionClosed,
+    SessionNotFound,
+)
 from avatar_chat.domain.models import (
     AgentTurnStatus,
     AvatarState,
@@ -155,6 +160,23 @@ class FakeDelegationTokens:
             issued_at,
         )
         return "delegation-token"
+
+
+class FakeTurnLockLease:
+    def __init__(self) -> None:
+        self.released = False
+
+    async def release(self) -> None:
+        self.released = True
+
+
+class FakeTurnLocks:
+    def __init__(self, available: bool = True) -> None:
+        self.lease = FakeTurnLockLease() if available else None
+
+    async def acquire(self, session_id: str) -> FakeTurnLockLease | None:
+        assert session_id
+        return self.lease
 
 
 def agent_dependencies(replies: object) -> tuple[object, object, object]:
@@ -351,6 +373,28 @@ async def test_closed_session_is_read_only_and_rejects_new_chat() -> None:
         await anext(stream)
 
     assert await conversations.list_recent(created.session_id, 10) == ()
+
+
+@pytest.mark.asyncio
+async def test_distributed_turn_lock_rejects_a_concurrent_session_turn() -> None:
+    sessions = InMemorySessionRepository()
+    conversations = InMemoryConversationRepository()
+    ids = SequentialIds()
+    clock = FixedClock()
+    avatar = FakeAvatarStream()
+    handler = HandleMessage(
+        sessions,
+        conversations,
+        avatar,
+        *agent_dependencies(FakeReplies()),
+        ids,
+        clock,
+        access_policy(),
+        turn_locks=FakeTurnLocks(available=False),
+    )
+
+    with pytest.raises(SessionBusy):
+        await anext(handler.execute(USER_ID, "locked-session", "Hello"))
 
 
 @pytest.mark.asyncio

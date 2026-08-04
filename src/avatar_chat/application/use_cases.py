@@ -30,6 +30,8 @@ from avatar_chat.application.ports import (
     MediaRoomPort,
     SessionMutationPort,
     SessionRepository,
+    SessionTurnLockLease,
+    SessionTurnLockPort,
 )
 from avatar_chat.application.session_access import SessionAccessPolicy
 from avatar_chat.domain.errors import (
@@ -237,6 +239,7 @@ class HandleMessage:
     history_limit: int = 30
     thinking_min_duration_seconds: float = 0
     authorization: AgentAuthorizationPort | None = None
+    turn_locks: SessionTurnLockPort | None = None
     _locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False)
 
     async def execute(
@@ -253,7 +256,12 @@ class HandleMessage:
         if lock.locked():
             raise SessionBusy(session_id)
 
+        distributed_lease: SessionTurnLockLease | None = None
         try:
+            if self.turn_locks is not None:
+                distributed_lease = await self.turn_locks.acquire(session_id)
+                if distributed_lease is None:
+                    raise SessionBusy(session_id)
             async with lock:
                 session = await _require_session(self.sessions, session_id)
                 await self.access.require(actor_user_id, session, SessionAction.CHAT)
@@ -527,6 +535,14 @@ class HandleMessage:
                     revision=assistant_message.revision,
                 )
         finally:
+            if distributed_lease is not None:
+                try:
+                    await distributed_lease.release()
+                except BaseException:
+                    logger.exception(
+                        "Could not release distributed session turn lock session=%s",
+                        session_id,
+                    )
             if not lock.locked() and self._locks.get(session_id) is lock:
                 self._locks.pop(session_id, None)
 
