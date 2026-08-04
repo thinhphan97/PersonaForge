@@ -35,6 +35,13 @@ class Settings:
     thinking_min_duration_seconds: float
     reply_http_url: str | None
     reply_http_token: str | None
+    agent_runtime_provider: str
+    agent_grpc_target: str
+    agent_turn_timeout_seconds: float
+    agent_idle_timeout_seconds: float
+    agent_delegation_secret: str
+    agent_delegation_issuer: str
+    agent_delegation_audience: str
     ice_server_urls: tuple[str, ...]
     ice_username: str | None
     ice_credential: str | None
@@ -95,6 +102,20 @@ class Settings:
             ),
             reply_http_url=os.getenv("REPLY_HTTP_URL"),
             reply_http_token=os.getenv("REPLY_HTTP_TOKEN"),
+            agent_runtime_provider=os.getenv("AGENT_RUNTIME_PROVIDER", "local").lower(),
+            agent_grpc_target=os.getenv("AGENT_GRPC_TARGET", "personaforge-agent:50051"),
+            agent_turn_timeout_seconds=float(os.getenv("AGENT_TURN_TIMEOUT", "120")),
+            agent_idle_timeout_seconds=float(os.getenv("AGENT_IDLE_TIMEOUT", "15")),
+            agent_delegation_secret=os.getenv(
+                "AGENT_DELEGATION_SECRET",
+                "development-agent-delegation-secret-change-me",
+            ),
+            agent_delegation_issuer=os.getenv(
+                "AGENT_DELEGATION_ISSUER", "personaforge-api"
+            ),
+            agent_delegation_audience=os.getenv(
+                "AGENT_DELEGATION_AUDIENCE", "personaforge-agent"
+            ),
             ice_server_urls=ice_urls,
             ice_username=os.getenv("WEBRTC_ICE_USERNAME"),
             ice_credential=os.getenv("WEBRTC_ICE_CREDENTIAL"),

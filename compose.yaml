@@ -24,6 +24,13 @@ services:
       AV_SYNC_PULSE_DURATION: ${AV_SYNC_PULSE_DURATION:-0.1}
       REPLY_HTTP_URL: ${REPLY_HTTP_URL:-}
       REPLY_HTTP_TOKEN: ${REPLY_HTTP_TOKEN:-}
+      AGENT_RUNTIME_PROVIDER: ${AGENT_RUNTIME_PROVIDER:-local}
+      AGENT_GRPC_TARGET: ${AGENT_GRPC_TARGET:-personaforge-agent:50051}
+      AGENT_TURN_TIMEOUT: ${AGENT_TURN_TIMEOUT:-120}
+      AGENT_IDLE_TIMEOUT: ${AGENT_IDLE_TIMEOUT:-15}
+      AGENT_DELEGATION_SECRET: ${AGENT_DELEGATION_SECRET:-development-agent-delegation-secret-change-me}
+      AGENT_DELEGATION_ISSUER: ${AGENT_DELEGATION_ISSUER:-personaforge-api}
+      AGENT_DELEGATION_AUDIENCE: ${AGENT_DELEGATION_AUDIENCE:-personaforge-agent}
       WEBRTC_ICE_SERVERS: ${WEBRTC_ICE_SERVERS:-}
       WEBRTC_ICE_USERNAME: ${WEBRTC_ICE_USERNAME:-}
       WEBRTC_ICE_CREDENTIAL: ${WEBRTC_ICE_CREDENTIAL:-}
@@ -40,6 +47,37 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    restart: unless-stopped
+
+  personaforge-agent:
+    build: .
+    command: ["python", "-m", "personaforge_agent.main"]
+    profiles: ["agent"]
+    environment:
+      AGENT_GRPC_HOST: 0.0.0.0
+      AGENT_GRPC_PORT: 50051
+      AGENT_MODEL_PROVIDER: ${AGENT_MODEL_PROVIDER:-scripted}
+      AGENT_CHUNK_DELAY: ${AGENT_CHUNK_DELAY:-0.1}
+      AGENT_HEARTBEAT_INTERVAL: ${AGENT_HEARTBEAT_INTERVAL:-5}
+      AGENT_DELEGATION_SECRET: ${AGENT_DELEGATION_SECRET:-development-agent-delegation-secret-change-me}
+      AGENT_DELEGATION_ISSUER: ${AGENT_DELEGATION_ISSUER:-personaforge-api}
+      AGENT_DELEGATION_AUDIENCE: ${AGENT_DELEGATION_AUDIENCE:-personaforge-agent}
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import grpc;
+          from grpc_health.v1 import health_pb2, health_pb2_grpc;
+          channel=grpc.insecure_channel('127.0.0.1:50051');
+          response=health_pb2_grpc.HealthStub(channel).Check(
+          health_pb2.HealthCheckRequest(service='personaforge.agent.v1.AgentRuntime'),
+          timeout=2);
+          assert response.status == health_pb2.HealthCheckResponse.SERVING
+      interval: 5s
+      timeout: 3s
+      retries: 20
     restart: unless-stopped
 
   postgres:

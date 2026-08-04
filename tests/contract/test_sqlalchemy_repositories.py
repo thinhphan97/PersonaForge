@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from avatar_chat.adapters.outbound.sqlalchemy_repositories import (
+    SqlAlchemyAgentTurnRepository,
     SqlAlchemyConversationRepository,
     SqlAlchemyDatabase,
     SqlAlchemySessionMutationUnitOfWork,
@@ -18,6 +19,8 @@ from avatar_chat.application.dto import (
 )
 from avatar_chat.domain.errors import ConcurrentSessionUpdate
 from avatar_chat.domain.models import (
+    AgentTurn,
+    AgentTurnStatus,
     AuditLog,
     AvatarSession,
     AvatarState,
@@ -136,6 +139,44 @@ async def test_sqlalchemy_session_repository_uses_optimistic_version(
             await repository.save(stale, expected_version=0)
     finally:
         await database.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_sqlalchemy_agent_turn_repository_persists_lifecycle(tmp_path: Path) -> None:
+    database = SqlAlchemyDatabase(f"sqlite+aiosqlite:///{tmp_path / 'agent-turn.db'}")
+    await database.startup()
+    repository = SqlAlchemyAgentTurnRepository(database.sessions)
+    now = datetime(2026, 8, 4, tzinfo=timezone.utc)
+    turn = AgentTurn(
+        "turn-1",
+        "session-1",
+        "user-1",
+        "default",
+        "message-1",
+        AgentTurnStatus.RUNNING,
+        0,
+        now,
+        now,
+    )
+    try:
+        await repository.save(turn)
+        await repository.save(
+            replace(
+                turn,
+                status=AgentTurnStatus.COMPLETED,
+                last_event_sequence=7,
+                completed_at=now,
+            )
+        )
+        loaded = await repository.get("turn-1")
+    finally:
+        await database.shutdown()
+
+    assert loaded is not None
+    assert loaded.status is AgentTurnStatus.COMPLETED
+    assert loaded.last_event_sequence == 7
+    assert loaded.completed_at is not None
+    assert loaded.completed_at.replace(tzinfo=timezone.utc) == now
 
 
 @pytest.mark.asyncio

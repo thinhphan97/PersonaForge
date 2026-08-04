@@ -3,7 +3,9 @@ from datetime import datetime, timezone
 
 import pytest
 
+from avatar_chat.adapters.outbound.agent_runtime import LegacyReplyAgentAdapter
 from avatar_chat.adapters.outbound.memory import (
+    InMemoryAgentTurnRepository,
     InMemoryConversationRepository,
     InMemorySessionRepository,
     InMemorySessionShareRepository,
@@ -30,6 +32,7 @@ from avatar_chat.application.use_cases import (
 )
 from avatar_chat.domain.errors import CharacterNotFound, SessionClosed, SessionNotFound
 from avatar_chat.domain.models import (
+    AgentTurnStatus,
     AvatarState,
     ChatMessage,
     ChatMessageStatus,
@@ -131,6 +134,37 @@ class FakeReplies:
         yield ReplyChunk("chào")
 
 
+class FakeDelegationTokens:
+    def issue(
+        self,
+        user_id: str,
+        session_id: str,
+        turn_id: str,
+        agent_id: str,
+        tool_permissions: tuple[str, ...],
+        knowledge_base_ids: tuple[str, ...],
+        issued_at: datetime,
+    ) -> str:
+        del (
+            user_id,
+            session_id,
+            turn_id,
+            agent_id,
+            tool_permissions,
+            knowledge_base_ids,
+            issued_at,
+        )
+        return "delegation-token"
+
+
+def agent_dependencies(replies: object) -> tuple[object, object, object]:
+    return (
+        LegacyReplyAgentAdapter(replies),  # type: ignore[arg-type]
+        InMemoryAgentTurnRepository(),
+        FakeDelegationTokens(),
+    )
+
+
 class FakeMediaRooms:
     def __init__(self) -> None:
         self.provision_count = 0
@@ -225,7 +259,7 @@ async def test_message_flow_changes_avatar_and_persists_history() -> None:
         sessions,
         conversations,
         avatar,
-        FakeReplies(),
+        *agent_dependencies(FakeReplies()),
         ids,
         clock,
         access,
@@ -307,7 +341,7 @@ async def test_closed_session_is_read_only_and_rejects_new_chat() -> None:
         sessions,
         conversations,
         avatar,
-        FakeReplies(),
+        *agent_dependencies(FakeReplies()),
         ids,
         clock,
         access,
@@ -492,11 +526,14 @@ async def test_provider_failure_restores_idle_state() -> None:
         created.session_id,
         WebRtcOffer("offer", "offer"),
     )
+    agent_turns = InMemoryAgentTurnRepository()
     handler = HandleMessage(
         sessions,
         conversations,
         avatar,
-        FailingReplies(),
+        LegacyReplyAgentAdapter(FailingReplies()),
+        agent_turns,
+        FakeDelegationTokens(),
         ids,
         clock,
         access,
@@ -520,6 +557,10 @@ async def test_provider_failure_restores_idle_state() -> None:
     ]
     assert events[-1].revision == failed_history[-1].revision
     assert avatar.states[-1] is AvatarState.IDLE
+    failed_turn = await agent_turns.get("id-4")
+    assert failed_turn is not None
+    assert failed_turn.status is AgentTurnStatus.FAILED
+    assert failed_turn.failure_code == "RuntimeError"
 
 
 @pytest.mark.asyncio
@@ -543,7 +584,7 @@ async def test_thinking_render_failure_restores_core_and_renderer_to_idle() -> N
         sessions,
         conversations,
         avatar,
-        FakeReplies(),
+        *agent_dependencies(FakeReplies()),
         ids,
         clock,
         access,

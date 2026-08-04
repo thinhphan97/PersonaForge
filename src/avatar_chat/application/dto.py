@@ -5,6 +5,7 @@ from enum import Enum
 from avatar_chat.domain.models import (
     AuthSession,
     AvatarState,
+    ChatMessage,
     SessionStatus,
     SessionVisibility,
     SharePermission,
@@ -146,3 +147,40 @@ class RealtimeOutboxEvent:
     session_id: str
     event: ChatOutputEvent
     created_at: datetime
+
+
+class AgentRuntimeEventType(str, Enum):
+    TURN_STARTED = "turn_started"
+    HEARTBEAT = "heartbeat"
+    TEXT_DELTA = "text_delta"
+    TURN_COMPLETED = "turn_completed"
+    TURN_FAILED = "turn_failed"
+
+
+@dataclass(frozen=True, slots=True)
+class AgentTurnRequest:
+    turn_id: str
+    session_id: str
+    user_id: str
+    agent_id: str
+    agent_config_version: int
+    user_message: str
+    history: tuple[ChatMessage, ...]
+    tool_permissions: tuple[str, ...] = ()
+    knowledge_base_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class AgentRuntimeEvent:
+    type: AgentRuntimeEventType
+    sequence: int
+    text: str = ""
+    stage: str = ""
+    error_code: str = ""
+    error_detail: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class AgentAuthorizationScope:
+    tool_permissions: tuple[str, ...] = ()
+    knowledge_base_ids: tuple[str, ...] = ()

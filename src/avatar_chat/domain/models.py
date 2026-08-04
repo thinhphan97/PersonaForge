@@ -45,6 +45,14 @@ class SharePermission(str, Enum):
     INTERACTOR = "interactor"
 
 
+class AgentTurnStatus(str, Enum):
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    TIMED_OUT = "timed_out"
+
+
 class SessionAction(str, Enum):
     VIEW = "view"
     CHAT = "chat"
@@ -123,7 +131,7 @@ class AvatarSession:
     created_at: datetime
     updated_at: datetime
     version: int = 0
-
+    agent_id: str = "default"
     def start_media(self, now: datetime) -> None:
         self._transition_status(
             SessionStatus.MEDIA_STARTING,
@@ -194,3 +202,19 @@ class AvatarSession:
             raise InvalidStateTransition(self.avatar_state, target)
         self.avatar_state = target
         self.updated_at = now
+
+
+@dataclass(slots=True)
+class AgentTurn:
+    turn_id: str
+    session_id: str
+    user_id: str
+    agent_id: str
+    assistant_message_id: str
+    status: AgentTurnStatus
+    last_event_sequence: int
+    started_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None = None
+    failure_code: str | None = None
+    failure_detail: str | None = None

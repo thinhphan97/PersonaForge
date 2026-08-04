@@ -13,6 +13,8 @@ Tài liệu kiến trúc:
 - Luồng auth, phân quyền, chat/reconnect và media hiện tại: [docs/server-flow.md](docs/server-flow.md).
 - Thiết kế Render Worker/SFU và lộ trình model GPU:
   [docs/direct-worker-streaming.md](docs/direct-worker-streaming.md).
+- Agent Runtime, gRPC streaming và delegated authorization:
+  [docs/agent-runtime.md](docs/agent-runtime.md).
 
 Phiên bản hiện tại là nền tảng MVP của PersonaForge, được triển khai theo Hexagonal
 Architecture. FastAPI nhận signaling/chat; media có thể chạy
@@ -25,9 +27,10 @@ Trạng thái `thinking` được giữ tối thiểu một giây và có thể 
 Chế độ `AV_SYNC_DEBUG` mặc định phát beep 1 kHz và nháy ô trắng đồng thời mỗi hai giây;
 bấm “Bật âm thanh kiểm tra” trên video để nghe do giới hạn autoplay của trình duyệt.
 
-Định hướng tiếp theo là gắn một Agent runtime vào mỗi session, bổ sung memory, knowledge,
-tools và model trả lời; đồng thời cho phép người dùng chọn hoặc tùy chỉnh TTS voice và avatar
-renderer mà không làm thay đổi business core.
+Mỗi chat turn hiện có thể được giao cho Agent Runtime độc lập qua server-streaming gRPC.
+Core API vẫn là nơi quyết định quyền truy cập, lưu transcript và trạng thái turn; Agent chỉ
+nhận JWT ủy quyền ngắn hạn, giới hạn đúng user, session, turn, tool và knowledge scope.
+Provider `local` vẫn được giữ để demo không cần thêm service.
 
 ## Chạy local
 
@@ -124,7 +127,25 @@ khi kết nối. Muốn thêm nhân vật, tạo thư mục `assets/characters/<
 `idle.mp4`, `thinking.mp4`, `speaking.mp4`. Có thể mount catalog ngoài và cấu hình
 `AVATAR_CHARACTERS_ROOT`; ba biến `AVATAR_*_VIDEO` vẫn override nhân vật `default`.
 
-## Thay model chat bên ngoài
+## Chạy Agent Runtime độc lập
+
+Để chạy Core API và Agent service qua gRPC:
+
+```bash
+cp .env.example .env
+sed -i 's/AGENT_RUNTIME_PROVIDER=local/AGENT_RUNTIME_PROVIDER=grpc/' .env
+docker compose --profile agent up --build
+```
+
+Mở <http://localhost:8000>, tạo/kết nối session rồi chat như bình thường. Core gọi
+`ExecuteTurn` và nhận event `turn_started`, `heartbeat`, `text_delta`, `turn_completed` qua
+cùng một HTTP/2 stream. Healthcheck của Compose gọi chuẩn gRPC Health Checking.
+
+Agent demo dùng `ScriptedLanguageModelAdapter`. Khi tích hợp LLM thật, implement
+`LanguageModelPort` trong `personaforge_agent/adapters/outbound` và wire provider trong
+`personaforge_agent/main.py`; Core API không cần thay đổi.
+
+## Thay model chat local cũ
 
 Mặc định dùng `ScriptedReplyAdapter`. Để dùng HTTP model service:
 
@@ -148,8 +169,8 @@ data: {"text":"chào"}
 data: [DONE]
 ```
 
-Một provider khác chỉ cần implement `ReplyGeneratorPort` và được wire trong
-`bootstrap/container.py`.
+Luồng này được bọc bởi `LegacyReplyAgentAdapter` khi `AGENT_RUNTIME_PROVIDER=local` nhằm
+giữ tương thích cho demo. Triển khai mới nên dùng Agent Runtime gRPC.
 
 ## Thay media runtime
 
@@ -234,6 +255,8 @@ cũng reconcile snapshot định kỳ để tránh giữ UI cũ.
   `REALTIME_EVENT_BUS=redis`; lock xử lý message vẫn chưa phải distributed lock.
 - Chưa có TURN mặc định; rate limit đăng nhập hiện lưu trong memory nên cần Redis khi scale.
 - Audio hiện là track im lặng 48 kHz; chưa có nội dung TTS.
+- Agent Runtime đã tách process và bảo vệ bằng delegated JWT, nhưng TTS/Avatar model thật
+  chưa được gắn; audio/video vẫn do media runtime demo hiện tại phát.
 - Chế độ LiveKit hiện dùng một worker tĩnh qua `RENDER_WORKER_ID`; chưa có scheduler động.
 - Redis Streams chưa có pending reclaim/DLQ; readiness đã được xác nhận theo `command_id`
   sau khi worker publish đủ audio và video track.

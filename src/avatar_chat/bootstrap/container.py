@@ -2,6 +2,12 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Protocol, cast
 
+from avatar_chat.adapters.outbound.agent_runtime import (
+    AgentDelegationJwtAdapter,
+    DenyAllAgentAuthorizationAdapter,
+    GrpcAgentRuntimeAdapter,
+    LegacyReplyAgentAdapter,
+)
 from avatar_chat.adapters.outbound.http_reply import HttpStreamingReplyAdapter
 from avatar_chat.adapters.outbound.jwt_tokens import PyJwtTokenAdapter
 from avatar_chat.adapters.outbound.media.aiortc_stream import AiortcAvatarStreamAdapter
@@ -9,6 +15,7 @@ from avatar_chat.adapters.outbound.media.livekit_room import LiveKitMediaRoomAda
 from avatar_chat.adapters.outbound.media.recorded_source import RecordedCharacterCatalog
 from avatar_chat.adapters.outbound.media.redis_render import RedisAvatarStreamAdapter
 from avatar_chat.adapters.outbound.memory import (
+    InMemoryAgentTurnRepository,
     InMemoryAuditLogRepository,
     InMemoryAuthSessionRepository,
     InMemoryConversationRepository,
@@ -24,6 +31,7 @@ from avatar_chat.adapters.outbound.realtime_events import (
 )
 from avatar_chat.adapters.outbound.replies import DelayedReplyAdapter, ScriptedReplyAdapter
 from avatar_chat.adapters.outbound.sqlalchemy_repositories import (
+    SqlAlchemyAgentTurnRepository,
     SqlAlchemyAuthSessionRepository,
     SqlAlchemyConversationRepository,
     SqlAlchemyDatabase,
@@ -47,6 +55,8 @@ from avatar_chat.application.auth_use_cases import (
     RegisterUser,
 )
 from avatar_chat.application.ports import (
+    AgentRuntimePort,
+    AgentTurnRepository,
     AuthSessionRepository,
     AvatarStreamPort,
     ConversationRepository,
@@ -106,6 +116,7 @@ class Container:
     get_conversation: GetConversation
     close_session: CloseSession
     avatar_stream: AvatarStreamPort
+    agent_runtime: AgentRuntimePort
     media_provider: str
     list_owned_sessions: ListOwnedSessions
     list_shared_sessions: ListSharedSessions
@@ -135,6 +146,7 @@ class Container:
         await self.outbox_dispatcher.shutdown()
         await self.realtime_events.shutdown()
         await self.avatar_stream.shutdown()
+        await self.agent_runtime.shutdown()
         for lifecycle in reversed(self.lifecycles):
             await lifecycle.shutdown()
 
@@ -148,6 +160,7 @@ def build_container(settings: Settings) -> Container:
     shares: SessionShareRepository
     mutations: SessionMutationPort
     outbox: RealtimeOutboxRepository
+    agent_turns: AgentTurnRepository
     if settings.database_url:
         database = SqlAlchemyDatabase(
             settings.database_url,
@@ -155,6 +168,7 @@ def build_container(settings: Settings) -> Container:
         )
         sessions = SqlAlchemySessionRepository(database.sessions)
         conversations = SqlAlchemyConversationRepository(database.sessions)
+        agent_turns = SqlAlchemyAgentTurnRepository(database.sessions)
         users = SqlAlchemyUserRepository(database.sessions)
         auth_sessions = SqlAlchemyAuthSessionRepository(database.sessions)
         shares = SqlAlchemySessionShareRepository(database.sessions)
@@ -165,6 +179,7 @@ def build_container(settings: Settings) -> Container:
     else:
         sessions = InMemorySessionRepository()
         conversations = InMemoryConversationRepository()
+        agent_turns = InMemoryAgentTurnRepository()
         users = InMemoryUserRepository()
         auth_sessions = InMemoryAuthSessionRepository()
         shares = InMemorySessionShareRepository()
@@ -226,19 +241,39 @@ def build_container(settings: Settings) -> Container:
     else:
         raise ValueError(f"Unsupported MEDIA_PROVIDER: {settings.media_provider}")
 
-    replies: ReplyGeneratorPort
-    if settings.reply_provider == "http":
-        if not settings.reply_http_url:
-            raise ValueError("REPLY_HTTP_URL is required when REPLY_PROVIDER=http")
-        base_replies: ReplyGeneratorPort = HttpStreamingReplyAdapter(
-            url=settings.reply_http_url,
-            token=settings.reply_http_token,
+    if settings.agent_runtime_provider == "grpc":
+        agent_runtime: AgentRuntimePort = GrpcAgentRuntimeAdapter(
+            settings.agent_grpc_target,
+            settings.agent_turn_timeout_seconds,
+            settings.agent_idle_timeout_seconds,
         )
-    elif settings.reply_provider == "scripted":
-        base_replies = ScriptedReplyAdapter()
+    elif settings.agent_runtime_provider == "local":
+        base_replies: ReplyGeneratorPort
+        if settings.reply_provider == "http":
+            if not settings.reply_http_url:
+                raise ValueError("REPLY_HTTP_URL is required when REPLY_PROVIDER=http")
+            base_replies = HttpStreamingReplyAdapter(
+                url=settings.reply_http_url,
+                token=settings.reply_http_token,
+            )
+        elif settings.reply_provider == "scripted":
+            base_replies = ScriptedReplyAdapter()
+        else:
+            raise ValueError(f"Unsupported REPLY_PROVIDER: {settings.reply_provider}")
+        replies = DelayedReplyAdapter(
+            base_replies,
+            settings.reply_chunk_delay_seconds,
+        )
+        agent_runtime = LegacyReplyAgentAdapter(replies)
     else:
-        raise ValueError(f"Unsupported REPLY_PROVIDER: {settings.reply_provider}")
-    replies = DelayedReplyAdapter(base_replies, settings.reply_chunk_delay_seconds)
+        raise ValueError(
+            f"Unsupported AGENT_RUNTIME_PROVIDER: {settings.agent_runtime_provider}"
+        )
+    delegation_tokens = AgentDelegationJwtAdapter(
+        settings.agent_delegation_secret,
+        settings.agent_delegation_issuer,
+        settings.agent_delegation_audience,
+    )
     use_redis_events = settings.realtime_event_bus == "redis" or (
         settings.realtime_event_bus == "auto" and settings.media_provider == "livekit"
     )
@@ -299,11 +334,14 @@ def build_container(settings: Settings) -> Container:
             sessions,
             conversations,
             avatar_stream,
-            replies,
+            agent_runtime,
+            agent_turns,
+            delegation_tokens,
             ids,
             clock,
             access,
             thinking_min_duration_seconds=settings.thinking_min_duration_seconds,
+            authorization=DenyAllAgentAuthorizationAdapter(),
         ),
         get_conversation=GetConversation(sessions, conversations, access),
         close_session=CloseSession(
@@ -316,6 +354,7 @@ def build_container(settings: Settings) -> Container:
             ids,
         ),
         avatar_stream=avatar_stream,
+        agent_runtime=agent_runtime,
         media_provider=settings.media_provider,
         list_owned_sessions=ListOwnedSessions(sessions),
         list_shared_sessions=ListSharedSessions(sessions, shares),

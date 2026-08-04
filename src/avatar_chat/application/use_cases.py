@@ -4,6 +4,9 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field, replace
 
 from avatar_chat.application.dto import (
+    AgentAuthorizationScope,
+    AgentRuntimeEventType,
+    AgentTurnRequest,
     CharacterSummary,
     ChatEventType,
     ChatOutputEvent,
@@ -15,13 +18,16 @@ from avatar_chat.application.dto import (
     WebRtcOffer,
 )
 from avatar_chat.application.ports import (
+    AgentAuthorizationPort,
+    AgentDelegationTokenPort,
+    AgentRuntimePort,
+    AgentTurnRepository,
     AvatarStreamPort,
     CharacterCatalogPort,
     Clock,
     ConversationRepository,
     IdGenerator,
     MediaRoomPort,
-    ReplyGeneratorPort,
     SessionMutationPort,
     SessionRepository,
 )
@@ -34,6 +40,8 @@ from avatar_chat.domain.errors import (
     SessionNotFound,
 )
 from avatar_chat.domain.models import (
+    AgentTurn,
+    AgentTurnStatus,
     AuditLog,
     AvatarSession,
     AvatarState,
@@ -220,12 +228,15 @@ class HandleMessage:
     sessions: SessionRepository
     conversations: ConversationRepository
     avatar: AvatarStreamPort
-    replies: ReplyGeneratorPort
+    agent: AgentRuntimePort
+    agent_turns: AgentTurnRepository
+    delegation_tokens: AgentDelegationTokenPort
     ids: IdGenerator
     clock: Clock
     access: SessionAccessPolicy
     history_limit: int = 30
     thinking_min_duration_seconds: float = 0
+    authorization: AgentAuthorizationPort | None = None
     _locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False)
 
     async def execute(
@@ -249,6 +260,7 @@ class HandleMessage:
                 _require_open_session(session)
                 owns_avatar_state = False
                 assistant_message: ChatMessage | None = None
+                agent_turn: AgentTurn | None = None
                 try:
                     await _transition_session(
                         self.sessions,
@@ -306,24 +318,86 @@ class HandleMessage:
                         sequence=assistant_message.sequence,
                         revision=assistant_message.revision,
                     )
-                    await _transition_session(
-                        self.sessions,
-                        session,
-                        lambda: session.start_speaking(self.clock.now()),
+                    now = self.clock.now()
+                    agent_turn = AgentTurn(
+                        turn_id=self.ids.new_id(),
+                        session_id=session_id,
+                        user_id=actor_user_id,
+                        agent_id=session.agent_id,
+                        assistant_message_id=assistant_message.message_id,
+                        status=AgentTurnStatus.RUNNING,
+                        last_event_sequence=0,
+                        started_at=now,
+                        updated_at=now,
                     )
-                    await self.avatar.change_state(
+                    await self.agent_turns.save(agent_turn)
+                    authorization = (
+                        await self.authorization.resolve(
+                            actor_user_id,
+                            session_id,
+                            session.agent_id,
+                        )
+                        if self.authorization is not None
+                        else AgentAuthorizationScope()
+                    )
+                    request = AgentTurnRequest(
+                        turn_id=agent_turn.turn_id,
+                        session_id=session_id,
+                        user_id=actor_user_id,
+                        agent_id=session.agent_id,
+                        agent_config_version=session.version,
+                        user_message=normalized,
+                        history=history,
+                        tool_permissions=authorization.tool_permissions,
+                        knowledge_base_ids=authorization.knowledge_base_ids,
+                    )
+                    delegation_token = self.delegation_tokens.issue(
+                        actor_user_id,
                         session_id,
-                        AvatarState.SPEAKING,
-                        session.version,
+                        agent_turn.turn_id,
+                        session.agent_id,
+                        request.tool_permissions,
+                        request.knowledge_base_ids,
+                        now,
                     )
-                    yield ChatOutputEvent(
-                        type=ChatEventType.AVATAR_STATE,
-                        avatar_state=AvatarState.SPEAKING,
-                    )
-
                     chunks: list[str] = []
-                    async for chunk in self.replies.stream_reply(session_id, history):
-                        chunks.append(chunk.text)
+                    speaking = False
+                    completed = False
+                    async for event in self.agent.stream_turn(request, delegation_token):
+                        if event.sequence <= agent_turn.last_event_sequence:
+                            continue
+                        agent_turn = replace(
+                            agent_turn,
+                            last_event_sequence=event.sequence,
+                            updated_at=self.clock.now(),
+                        )
+                        await self.agent_turns.save(agent_turn)
+                        if event.type is AgentRuntimeEventType.TURN_FAILED:
+                            raise RuntimeError(
+                                event.error_detail or event.error_code or "Agent turn failed"
+                            )
+                        if event.type is AgentRuntimeEventType.TURN_COMPLETED:
+                            completed = True
+                            continue
+                        if event.type is not AgentRuntimeEventType.TEXT_DELTA:
+                            continue
+                        if not speaking:
+                            await _transition_session(
+                                self.sessions,
+                                session,
+                                lambda: session.start_speaking(self.clock.now()),
+                            )
+                            await self.avatar.change_state(
+                                session_id,
+                                AvatarState.SPEAKING,
+                                session.version,
+                            )
+                            speaking = True
+                            yield ChatOutputEvent(
+                                type=ChatEventType.AVATAR_STATE,
+                                avatar_state=AvatarState.SPEAKING,
+                            )
+                        chunks.append(event.text)
                         expected_revision = assistant_message.revision
                         assistant_message = replace(
                             assistant_message,
@@ -343,6 +417,9 @@ class HandleMessage:
                             revision=assistant_message.revision,
                         )
 
+                    if not completed:
+                        raise RuntimeError("Agent stream ended before turn completion")
+
                     full_reply = "".join(chunks).strip()
                     expected_revision = assistant_message.revision
                     assistant_message = replace(
@@ -356,7 +433,46 @@ class HandleMessage:
                         assistant_message,
                         expected_revision,
                     )
+                    completed_at = self.clock.now()
+                    agent_turn = replace(
+                        agent_turn,
+                        status=AgentTurnStatus.COMPLETED,
+                        updated_at=completed_at,
+                        completed_at=completed_at,
+                    )
+                    await self.agent_turns.save(agent_turn)
                 except BaseException as exc:
+                    if agent_turn is not None and agent_turn.status is AgentTurnStatus.RUNNING:
+                        try:
+                            await self.agent.cancel_turn(agent_turn.turn_id)
+                        except BaseException:
+                            logger.exception(
+                                "Could not cancel failed agent turn=%s",
+                                agent_turn.turn_id,
+                            )
+                        failed_at = self.clock.now()
+                        status = (
+                            AgentTurnStatus.CANCELLED
+                            if isinstance(exc, asyncio.CancelledError)
+                            else AgentTurnStatus.TIMED_OUT
+                            if isinstance(exc, TimeoutError)
+                            else AgentTurnStatus.FAILED
+                        )
+                        agent_turn = replace(
+                            agent_turn,
+                            status=status,
+                            updated_at=failed_at,
+                            completed_at=failed_at,
+                            failure_code=type(exc).__name__,
+                            failure_detail=str(exc)[:1000],
+                        )
+                        try:
+                            await self.agent_turns.save(agent_turn)
+                        except BaseException:
+                            logger.exception(
+                                "Could not persist failed agent turn=%s",
+                                agent_turn.turn_id,
+                            )
                     failed_message: ChatMessage | None = None
                     if (
                         assistant_message is not None

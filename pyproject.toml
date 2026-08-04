@@ -14,10 +14,13 @@ dependencies = [
     "asyncpg>=0.30,<1",
     "av>=14,<16",
     "fastapi>=0.115,<1",
+    "grpcio>=1.81.1,<2",
+    "grpcio-health-checking>=1.81.1,<2",
     "httpx>=0.28,<1",
     "livekit>=1.0,<2",
     "livekit-api>=1.0,<2",
     "pydantic>=2.10,<3",
+    "protobuf>=6.33.5,<7",
     "pwdlib[argon2]>=0.3,<1",
     "pyjwt>=2.10,<3",
     "redis>=5.2,<7",
@@ -30,6 +33,7 @@ dev = [
     "mypy>=1.15,<2",
     "pytest>=8.3,<9",
     "pytest-asyncio>=0.25,<1",
+    "grpcio-tools>=1.81.1,<2",
     "ruff>=0.11,<1",
 ]
 e2e = [
@@ -46,6 +50,7 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+extend-exclude = ["src/personaforge/agent/v1/*_pb2*.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
@@ -53,4 +58,20 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 [tool.mypy]
 python_version = "3.10"
 strict = true
-packages = ["avatar_chat", "avatar_worker"]
+packages = ["avatar_chat", "avatar_worker", "personaforge_agent"]
+
+[[tool.mypy.overrides]]
+module = ["grpc", "grpc.*", "grpc_health", "grpc_health.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["personaforge.agent.v1.*"]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = [
+    "avatar_chat.adapters.outbound.agent_runtime",
+    "personaforge_agent.adapters.inbound.grpc_service",
+    "personaforge_agent.main",
+]
+ignore_errors = true

@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package personaforge.agent.v1;
+
+service AgentRuntime {
+  rpc ExecuteTurn(AgentTurnRequest) returns (stream AgentEvent);
+  rpc CancelTurn(CancelTurnRequest) returns (CancelTurnResponse);
+}
+
+message ChatMessage {
+  string role = 1;
+  string content = 2;
+}
+
+message AgentTurnRequest {
+  string turn_id = 1;
+  string session_id = 2;
+  string user_id = 3;
+  string agent_id = 4;
+  int64 agent_config_version = 5;
+  string user_message = 6;
+  repeated ChatMessage history = 7;
+  repeated string tool_permissions = 8;
+  repeated string knowledge_base_ids = 9;
+}
+
+message AgentEvent {
+  string turn_id = 1;
+  int64 sequence = 2;
+  string type = 3;
+  string text = 4;
+  string stage = 5;
+  string error_code = 6;
+  string error_detail = 7;
+}
+
+message CancelTurnRequest {
+  string turn_id = 1;
+}
+
+message CancelTurnResponse {
+  bool cancelled = 1;
+}

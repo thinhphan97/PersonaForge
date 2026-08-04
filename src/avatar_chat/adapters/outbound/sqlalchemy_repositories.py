@@ -33,6 +33,8 @@ from avatar_chat.application.dto import (
 )
 from avatar_chat.domain.errors import ConcurrentMessageUpdate, ConcurrentSessionUpdate
 from avatar_chat.domain.models import (
+    AgentTurn,
+    AgentTurnStatus,
     AuditLog,
     AuthSession,
     AvatarSession,
@@ -69,6 +71,26 @@ class AvatarSessionRow(Base):
     version: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    agent_id: Mapped[str] = mapped_column(String(100), default="default")
+
+
+class AgentTurnRow(Base):
+    __tablename__ = "agent_turns"
+
+    turn_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    agent_id: Mapped[str] = mapped_column(String(100), index=True)
+    assistant_message_id: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    last_event_sequence: Mapped[int] = mapped_column(Integer, default=0)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    failure_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    failure_detail: Mapped[str | None] = mapped_column(String(1000), nullable=True)
 
 
 class ChatMessageRow(Base):
@@ -208,6 +230,7 @@ class SqlAlchemySessionRepository:
                 created_at=row.created_at,
                 updated_at=row.updated_at,
                 version=row.version,
+                agent_id=row.agent_id,
             )
 
     async def save(
@@ -228,6 +251,7 @@ class SqlAlchemySessionRepository:
                         version=session.version,
                         created_at=session.created_at,
                         updated_at=session.updated_at,
+                        agent_id=session.agent_id,
                     )
                 )
             else:
@@ -245,6 +269,7 @@ class SqlAlchemySessionRepository:
                         avatar_state=session.avatar_state.value,
                         version=expected_version + 1,
                         updated_at=session.updated_at,
+                        agent_id=session.agent_id,
                     )
                 )
                 cursor = result  # SQLAlchemy returns CursorResult for UPDATE.
@@ -294,9 +319,68 @@ class SqlAlchemySessionRepository:
                 created_at=row.created_at,
                 updated_at=row.updated_at,
                 version=row.version,
+                agent_id=row.agent_id,
             )
             for row in rows
         )
+
+
+class SqlAlchemyAgentTurnRepository:
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+        self._sessions = sessions
+
+    async def get(self, turn_id: str) -> AgentTurn | None:
+        async with self._sessions() as database:
+            row = await database.get(AgentTurnRow, turn_id)
+        if row is None:
+            return None
+        return _agent_turn(row)
+
+    async def save(self, turn: AgentTurn) -> None:
+        async with self._sessions() as database:
+            row = await database.get(AgentTurnRow, turn.turn_id)
+            if row is None:
+                database.add(
+                    AgentTurnRow(
+                        turn_id=turn.turn_id,
+                        session_id=turn.session_id,
+                        user_id=turn.user_id,
+                        agent_id=turn.agent_id,
+                        assistant_message_id=turn.assistant_message_id,
+                        status=turn.status.value,
+                        last_event_sequence=turn.last_event_sequence,
+                        started_at=turn.started_at,
+                        updated_at=turn.updated_at,
+                        completed_at=turn.completed_at,
+                        failure_code=turn.failure_code,
+                        failure_detail=turn.failure_detail,
+                    )
+                )
+            else:
+                row.status = turn.status.value
+                row.last_event_sequence = turn.last_event_sequence
+                row.updated_at = turn.updated_at
+                row.completed_at = turn.completed_at
+                row.failure_code = turn.failure_code
+                row.failure_detail = turn.failure_detail
+            await database.commit()
+
+
+def _agent_turn(row: AgentTurnRow) -> AgentTurn:
+    return AgentTurn(
+        turn_id=row.turn_id,
+        session_id=row.session_id,
+        user_id=row.user_id,
+        agent_id=row.agent_id,
+        assistant_message_id=row.assistant_message_id,
+        status=AgentTurnStatus(row.status),
+        last_event_sequence=row.last_event_sequence,
+        started_at=row.started_at,
+        updated_at=row.updated_at,
+        completed_at=row.completed_at,
+        failure_code=row.failure_code,
+        failure_detail=row.failure_detail,
+    )
 
 
 class SqlAlchemyConversationRepository:

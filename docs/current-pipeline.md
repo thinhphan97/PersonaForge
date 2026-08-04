@@ -220,7 +220,10 @@ Các invariant chính:
 | `RealtimeEventBusPort` | Fan-out chat event giữa API replica | In-memory, Redis Pub/Sub |
 | `AvatarStreamPort` | Start, negotiate, đổi state, close media | aiortc, Redis command adapter |
 | `MediaRoomPort` | Provision room/token và close room | LiveKit token adapter |
-| `ReplyGeneratorPort` | Stream reply chunk | Scripted, HTTP SSE/NDJSON, delay decorator |
+| `AgentRuntimePort` | Stream event của một Agent turn | gRPC, legacy local bridge |
+| `AgentTurnRepository` | Lưu lifecycle/sequence của turn | In-memory, SQLAlchemy |
+| `AgentDelegationTokenPort` | Cấp JWT scope hẹp cho Agent | PyJWT HS256 adapter |
+| `ReplyGeneratorPort` | Provider local cũ sau compatibility bridge | Scripted, HTTP SSE/NDJSON |
 | `IdGenerator` | Sinh ID | UUID |
 | `Clock` | Cấp thời gian | System clock |
 
@@ -238,13 +241,13 @@ Các use case độc lập framework:
 
 ### 5.1. Cách thay dependency bên ngoài
 
-Ví dụ thay model chat:
+Ví dụ thay model chat trong kiến trúc mới:
 
-1. Tạo class implement `ReplyGeneratorPort.stream_reply()`.
-2. Chuyển response của provider thành `ReplyChunk`.
-3. Không đưa SDK/provider type vào application DTO.
-4. Wire adapter trong `build_container()` dựa trên một setting mới.
-5. Thêm contract test cho adapter và unit test cho wiring.
+1. Tạo adapter implement `LanguageModelPort` trong package `personaforge_agent`.
+2. Chuyển stream provider thành text delta nội bộ.
+3. Không đưa SDK/provider type vào Core application DTO.
+4. Wire adapter trong Agent Runtime dựa trên provider setting.
+5. Thêm contract test và giữ Core chỉ gọi contract gRPC versioned.
 
 Ví dụ thay renderer video:
 
@@ -832,14 +835,21 @@ public không credential, subscribe LiveKit bằng anonymous token, poll transcr
 mỗi giây và không render form chat. Trang đồng thời poll session status; khi session closed,
 video được thay bằng thông báo kết thúc và không retry cấp media token.
 
-## 13. Reply/model pipeline
+## 13. Agent/reply pipeline
 
-### 13.1. Scripted provider
+### 13.1. Agent Runtime gRPC
+
+`AGENT_RUNTIME_PROVIDER=grpc` tách model orchestration khỏi Core. Core tạo `AgentTurn`, cấp
+delegated JWT ngắn hạn và gọi server-streaming `ExecuteTurn`. Agent phát
+`turn_started/heartbeat/text_delta/turn_completed`; Core persist sequence và transcript trước
+khi fan-out cho browser. Chi tiết nằm tại [agent-runtime.md](agent-runtime.md).
+
+### 13.2. Scripted provider local tương thích
 
 `ScriptedReplyAdapter` lấy user message gần nhất, tạo câu trả lời demo và yield từng token.
 `DelayedReplyAdapter` bọc provider để delay giữa các chunk.
 
-### 13.2. HTTP streaming provider
+### 13.3. HTTP streaming provider local tương thích
 
 Cấu hình:
 

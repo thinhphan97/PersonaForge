@@ -4,6 +4,9 @@ from typing import Protocol
 
 from avatar_chat.application.dto import (
     AccessTokenClaims,
+    AgentAuthorizationScope,
+    AgentRuntimeEvent,
+    AgentTurnRequest,
     CharacterSummary,
     ChatOutputEvent,
     MediaAccess,
@@ -15,6 +18,7 @@ from avatar_chat.application.dto import (
     WebRtcOffer,
 )
 from avatar_chat.domain.models import (
+    AgentTurn,
     AuditLog,
     AuthSession,
     AvatarSession,
@@ -59,6 +63,12 @@ class ConversationRepository(Protocol):
         revision: int,
         limit: int,
     ) -> tuple[ChatMessage, ...]: ...
+
+
+class AgentTurnRepository(Protocol):
+    async def get(self, turn_id: str) -> AgentTurn | None: ...
+
+    async def save(self, turn: AgentTurn) -> None: ...
 
 
 class CharacterCatalogPort(Protocol):
@@ -253,6 +263,40 @@ class ReplyGeneratorPort(Protocol):
         session_id: str,
         messages: tuple[ChatMessage, ...],
     ) -> AsyncIterator[ReplyChunk]: ...
+
+
+class AgentRuntimePort(Protocol):
+    def stream_turn(
+        self,
+        request: AgentTurnRequest,
+        delegation_token: str,
+    ) -> AsyncIterator[AgentRuntimeEvent]: ...
+
+    async def cancel_turn(self, turn_id: str) -> bool: ...
+
+    async def shutdown(self) -> None: ...
+
+
+class AgentDelegationTokenPort(Protocol):
+    def issue(
+        self,
+        user_id: str,
+        session_id: str,
+        turn_id: str,
+        agent_id: str,
+        tool_permissions: tuple[str, ...],
+        knowledge_base_ids: tuple[str, ...],
+        issued_at: datetime,
+    ) -> str: ...
+
+
+class AgentAuthorizationPort(Protocol):
+    async def resolve(
+        self,
+        user_id: str,
+        session_id: str,
+        agent_id: str,
+    ) -> AgentAuthorizationScope: ...
 
 
 class IdGenerator(Protocol):

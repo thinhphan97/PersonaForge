@@ -6,6 +6,7 @@ from datetime import datetime
 from avatar_chat.application.dto import RealtimeOutboxEvent
 from avatar_chat.domain.errors import ConcurrentMessageUpdate, ConcurrentSessionUpdate
 from avatar_chat.domain.models import (
+    AgentTurn,
     AuditLog,
     AuthSession,
     AvatarSession,
@@ -14,6 +15,21 @@ from avatar_chat.domain.models import (
     SessionVisibility,
     User,
 )
+
+
+class InMemoryAgentTurnRepository:
+    def __init__(self) -> None:
+        self._items: dict[str, AgentTurn] = {}
+        self._lock = asyncio.Lock()
+
+    async def get(self, turn_id: str) -> AgentTurn | None:
+        async with self._lock:
+            turn = self._items.get(turn_id)
+            return deepcopy(turn) if turn else None
+
+    async def save(self, turn: AgentTurn) -> None:
+        async with self._lock:
+            self._items[turn.turn_id] = deepcopy(turn)
 
 
 class InMemorySessionRepository:
