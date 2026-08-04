@@ -17,6 +17,7 @@ from personaforge.agent.v1 import agent_pb2, agent_pb2_grpc
 from personaforge_agent.adapters.inbound.grpc_service import AgentRuntimeGrpcService
 from personaforge_agent.adapters.outbound.delegation_tokens import JwtDelegationVerifier
 from personaforge_agent.adapters.outbound.scripted_model import ScriptedLanguageModelAdapter
+from personaforge_agent.adapters.outbound.turn_registry import InMemoryTurnRegistry
 from personaforge_agent.application.admission import TurnAdmissionController
 from personaforge_agent.application.execute_turn import ExecuteAgentTurn
 from personaforge_agent.domain.models import AgentTurn
@@ -47,6 +48,7 @@ async def test_core_streams_a_delegated_turn_over_grpc() -> None:
             ExecuteAgentTurn(ScriptedLanguageModelAdapter(0), 0.01),
             JwtDelegationVerifier(secret, "test-api", "test-agent"),
             admission(),
+            InMemoryTurnRegistry(),
         ),
         server,
     )
@@ -113,6 +115,7 @@ async def test_agent_rejects_a_token_for_another_turn() -> None:
             ExecuteAgentTurn(ScriptedLanguageModelAdapter(0)),
             JwtDelegationVerifier(secret, "test-api", "test-agent"),
             admission(),
+            InMemoryTurnRegistry(),
         ),
         server,
     )
@@ -158,6 +161,7 @@ async def test_agent_returns_resource_exhausted_when_no_queue_capacity() -> None
             ExecuteAgentTurn(model),
             JwtDelegationVerifier(secret, "test-api", "test-agent"),
             TurnAdmissionController(1, 0, 1, 1, 1),
+            InMemoryTurnRegistry(),
         ),
         server,
     )
@@ -209,3 +213,35 @@ async def _collect_events(
     token: str,
 ):
     return [event async for event in adapter.stream_turn(request, token)]
+
+
+@pytest.mark.asyncio
+async def test_runtime_status_can_require_a_monitoring_token() -> None:
+    server = grpc.aio.server()
+    agent_pb2_grpc.add_AgentRuntimeServicer_to_server(
+        AgentRuntimeGrpcService(
+            ExecuteAgentTurn(ScriptedLanguageModelAdapter(0)),
+            JwtDelegationVerifier("secret", "issuer", "audience"),
+            admission(),
+            InMemoryTurnRegistry(),
+            status_token="metrics-secret",
+        ),
+        server,
+    )
+    port = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
+    stub = agent_pb2_grpc.AgentRuntimeStub(channel)
+    try:
+        with pytest.raises(grpc.aio.AioRpcError) as captured:
+            await stub.GetRuntimeStatus(agent_pb2.RuntimeStatusRequest(), timeout=1)
+        assert captured.value.code() is grpc.StatusCode.UNAUTHENTICATED
+        status = await stub.GetRuntimeStatus(
+            agent_pb2.RuntimeStatusRequest(),
+            metadata=(("x-agent-status-token", "metrics-secret"),),
+            timeout=1,
+        )
+        assert status.ready is True
+    finally:
+        await channel.close()
+        await server.stop(grace=None)

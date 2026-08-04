@@ -1,0 +1,22 @@
+FROM python:3.10-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/src
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+    "grpcio>=1.81.1,<2" \
+    "grpcio-health-checking>=1.81.1,<2" \
+    "protobuf>=6.33.5,<7" \
+    "pyjwt>=2.10,<3" \
+    "redis>=5.2,<7"
+
+COPY src/personaforge ./src/personaforge
+COPY src/personaforge_agent ./src/personaforge_agent
+
+RUN useradd --create-home --uid 10001 personaforge
+USER personaforge
+
+CMD ["python", "-m", "personaforge_agent.main"]

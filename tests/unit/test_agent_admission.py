@@ -127,3 +127,24 @@ async def test_queue_timeout_releases_ticket_and_counts_rejection() -> None:
     snapshot = await admission.snapshot()
     assert snapshot.queued_turns == 0
     assert snapshot.rejected_total == 1
+
+
+@pytest.mark.asyncio
+async def test_draining_rejects_new_turns_and_marks_not_ready() -> None:
+    readiness: list[bool] = []
+
+    async def capacity_changed(ready: bool) -> None:
+        readiness.append(ready)
+
+    admission = TurnAdmissionController(1, 1, 1, 1, 1, capacity_changed)
+    await admission.start_draining()
+
+    with pytest.raises(AdmissionRejected, match="draining"):
+        async with admission.slot(turn("t1", "u1", "s1"), asyncio.Event()):
+            pass
+
+    snapshot = await admission.snapshot()
+    assert snapshot.draining is True
+    assert snapshot.ready is False
+    assert snapshot.rejected_total == 1
+    assert readiness == [False]

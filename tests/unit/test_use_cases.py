@@ -166,6 +166,9 @@ class FakeTurnLockLease:
     def __init__(self) -> None:
         self.released = False
 
+    async def ensure_valid(self) -> None:
+        return None
+
     async def release(self) -> None:
         self.released = True
 

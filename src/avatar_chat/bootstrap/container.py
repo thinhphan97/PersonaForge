@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import timedelta
+from pathlib import Path
 from typing import Protocol, cast
 
 from avatar_chat.adapters.outbound.agent_runtime import (
@@ -31,7 +32,7 @@ from avatar_chat.adapters.outbound.realtime_events import (
 )
 from avatar_chat.adapters.outbound.replies import DelayedReplyAdapter, ScriptedReplyAdapter
 from avatar_chat.adapters.outbound.session_turn_locks import (
-    PostgresAdvisorySessionTurnLock,
+    RedisSessionTurnLock,
 )
 from avatar_chat.adapters.outbound.sqlalchemy_repositories import (
     SqlAlchemyAgentTurnRepository,
@@ -165,13 +166,11 @@ def build_container(settings: Settings) -> Container:
     mutations: SessionMutationPort
     outbox: RealtimeOutboxRepository
     agent_turns: AgentTurnRepository
-    turn_locks: SessionTurnLockPort | None = None
+    turn_locks: SessionTurnLockPort | None
     if settings.database_url:
         database = SqlAlchemyDatabase(
             settings.database_url,
             auto_create_schema=settings.auto_create_schema,
-            pool_size=settings.database_pool_size,
-            max_overflow=settings.database_max_overflow,
         )
         sessions = SqlAlchemySessionRepository(database.sessions)
         conversations = SqlAlchemyConversationRepository(database.sessions)
@@ -182,11 +181,6 @@ def build_container(settings: Settings) -> Container:
         sql_mutations = SqlAlchemySessionMutationUnitOfWork(database.sessions)
         mutations = sql_mutations
         outbox = sql_mutations
-        if database.engine.dialect.name == "postgresql":
-            turn_locks = PostgresAdvisorySessionTurnLock(
-                database.engine,
-                settings.session_turn_lock_timeout_seconds,
-            )
         lifecycles = (cast(InfrastructureLifecycle, database),)
     else:
         sessions = InMemorySessionRepository()
@@ -199,6 +193,21 @@ def build_container(settings: Settings) -> Container:
         memory_mutations = InMemorySessionMutationUnitOfWork(sessions, shares, audit)
         mutations = memory_mutations
         outbox = memory_mutations
+    if settings.session_turn_lock_provider == "redis":
+        redis_turn_locks = RedisSessionTurnLock(
+            settings.redis_url,
+            settings.session_turn_lock_timeout_seconds,
+            settings.session_turn_lock_lease_seconds,
+        )
+        turn_locks = redis_turn_locks
+        lifecycles += (cast(InfrastructureLifecycle, redis_turn_locks),)
+    elif settings.session_turn_lock_provider == "memory":
+        turn_locks = None
+    else:
+        raise ValueError(
+            "Unsupported SESSION_TURN_LOCK_PROVIDER: "
+            f"{settings.session_turn_lock_provider}"
+        )
     ids = UuidGenerator()
     clock = SystemClock()
     passwords = Argon2PasswordHasher()
@@ -254,10 +263,32 @@ def build_container(settings: Settings) -> Container:
         raise ValueError(f"Unsupported MEDIA_PROVIDER: {settings.media_provider}")
 
     if settings.agent_runtime_provider == "grpc":
+        if bool(settings.agent_grpc_client_cert_file) != bool(
+            settings.agent_grpc_client_key_file
+        ):
+            raise ValueError(
+                "AGENT_GRPC_CLIENT_CERT_FILE and AGENT_GRPC_CLIENT_KEY_FILE "
+                "must be configured together"
+            )
         agent_runtime: AgentRuntimePort = GrpcAgentRuntimeAdapter(
             settings.agent_grpc_target,
             settings.agent_turn_timeout_seconds,
             settings.agent_idle_timeout_seconds,
+            root_ca=(
+                Path(settings.agent_grpc_ca_file).read_bytes()
+                if settings.agent_grpc_ca_file
+                else None
+            ),
+            client_certificate=(
+                Path(settings.agent_grpc_client_cert_file).read_bytes()
+                if settings.agent_grpc_client_cert_file
+                else None
+            ),
+            client_private_key=(
+                Path(settings.agent_grpc_client_key_file).read_bytes()
+                if settings.agent_grpc_client_key_file
+                else None
+            ),
         )
     elif settings.agent_runtime_provider == "local":
         base_replies: ReplyGeneratorPort

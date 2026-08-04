@@ -78,17 +78,26 @@ class GrpcAgentRuntimeAdapter:
         target: str,
         turn_timeout_seconds: float = 120,
         idle_timeout_seconds: float = 15,
+        root_ca: bytes | None = None,
+        client_certificate: bytes | None = None,
+        client_private_key: bytes | None = None,
     ) -> None:
         self._turn_timeout_seconds = turn_timeout_seconds
         self._idle_timeout_seconds = idle_timeout_seconds
-        self._channel = grpc.aio.insecure_channel(
-            target,
-            options=(
-                ("grpc.keepalive_time_ms", 10_000),
-                ("grpc.keepalive_timeout_ms", 3_000),
-                ("grpc.keepalive_permit_without_calls", 1),
-            ),
+        options = (
+            ("grpc.keepalive_time_ms", 10_000),
+            ("grpc.keepalive_timeout_ms", 3_000),
+            ("grpc.keepalive_permit_without_calls", 1),
         )
+        if root_ca is not None:
+            credentials = grpc.ssl_channel_credentials(
+                root_certificates=root_ca,
+                private_key=client_private_key,
+                certificate_chain=client_certificate,
+            )
+            self._channel = grpc.aio.secure_channel(target, credentials, options=options)
+        else:
+            self._channel = grpc.aio.insecure_channel(target, options=options)
         self._stub = agent_pb2_grpc.AgentRuntimeStub(self._channel)
 
     async def stream_turn(

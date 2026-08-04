@@ -56,4 +56,5 @@ message RuntimeStatusResponse {
   int64 failed_total = 8;
   int64 cancelled_total = 9;
   bool ready = 10;
+  bool draining = 11;
 }

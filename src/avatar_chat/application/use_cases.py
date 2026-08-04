@@ -262,6 +262,7 @@ class HandleMessage:
                 distributed_lease = await self.turn_locks.acquire(session_id)
                 if distributed_lease is None:
                     raise SessionBusy(session_id)
+                await distributed_lease.ensure_valid()
             async with lock:
                 session = await _require_session(self.sessions, session_id)
                 await self.access.require(actor_user_id, session, SessionAction.CHAT)
@@ -372,6 +373,8 @@ class HandleMessage:
                     speaking = False
                     completed = False
                     async for event in self.agent.stream_turn(request, delegation_token):
+                        if distributed_lease is not None:
+                            await distributed_lease.ensure_valid()
                         if event.sequence <= agent_turn.last_event_sequence:
                             continue
                         agent_turn = replace(
@@ -427,6 +430,8 @@ class HandleMessage:
 
                     if not completed:
                         raise RuntimeError("Agent stream ended before turn completion")
+                    if distributed_lease is not None:
+                        await distributed_lease.ensure_valid()
 
                     full_reply = "".join(chunks).strip()
                     expected_revision = assistant_message.revision

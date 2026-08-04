@@ -257,8 +257,9 @@ cũng reconcile snapshot định kỳ để tránh giữ UI cũ.
 - Nếu không cấu hình `DATABASE_URL`, session và lịch sử mất khi process restart.
 - Chat event dùng Redis Pub/Sub trong LiveKit mode và browser tự catch-up từ database bằng
   cursor `sequence:revision`. Muốn chạy nhiều API replica bắt buộc dùng database chung và
-  `REALTIME_EVENT_BUS=redis`. PostgreSQL mode dùng advisory lock theo session để ngăn hai
-  replica chạy hai turn cùng lúc; memory/SQLite mode chỉ có local lock.
+  `REALTIME_EVENT_BUS=redis`. Redis lease theo session ngăn hai Core replica chạy hai turn
+  cùng lúc mà không giữ PostgreSQL connection; `SESSION_TURN_LOCK_PROVIDER=memory` chỉ dành
+  local/test.
 - Chưa có TURN mặc định; rate limit đăng nhập hiện lưu trong memory nên cần Redis khi scale.
 - Audio hiện là track im lặng 48 kHz; chưa có nội dung TTS.
 - Agent Runtime đã tách process và bảo vệ bằng delegated JWT, nhưng TTS/Avatar model thật

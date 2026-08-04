@@ -300,6 +300,8 @@ class AgentAuthorizationPort(Protocol):
 
 
 class SessionTurnLockLease(Protocol):
+    async def ensure_valid(self) -> None: ...
+
     async def release(self) -> None: ...
 
 

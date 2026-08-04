@@ -65,3 +65,6 @@ class ExecuteAgentTurn:
                 error_code=type(exc).__name__,
                 error_detail=str(exc),
             )
+        finally:
+            if hasattr(iterator, "aclose"):
+                await iterator.aclose()

@@ -189,19 +189,8 @@ class SqlAlchemyDatabase:
         url: str,
         auto_create_schema: bool = True,
         startup_timeout_seconds: float = 15.0,
-        pool_size: int = 20,
-        max_overflow: int = 10,
     ) -> None:
-        self.engine: AsyncEngine
-        if url.startswith("sqlite"):
-            self.engine = create_async_engine(url, pool_pre_ping=True)
-        else:
-            self.engine = create_async_engine(
-                url,
-                pool_pre_ping=True,
-                pool_size=pool_size,
-                max_overflow=max_overflow,
-            )
+        self.engine: AsyncEngine = create_async_engine(url, pool_pre_ping=True)
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
         self._auto_create_schema = auto_create_schema
         self._startup_timeout_seconds = startup_timeout_seconds

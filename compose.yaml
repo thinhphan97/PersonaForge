@@ -8,8 +8,6 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://avatar:avatar@postgres:5432/avatar}
       AUTO_CREATE_SCHEMA: ${AUTO_CREATE_SCHEMA:-false}
-      DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-20}
-      DATABASE_MAX_OVERFLOW: ${DATABASE_MAX_OVERFLOW:-10}
       REFRESH_COOKIE_NAME: ${REFRESH_COOKIE_NAME:-avatar_refresh}
       AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
       JWT_SECRET: ${JWT_SECRET:-development-only-jwt-secret-change-me-32-bytes}
@@ -28,12 +26,17 @@ services:
       REPLY_HTTP_TOKEN: ${REPLY_HTTP_TOKEN:-}
       AGENT_RUNTIME_PROVIDER: ${AGENT_RUNTIME_PROVIDER:-local}
       AGENT_GRPC_TARGET: ${AGENT_GRPC_TARGET:-personaforge-agent:50051}
+      AGENT_GRPC_CA_FILE: ${AGENT_GRPC_CA_FILE:-}
+      AGENT_GRPC_CLIENT_CERT_FILE: ${AGENT_GRPC_CLIENT_CERT_FILE:-}
+      AGENT_GRPC_CLIENT_KEY_FILE: ${AGENT_GRPC_CLIENT_KEY_FILE:-}
       AGENT_TURN_TIMEOUT: ${AGENT_TURN_TIMEOUT:-120}
       AGENT_IDLE_TIMEOUT: ${AGENT_IDLE_TIMEOUT:-15}
       AGENT_DELEGATION_SECRET: ${AGENT_DELEGATION_SECRET:-development-agent-delegation-secret-change-me}
       AGENT_DELEGATION_ISSUER: ${AGENT_DELEGATION_ISSUER:-personaforge-api}
       AGENT_DELEGATION_AUDIENCE: ${AGENT_DELEGATION_AUDIENCE:-personaforge-agent}
+      SESSION_TURN_LOCK_PROVIDER: ${SESSION_TURN_LOCK_PROVIDER:-redis}
       SESSION_TURN_LOCK_TIMEOUT: ${SESSION_TURN_LOCK_TIMEOUT:-0}
+      SESSION_TURN_LOCK_LEASE: ${SESSION_TURN_LOCK_LEASE:-30}
       WEBRTC_ICE_SERVERS: ${WEBRTC_ICE_SERVERS:-}
       WEBRTC_ICE_USERNAME: ${WEBRTC_ICE_USERNAME:-}
       WEBRTC_ICE_CREDENTIAL: ${WEBRTC_ICE_CREDENTIAL:-}
@@ -50,15 +53,22 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
   personaforge-agent:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
     command: ["python", "-m", "personaforge_agent.main"]
     profiles: ["agent"]
     environment:
       AGENT_GRPC_HOST: 0.0.0.0
       AGENT_GRPC_PORT: 50051
+      AGENT_GRPC_TLS_CERT_FILE: ${AGENT_GRPC_TLS_CERT_FILE:-}
+      AGENT_GRPC_TLS_KEY_FILE: ${AGENT_GRPC_TLS_KEY_FILE:-}
+      AGENT_GRPC_TLS_CLIENT_CA_FILE: ${AGENT_GRPC_TLS_CLIENT_CA_FILE:-}
       AGENT_MODEL_PROVIDER: ${AGENT_MODEL_PROVIDER:-scripted}
       AGENT_CHUNK_DELAY: ${AGENT_CHUNK_DELAY:-0.1}
       AGENT_HEARTBEAT_INTERVAL: ${AGENT_HEARTBEAT_INTERVAL:-5}
@@ -67,6 +77,16 @@ services:
       AGENT_MAX_CONCURRENT_PER_USER: ${AGENT_MAX_CONCURRENT_PER_USER:-3}
       AGENT_MAX_CONCURRENT_PER_SESSION: ${AGENT_MAX_CONCURRENT_PER_SESSION:-1}
       AGENT_QUEUE_TIMEOUT: ${AGENT_QUEUE_TIMEOUT:-10}
+      AGENT_TURN_REGISTRY_PROVIDER: ${AGENT_TURN_REGISTRY_PROVIDER:-redis}
+      AGENT_TURN_CLAIM_LEASE: ${AGENT_TURN_CLAIM_LEASE:-60}
+      AGENT_TURN_RESULT_RETENTION: ${AGENT_TURN_RESULT_RETENTION:-86400}
+      AGENT_GRACEFUL_SHUTDOWN_TIMEOUT: ${AGENT_GRACEFUL_SHUTDOWN_TIMEOUT:-30}
+      AGENT_MAX_MESSAGE_CHARS: ${AGENT_MAX_MESSAGE_CHARS:-20000}
+      AGENT_MAX_HISTORY_MESSAGES: ${AGENT_MAX_HISTORY_MESSAGES:-50}
+      AGENT_MAX_HISTORY_CHARS: ${AGENT_MAX_HISTORY_CHARS:-100000}
+      AGENT_MAX_SCOPES: ${AGENT_MAX_SCOPES:-100}
+      AGENT_STATUS_TOKEN: ${AGENT_STATUS_TOKEN:-}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       AGENT_DELEGATION_SECRET: ${AGENT_DELEGATION_SECRET:-development-agent-delegation-secret-change-me}
       AGENT_DELEGATION_ISSUER: ${AGENT_DELEGATION_ISSUER:-personaforge-api}
       AGENT_DELEGATION_AUDIENCE: ${AGENT_DELEGATION_AUDIENCE:-personaforge-agent}
@@ -80,12 +100,17 @@ services:
           from grpc_health.v1 import health_pb2, health_pb2_grpc;
           channel=grpc.insecure_channel('127.0.0.1:50051');
           response=health_pb2_grpc.HealthStub(channel).Check(
-          health_pb2.HealthCheckRequest(service='personaforge.agent.v1.AgentRuntime'),
+          health_pb2.HealthCheckRequest(
+          service='personaforge.agent.v1.AgentRuntime.Liveness'),
           timeout=2);
           assert response.status == health_pb2.HealthCheckResponse.SERVING
       interval: 5s
       timeout: 3s
       retries: 20
+    stop_grace_period: 35s
+    depends_on:
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
   postgres:
@@ -132,7 +157,6 @@ services:
 
   redis:
     image: redis:7-alpine
-    profiles: ["livekit"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s

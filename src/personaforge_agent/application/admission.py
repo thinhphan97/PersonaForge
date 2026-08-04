@@ -24,6 +24,7 @@ class AdmissionSnapshot:
     failed_total: int
     cancelled_total: int
     ready: bool
+    draining: bool
 
 
 CapacityChanged = Callable[[bool], Awaitable[None]]
@@ -71,6 +72,7 @@ class TurnAdmissionController:
         self._failed = 0
         self._cancelled = 0
         self._ready = True
+        self._draining = False
 
     @asynccontextmanager
     async def slot(
@@ -88,6 +90,9 @@ class TurnAdmissionController:
     async def _acquire(self, ticket: _Ticket, cancelled: asyncio.Event) -> None:
         deadline = monotonic() + self._queue_timeout
         async with self._condition:
+            if self._draining:
+                self._rejected += 1
+                raise AdmissionRejected("Agent Runtime is draining")
             if self._can_run(ticket) and not self._queue:
                 await self._admit(ticket)
                 return
@@ -101,6 +106,9 @@ class TurnAdmissionController:
                 while True:
                     if cancelled.is_set():
                         raise asyncio.CancelledError
+                    if self._draining:
+                        self._rejected += 1
+                        raise AdmissionRejected("Agent Runtime is draining")
                     if self._is_next_eligible(ticket):
                         self._queue.remove(ticket)
                         await self._admit(ticket)
@@ -139,7 +147,8 @@ class TurnAdmissionController:
 
     def _can_run(self, ticket: _Ticket) -> bool:
         return (
-            self._active < self._max_concurrent
+            not self._draining
+            and self._active < self._max_concurrent
             and self._active_users[ticket.user_id] < self._max_per_user
             and self._active_sessions[ticket.session_id] < self._max_per_session
         )
@@ -171,6 +180,12 @@ class TurnAdmissionController:
         async with self._condition:
             return self._snapshot()
 
+    async def start_draining(self) -> None:
+        async with self._condition:
+            self._draining = True
+            self._condition.notify_all()
+            await self._update_readiness()
+
     def _snapshot(self) -> AdmissionSnapshot:
         return AdmissionSnapshot(
             active_turns=self._active,
@@ -183,10 +198,11 @@ class TurnAdmissionController:
             failed_total=self._failed,
             cancelled_total=self._cancelled,
             ready=self._is_ready(),
+            draining=self._draining,
         )
 
     def _is_ready(self) -> bool:
-        return not (
+        return not self._draining and not (
             self._active >= self._max_concurrent
             and len(self._queue) >= self._max_queued
         )

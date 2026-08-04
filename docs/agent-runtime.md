@@ -112,8 +112,10 @@ AGENT_QUEUE_TIMEOUT=10
 
 Queue chọn ticket hợp lệ đầu tiên thay vì khóa cứng theo đầu hàng: nếu user ở đầu queue đã
 hết quota, turn của user khác vẫn có thể dùng capacity còn trống. Queue đầy hoặc chờ quá
-`AGENT_QUEUE_TIMEOUT` trả gRPC `RESOURCE_EXHAUSTED`. Duplicate `turn_id` đang active trả
-`ALREADY_EXISTS`. Client disconnect và `CancelTurn` đều đánh thức cancellation path.
+`AGENT_QUEUE_TIMEOUT` trả gRPC `RESOURCE_EXHAUSTED`. Redis turn registry claim từng
+`turn_id`; replica khác nhận `ALREADY_EXISTS` khi turn đang active hoặc đã terminal. Claim có
+TTL, auto-renew và terminal result giữ theo `AGENT_TURN_RESULT_RETENTION`. Client disconnect
+và `CancelTurn` đều đánh thức cancellation path.
 
 Readiness chuyển sang `NOT_SERVING` khi toàn bộ execution slot và queue đều đầy, rồi tự trở
 lại `SERVING` khi có capacity. RPC `GetRuntimeStatus` cung cấp snapshot:
@@ -121,31 +123,51 @@ lại `SERVING` khi có capacity. RPC `GetRuntimeStatus` cung cấp snapshot:
 - active/queued và capacity;
 - accepted/rejected total;
 - completed/failed/cancelled total;
-- cờ `ready`.
+- cờ `ready` và `draining`.
 
 Các counter hiện nằm trong từng Agent process và reset khi restart. Khi production cần lịch
 sử hoặc tổng hợp nhiều replica, scrape/export snapshot sang Prometheus/OpenTelemetry.
+`GetRuntimeStatus` có thể được bảo vệ bằng metadata `x-agent-status-token` khi cấu hình
+`AGENT_STATUS_TOKEN`; gRPC health vẫn dành cho probe nội bộ.
 
-## Khóa turn giữa nhiều Core replica
+Liveness và readiness là hai gRPC health service riêng. Khi nhận SIGTERM, Runtime chuyển
+readiness sang `NOT_SERVING`, từ chối turn/queue mới, chờ turn active theo
+`AGENT_GRACEFUL_SHUTDOWN_TIMEOUT`, rồi mới đóng claim và server. Docker kiểm tra liveness nên
+không coi trạng thái quá tải bình thường là process crash.
 
-Core vẫn có local lock để từ chối hai message đồng thời trong một process. Khi dùng
-PostgreSQL, `PostgresAdvisorySessionTurnLock` còn giữ một session-level advisory lock trên
-connection riêng trong toàn bộ turn. Vì vậy hai API replica dùng chung database không thể
-cùng thay đổi transcript/avatar state của một session.
+## Redis lock giữa nhiều Core replica
+
+Core vẫn có local lock để từ chối hai message đồng thời trong một process. Trong Compose,
+`RedisSessionTurnLock` dùng token-owned lease để hai API replica không thể cùng thay đổi
+transcript/avatar state của một session.
 
 ```env
+SESSION_TURN_LOCK_PROVIDER=redis
 SESSION_TURN_LOCK_TIMEOUT=0
+SESSION_TURN_LOCK_LEASE=30
 ```
 
-Giá trị `0` thử lock một lần và trả `SessionBusy` ngay. Có thể đặt số giây dương để đợi ngắn.
-Lock key là signed 64-bit BLAKE2b của namespace + session ID; lock được commit ngoài
-transaction business và luôn unlock/close connection trong `finally`. SQLite/in-memory chỉ
-dùng local process lock, không được dùng để scale nhiều Core replica.
+Giá trị timeout `0` thử lock một lần và trả `SessionBusy` ngay. Lease có UUID token riêng,
+auto-renew mỗi một phần ba TTL và dùng Lua compare-and-PEXPIRE/compare-and-DEL; process khác
+không thể renew hoặc xóa nhầm lock vừa hết hạn rồi được owner mới lấy. Core kiểm tra ownership
+trong lúc nhận Agent heartbeat/text và dừng turn nếu mất lease. Redis lock không giữ PostgreSQL
+connection, nên DB pool vẫn dành cho business query. Chế độ `memory` chỉ dành local/test và
+không được dùng để scale nhiều Core replica.
 
-Mỗi advisory lock giữ một PostgreSQL connection trong suốt turn. Vì vậy Core mặc định đặt
-`DATABASE_POOL_SIZE=20`, `DATABASE_MAX_OVERFLOW=10`; khi thay đổi concurrency cần đảm bảo
-pool có ít nhất số active turn dự kiến cộng phần dư cho query auth/chat thông thường, đồng thời
-không vượt `max_connections` của PostgreSQL trên tổng số Core replica.
+Một Redis instance local vẫn là single point of failure. Production cần Redis Sentinel/Cluster
+hoặc managed Redis, TLS/auth và network isolation. Nếu Redis mất trong lúc renew, lease được
+đánh dấu lost và turn thất bại an toàn; hệ thống không fallback sang local lock vì fallback đó
+có thể tạo split-brain.
+
+## Transport security và request limits
+
+Local mặc định vẫn cho phép insecure gRPC. Production có thể cấu hình TLS hoặc mTLS bằng
+`AGENT_GRPC_TLS_CERT_FILE`, `AGENT_GRPC_TLS_KEY_FILE`, `AGENT_GRPC_TLS_CLIENT_CA_FILE` ở
+Agent và CA/client certificate tương ứng ở Core. Runtime từ chối request thiếu identity field,
+message/history quá lớn hoặc quá nhiều authorization scope trước khi claim capacity.
+
+Agent dùng `Dockerfile.agent` riêng, chạy non-root và chỉ chứa gRPC, Redis, JWT, protobuf;
+không đóng gói FFmpeg, aiortc, LiveKit, frontend hoặc avatar assets.
 
 ## Delegated authorization
 

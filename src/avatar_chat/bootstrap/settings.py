@@ -22,8 +22,6 @@ class Settings:
     port: int
     database_url: str | None
     auto_create_schema: bool
-    database_pool_size: int
-    database_max_overflow: int
     refresh_cookie_name: str
     auth_cookie_secure: bool
     jwt_secret: str
@@ -39,12 +37,17 @@ class Settings:
     reply_http_token: str | None
     agent_runtime_provider: str
     agent_grpc_target: str
+    agent_grpc_ca_file: str | None
+    agent_grpc_client_cert_file: str | None
+    agent_grpc_client_key_file: str | None
     agent_turn_timeout_seconds: float
     agent_idle_timeout_seconds: float
     agent_delegation_secret: str
     agent_delegation_issuer: str
     agent_delegation_audience: str
+    session_turn_lock_provider: str
     session_turn_lock_timeout_seconds: float
+    session_turn_lock_lease_seconds: float
     ice_server_urls: tuple[str, ...]
     ice_username: str | None
     ice_credential: str | None
@@ -79,8 +82,6 @@ class Settings:
             database_url=os.getenv("DATABASE_URL") or None,
             auto_create_schema=os.getenv("AUTO_CREATE_SCHEMA", "true").lower()
             in {"1", "true", "yes", "on"},
-            database_pool_size=int(os.getenv("DATABASE_POOL_SIZE", "20")),
-            database_max_overflow=int(os.getenv("DATABASE_MAX_OVERFLOW", "10")),
             refresh_cookie_name=os.getenv("REFRESH_COOKIE_NAME", "avatar_refresh"),
             auth_cookie_secure=os.getenv("AUTH_COOKIE_SECURE", "false").lower()
             in {"1", "true", "yes", "on"},
@@ -109,6 +110,9 @@ class Settings:
             reply_http_token=os.getenv("REPLY_HTTP_TOKEN"),
             agent_runtime_provider=os.getenv("AGENT_RUNTIME_PROVIDER", "local").lower(),
             agent_grpc_target=os.getenv("AGENT_GRPC_TARGET", "personaforge-agent:50051"),
+            agent_grpc_ca_file=os.getenv("AGENT_GRPC_CA_FILE") or None,
+            agent_grpc_client_cert_file=os.getenv("AGENT_GRPC_CLIENT_CERT_FILE") or None,
+            agent_grpc_client_key_file=os.getenv("AGENT_GRPC_CLIENT_KEY_FILE") or None,
             agent_turn_timeout_seconds=float(os.getenv("AGENT_TURN_TIMEOUT", "120")),
             agent_idle_timeout_seconds=float(os.getenv("AGENT_IDLE_TIMEOUT", "15")),
             agent_delegation_secret=os.getenv(
@@ -121,8 +125,14 @@ class Settings:
             agent_delegation_audience=os.getenv(
                 "AGENT_DELEGATION_AUDIENCE", "personaforge-agent"
             ),
+            session_turn_lock_provider=os.getenv(
+                "SESSION_TURN_LOCK_PROVIDER", "memory"
+            ).lower(),
             session_turn_lock_timeout_seconds=float(
                 os.getenv("SESSION_TURN_LOCK_TIMEOUT", "0")
+            ),
+            session_turn_lock_lease_seconds=float(
+                os.getenv("SESSION_TURN_LOCK_LEASE", "30")
             ),
             ice_server_urls=ice_urls,
             ice_username=os.getenv("WEBRTC_ICE_USERNAME"),
