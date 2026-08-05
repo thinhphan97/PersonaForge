@@ -38,9 +38,11 @@ class WorkerSettings:
     total_vram_mb: int
     schedulable_vram_mb: int
     maximum_slots: int
+    maximum_gpu_count: int
     compute_budget: float
     registration_ttl_seconds: int
     heartbeat_interval_seconds: float
+    telemetry_stream_maxlen: int
     gpu_probe_provider: str
     gpu_probe_timeout_seconds: float
     gpu_reserve_vram_mb: int
@@ -111,12 +113,16 @@ class WorkerSettings:
                 os.getenv("AVATAR_GPU_SCHEDULABLE_VRAM_MB", "0")
             ),
             maximum_slots=int(os.getenv("AVATAR_WORKER_MAX_SLOTS", "1")),
+            maximum_gpu_count=int(os.getenv("AVATAR_WORKER_MAX_GPU_COUNT", "1")),
             compute_budget=float(os.getenv("AVATAR_WORKER_COMPUTE_BUDGET", "0.85")),
             registration_ttl_seconds=int(
                 os.getenv("AVATAR_WORKER_REGISTRATION_TTL_SECONDS", "15")
             ),
             heartbeat_interval_seconds=float(
                 os.getenv("AVATAR_WORKER_HEARTBEAT_INTERVAL_SECONDS", "5")
+            ),
+            telemetry_stream_maxlen=int(
+                os.getenv("AVATAR_WORKER_TELEMETRY_STREAM_MAXLEN", "17280")
             ),
             gpu_probe_provider=os.getenv(
                 "PERSONA_RESOURCE_PROBE_PROVIDER",

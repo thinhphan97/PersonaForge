@@ -634,20 +634,24 @@ Master không tự chuyển sang GPU khác. Nếu local admission thất bại, 
 `assignment_rejected` với reason; Control release reservation và Scheduler chọn lại. Quy tắc này
 giữ Scheduler là authority duy nhất và tránh assignment trong Redis khác GPU Child thực sự dùng.
 
-### 8.9. Khoảng cách so với code hiện tại
+### 8.9. Trạng thái triển khai hiện tại
 
-Runtime hiện tại đã có atomic slot/VRAM/compute reservation nhưng allocation key vẫn theo
-`worker_id`, registration/heartbeat chỉ chứa một `gpu_uuid`, và lease chưa chứa `gpu_uuid`.
-Để áp dụng thuật toán trên cần:
+Luồng allocation per-GPU đã được triển khai:
 
-1. đổi capability/heartbeat thành một danh sách `GpuSnapshot`;
-2. thêm `gpu_uuid` vào `CompositeSlotLease`, assignment, command và event;
-3. chuyển Redis usage counter từ per-worker sang per-worker-per-GPU;
-4. hợp nhất acquire lease và ghi assignment trong một atomic operation;
-5. cập nhật candidate port trả từng GPU thay vì từng worker;
-6. thay tuple sort hiện tại bằng policy filter/score versioned;
-7. thêm accept deadline, stopped ACK, reason aggregate, cooldown và reconciliation test;
-8. để Master local admission và Child GPU pinning xác nhận assignment trước model load.
+1. registration capability và heartbeat chứa danh sách GPU đã được enrollment cho phép;
+2. Control từ chối inventory vượt `max_gpu_count` của one-time enrollment token;
+3. `CompositeSlotLease`, assignment, command và response đều chứa `gpu_uuid`;
+4. usage ledger dùng key `personaforge:control:gpu:{worker_id}:{gpu_uuid}:usage`;
+5. Lua acquire atomically kiểm tra capacity, tăng generation, ghi lease, assignment và index;
+6. Registry flatten Worker thành candidate `(worker_id, gpu_uuid)` và lấy EWMA/cooldown từ Redis;
+7. Resource Profile Resolver chạy riêng theo GPU model/compute capability trước hard filter;
+8. score dùng reserved VRAM/compute, queue, EWMA utilization, reliability và thermal headroom;
+9. Master recheck slot/VRAM/compute trên đúng GPU rồi pin Child bằng `CUDA_VISIBLE_DEVICES`;
+10. release/reconcile dùng `generation + lease_token` và trừ đúng per-GPU ledger.
+
+Model-cache affinity, LiveKit region locality, shared-model activation ledger, accept-deadline
+workflow và reschedule tự động sau host loss vẫn là hướng production tiếp theo. Subprocess-per-
+composite hiện luôn dùng cold/conservative resource profile.
 
 ## 9. Local admission và provision hai pha
 

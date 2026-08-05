@@ -10,6 +10,7 @@ from personaforge_control.domain.errors import EnrollmentReplay, InvalidEnrollme
 from personaforge_control.domain.models import (
     EnrollmentGrant,
     EnrollmentStatus,
+    GpuCapability,
     RedisWorkerCredential,
     RegistrationResult,
     WorkerCapabilities,
@@ -382,7 +383,14 @@ def _registration_data(value: WorkerRegistration) -> dict[str, object]:
 
 
 def _registration_from_data(data: dict[str, Any]) -> WorkerRegistration:
-    capabilities = WorkerCapabilities(**data["capabilities"])
+    capability_data = data["capabilities"]
+    capability_data["supported_runtimes"] = tuple(
+        capability_data.get("supported_runtimes", ())
+    )
+    capability_data["gpus"] = tuple(
+        GpuCapability(**item) for item in capability_data.get("gpus", ())
+    )
+    capabilities = WorkerCapabilities(**capability_data)
     return WorkerRegistration(
         worker_id=data["worker_id"],
         boot_id=data["boot_id"],

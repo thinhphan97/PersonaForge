@@ -11,8 +11,11 @@ from personaforge_control.domain.models import (
     CompositeSlotLease,
     EnrollmentGrant,
     EnrollmentStatus,
+    GpuCandidate,
+    GpuHeartbeat,
     RedisWorkerCredential,
     RegistrationResult,
+    ResourceResolution,
     WorkerHeartbeat,
     WorkerRegistration,
     WorkerStatus,
@@ -186,8 +189,8 @@ class InMemoryWorkerRegistry:
         self,
         requirement: CompositeRequirement,
         now: datetime,
-    ) -> tuple[tuple[WorkerRegistration, WorkerHeartbeat], ...]:
-        candidates: list[tuple[WorkerRegistration, WorkerHeartbeat]] = []
+    ) -> tuple[GpuCandidate, ...]:
+        candidates: list[GpuCandidate] = []
         for registration in self._registrations.values():
             heartbeat = self._heartbeats.get(registration.worker_id)
             if heartbeat is None or heartbeat.expires_at <= now:
@@ -202,9 +205,37 @@ class InMemoryWorkerRegistry:
                 continue
             if requirement.runtime not in capabilities.supported_runtimes:
                 continue
-            if capabilities.schedulable_vram_mb < requirement.peak_vram_mb:
-                continue
-            candidates.append((registration, heartbeat))
+            gpu_capability = capabilities.advertised_gpus()[0]
+            gpu = next(
+                (
+                    item
+                    for item in heartbeat.gpu_resources
+                    if item.gpu_uuid == gpu_capability.gpu_uuid
+                ),
+                GpuHeartbeat(
+                    gpu_uuid=gpu_capability.gpu_uuid,
+                    gpu_name=gpu_capability.gpu_name,
+                    compute_capability=gpu_capability.compute_capability,
+                    total_vram_mb=gpu_capability.total_vram_mb,
+                    free_vram_mb=heartbeat.free_vram_mb,
+                    used_vram_mb=heartbeat.gpu_used_vram_mb,
+                    gpu_utilization=heartbeat.gpu_utilization,
+                    memory_utilization=heartbeat.gpu_memory_utilization,
+                    temperature_c=heartbeat.gpu_temperature_c,
+                    power_watts=heartbeat.gpu_power_watts,
+                ),
+            )
+            candidates.append(
+                GpuCandidate(
+                    registration=registration,
+                    heartbeat=heartbeat,
+                    gpu=gpu,
+                    reserved_slots=0,
+                    reserved_vram_mb=0,
+                    reserved_compute=0,
+                    utilization_ewma=gpu.gpu_utilization,
+                )
+            )
         return tuple(candidates)
 
 
@@ -217,17 +248,19 @@ class InMemoryCompositeSlotAllocator:
 
     async def acquire(
         self,
-        registration: WorkerRegistration,
-        heartbeat: WorkerHeartbeat,
+        candidate: GpuCandidate,
         requirement: CompositeRequirement,
+        resolution: ResourceResolution,
         now: datetime,
         ttl: timedelta,
     ) -> CompositeSlotLease | None:
+        registration = candidate.registration
         async with self._lock:
             active = [
                 lease
                 for lease in self._leases.values()
                 if lease.worker_id == registration.worker_id and lease.expires_at > now
+                and lease.gpu_uuid == candidate.gpu.gpu_uuid
             ]
             used_vram = sum(lease.reserved_vram_mb for lease in active)
             used_compute = sum(lease.reserved_gpu_duty_cycle for lease in active)
@@ -249,6 +282,9 @@ class InMemoryCompositeSlotAllocator:
                 reserved_vram_mb=requirement.peak_vram_mb,
                 reserved_gpu_duty_cycle=requirement.gpu_duty_cycle,
                 expires_at=now + ttl,
+                gpu_uuid=candidate.gpu.gpu_uuid,
+                resource_source=resolution.source,
+                resource_profile_id=resolution.profile_id,
             )
             self._leases[requirement.session_id] = lease
             return lease

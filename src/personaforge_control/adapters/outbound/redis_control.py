@@ -12,6 +12,10 @@ from redis.asyncio import Redis
 from personaforge_control.domain.models import (
     CompositeRequirement,
     CompositeSlotLease,
+    GpuCandidate,
+    GpuCapability,
+    GpuHeartbeat,
+    ResourceResolution,
     WorkerCapabilities,
     WorkerHeartbeat,
     WorkerRegistration,
@@ -19,7 +23,9 @@ from personaforge_control.domain.models import (
 )
 
 _ACQUIRE_SCRIPT = """
-if redis.call('EXISTS', KEYS[2]) == 1 then return {0, 'session-exists'} end
+if redis.call('EXISTS', KEYS[2]) == 1 or redis.call('EXISTS', KEYS[4]) == 1 then
+  return {0, 'session-exists'}
+end
 local usage = redis.call('HMGET', KEYS[1], 'slots', 'vram', 'compute')
 local slots = tonumber(usage[1]) or 0
 local vram = tonumber(usage[2]) or 0
@@ -29,14 +35,18 @@ if vram + tonumber(ARGV[2]) > tonumber(ARGV[3]) then return {0, 'vram'} end
 if compute + tonumber(ARGV[4]) > tonumber(ARGV[5]) then return {0, 'compute'} end
 local generation = redis.call('INCR', KEYS[3])
 local lease = {
-  session_id=ARGV[6], worker_id=ARGV[7], slot_id='slot-' .. tostring(slots + 1),
-  lease_token=ARGV[8], generation=generation,
+  session_id=ARGV[6], worker_id=ARGV[7], gpu_uuid=ARGV[8],
+  slot_id=ARGV[8] .. '-slot-' .. tostring(slots + 1),
+  lease_token=ARGV[9], generation=generation,
   reserved_vram_mb=tonumber(ARGV[2]), reserved_gpu_duty_cycle=tonumber(ARGV[4]),
-  expires_at=tonumber(ARGV[9])
+  expires_at=tonumber(ARGV[10]), resource_source=ARGV[11],
+  resource_profile_id=ARGV[12]
 }
 redis.call('HSET', KEYS[1], 'slots', slots + 1, 'vram', vram + tonumber(ARGV[2]),
   'compute', compute + tonumber(ARGV[4]))
-redis.call('SET', KEYS[2], cjson.encode(lease), 'PX', ARGV[10])
+redis.call('SET', KEYS[2], cjson.encode(lease), 'PX', ARGV[13])
+redis.call('SET', KEYS[4], cjson.encode(lease), 'PX', ARGV[13])
+redis.call('SADD', KEYS[5], ARGV[6])
 return {generation, cjson.encode(lease)}
 """
 
@@ -117,9 +127,9 @@ class RedisControlPlane:
         self,
         requirement: CompositeRequirement,
         now: datetime,
-    ) -> tuple[tuple[WorkerRegistration, WorkerHeartbeat], ...]:
+    ) -> tuple[GpuCandidate, ...]:
         worker_ids = await _smembers(self._redis, "personaforge:control:workers")
-        candidates: list[tuple[WorkerRegistration, WorkerHeartbeat]] = []
+        candidates: list[GpuCandidate] = []
         for worker_id in worker_ids:
             registration_raw, heartbeat_raw, heartbeat_ttl = await _execute(
                 self._redis,
@@ -139,6 +149,11 @@ class RedisControlPlane:
             )
             capabilities = registration.capabilities
             if (
+                heartbeat.boot_id != registration.boot_id
+                or heartbeat.identity_generation != registration.identity_generation
+            ):
+                continue
+            if (
                 registration.lease_expires_at <= now
                 or registration.status is not WorkerStatus.READY
             ):
@@ -147,13 +162,70 @@ class RedisControlPlane:
                 continue
             if requirement.runtime not in capabilities.supported_runtimes:
                 continue
-            if _compute_capability(capabilities.compute_capability) < _compute_capability(
-                requirement.minimum_compute_capability
-            ):
-                continue
-            if heartbeat.free_vram_mb < requirement.peak_vram_mb:
-                continue
-            candidates.append((registration, heartbeat))
+            heartbeat_by_uuid = {item.gpu_uuid: item for item in heartbeat.gpu_resources}
+            for gpu_capability in capabilities.advertised_gpus():
+                gpu = heartbeat_by_uuid.get(gpu_capability.gpu_uuid)
+                if gpu is None:
+                    # Backward-compatible workers only reported their selected GPU at top level.
+                    if gpu_capability.gpu_uuid != capabilities.gpu_uuid:
+                        continue
+                    gpu = GpuHeartbeat(
+                        gpu_uuid=capabilities.gpu_uuid,
+                        gpu_name=capabilities.gpu_name,
+                        compute_capability=capabilities.compute_capability,
+                        total_vram_mb=capabilities.total_vram_mb,
+                        free_vram_mb=heartbeat.free_vram_mb,
+                        used_vram_mb=heartbeat.gpu_used_vram_mb,
+                        gpu_utilization=heartbeat.gpu_utilization,
+                        memory_utilization=heartbeat.gpu_memory_utilization,
+                        temperature_c=heartbeat.gpu_temperature_c,
+                        power_watts=heartbeat.gpu_power_watts,
+                        healthy=heartbeat.hardware_probe_error is None,
+                    )
+                if not gpu.healthy:
+                    continue
+                if gpu.temperature_c is not None and gpu.temperature_c >= 90:
+                    continue
+                if _compute_capability(gpu_capability.compute_capability) < _compute_capability(
+                    requirement.minimum_compute_capability
+                ):
+                    continue
+                usage = await _hmget(
+                    self._redis,
+                    _usage_key(worker_id, gpu.gpu_uuid),
+                    ["slots", "vram", "compute"],
+                )
+                slots = int(usage[0] or 0)
+                reserved_vram = int(usage[1] or 0)
+                reserved_compute = float(usage[2] or 0)
+                utilization_ewma_raw = await _hget(
+                    self._redis,
+                    _runtime_key(worker_id, gpu.gpu_uuid), "utilization_ewma"
+                )
+                failure_penalty_raw, cooldown_until_raw = await _hmget(
+                    self._redis,
+                    _runtime_key(worker_id, gpu.gpu_uuid),
+                    ["failure_penalty", "cooldown_until"],
+                )
+                if cooldown_until_raw is not None and float(cooldown_until_raw) > now.timestamp():
+                    continue
+                utilization_ewma = (
+                    float(utilization_ewma_raw)
+                    if utilization_ewma_raw is not None
+                    else gpu.gpu_utilization
+                )
+                candidates.append(
+                    GpuCandidate(
+                        registration=registration,
+                        heartbeat=heartbeat,
+                        gpu=gpu,
+                        reserved_slots=slots,
+                        reserved_vram_mb=reserved_vram,
+                        reserved_compute=reserved_compute,
+                        utilization_ewma=utilization_ewma,
+                        recent_failure_penalty=float(failure_penalty_raw or 0),
+                    )
+                )
         return tuple(candidates)
 
     async def inventory(
@@ -188,13 +260,20 @@ class RedisControlPlane:
 
     async def acquire(
         self,
-        registration: WorkerRegistration,
-        heartbeat: WorkerHeartbeat,
+        candidate: GpuCandidate,
         requirement: CompositeRequirement,
+        resolution: ResourceResolution,
         now: datetime,
         ttl: timedelta,
     ) -> CompositeSlotLease | None:
-        if heartbeat.free_vram_mb < requirement.peak_vram_mb:
+        registration = candidate.registration
+        gpu = candidate.gpu
+        gpu_capability = next(
+            item
+            for item in registration.capabilities.advertised_gpus()
+            if item.gpu_uuid == gpu.gpu_uuid
+        )
+        if gpu.free_vram_mb < requirement.peak_vram_mb:
             return None
         ttl_ms = max(1, round(ttl.total_seconds() * 1_000))
         expires_at = now + ttl
@@ -202,19 +281,24 @@ class RedisControlPlane:
         response = await _eval(
             self._redis,
             _ACQUIRE_SCRIPT,
-            3,
-            _usage_key(registration.worker_id),
+            5,
+            _usage_key(registration.worker_id, gpu.gpu_uuid),
             _slot_lease_key(requirement.session_id),
             _generation_key(requirement.session_id),
-            str(registration.capabilities.max_slots),
+            _assignment_key(requirement.session_id),
+            "personaforge:control:assignments",
+            str(gpu_capability.max_slots),
             str(requirement.peak_vram_mb),
-            str(registration.capabilities.schedulable_vram_mb),
+            str(gpu_capability.schedulable_vram_mb),
             str(requirement.gpu_duty_cycle),
-            str(registration.capabilities.compute_budget),
+            str(gpu_capability.compute_budget),
             requirement.session_id,
             registration.worker_id,
+            gpu.gpu_uuid,
             lease_token,
             str(expires_at.timestamp()),
+            resolution.source,
+            resolution.profile_id or "",
             str(ttl_ms * 2),
         )
         if int(response[0]) == 0:
@@ -246,7 +330,7 @@ class RedisControlPlane:
             self._redis,
             _RELEASE_SCRIPT,
             2,
-            _usage_key(lease.worker_id),
+            _usage_key(lease.worker_id, lease.gpu_uuid),
             _slot_lease_key(lease.session_id),
             lease.lease_token,
             str(lease.generation),
@@ -298,6 +382,12 @@ class RedisControlPlane:
             "character_id": requirement.character_id,
             "avatar_model_id": requirement.avatar_model_id,
             "tts_model_id": requirement.tts_model_id,
+            "voice_id": requirement.voice_id,
+            "avatar_revision": requirement.avatar_revision,
+            "tts_revision": requirement.tts_revision,
+            "runtime_version": requirement.runtime_version,
+            "precision": requirement.precision,
+            "isolation_mode": requirement.isolation_mode,
             "runtime": requirement.runtime,
             "resolution": requirement.resolution,
             "fps": requirement.fps,
@@ -368,11 +458,14 @@ class RedisControlPlane:
             "command_id": uuid4().hex,
             "session_id": lease.session_id,
             "worker_id": lease.worker_id,
+            "gpu_uuid": lease.gpu_uuid,
             "generation": lease.generation,
             "slot_id": lease.slot_id,
             "lease_token": lease.lease_token,
             "reserved_vram_mb": lease.reserved_vram_mb,
             "reserved_gpu_duty_cycle": lease.reserved_gpu_duty_cycle,
+            "resource_source": lease.resource_source,
+            "resource_profile_id": lease.resource_profile_id,
             "created_at": _utc_now().isoformat(),
             "payload": payload,
         }
@@ -487,6 +580,16 @@ async def _srem(redis: Redis, key: str, member: str) -> int:
     return await operation
 
 
+async def _hmget(redis: Redis, key: str, fields: list[str]) -> list[Any]:
+    operation = cast(Awaitable[list[Any]], redis.hmget(key, fields))
+    return await operation
+
+
+async def _hget(redis: Redis, key: str, field: str) -> str | None:
+    operation = cast(Awaitable[str | None], redis.hget(key, field))
+    return await operation
+
+
 async def _exists(redis: Redis, key: str) -> bool:
     operation = cast(Awaitable[int], redis.exists(key))
     return bool(await operation)
@@ -500,8 +603,14 @@ def _heartbeat_key(worker_id: str) -> str:
     return f"avatar:worker:{worker_id}:heartbeat"
 
 
-def _usage_key(worker_id: str) -> str:
-    return f"personaforge:control:worker-usage:{worker_id}"
+def _usage_key(worker_id: str, gpu_uuid: str) -> str:
+    if not gpu_uuid:
+        return f"personaforge:control:worker-usage:{worker_id}"
+    return f"personaforge:control:gpu:{worker_id}:{gpu_uuid}:usage"
+
+
+def _runtime_key(worker_id: str, gpu_uuid: str) -> str:
+    return f"personaforge:control:gpu:{worker_id}:{gpu_uuid}:runtime"
 
 
 def _slot_lease_key(session_id: str) -> str:
@@ -544,6 +653,9 @@ def _registration_from_data(data: dict[str, Any]) -> WorkerRegistration:
     capability_data = data["capabilities"]
     capability_data["supported_runtimes"] = tuple(
         capability_data.get("supported_runtimes", ())
+    )
+    capability_data["gpus"] = tuple(
+        GpuCapability(**item) for item in capability_data.get("gpus", ())
     )
     return WorkerRegistration(
         worker_id=data["worker_id"],
@@ -598,8 +710,40 @@ def _heartbeat_from_data(data: dict[str, Any], expires_at: datetime) -> WorkerHe
             if data.get("hardware_probe_error") is not None
             else None
         ),
-        heartbeat_at=_utc_now(),
+        heartbeat_at=datetime.fromtimestamp(
+            float(data.get("heartbeat_at", _utc_now().timestamp())),
+            timezone.utc,
+        ),
         expires_at=expires_at,
+        gpu_resources=tuple(
+            GpuHeartbeat(
+                gpu_uuid=str(item["gpu_uuid"]),
+                gpu_name=str(item.get("gpu_name", "unknown")),
+                compute_capability=str(item.get("compute_capability", "0.0")),
+                total_vram_mb=int(item.get("total_vram_mb", 0)),
+                free_vram_mb=int(item.get("free_vram_mb", 0)),
+                used_vram_mb=int(item.get("used_vram_mb", 0)),
+                gpu_utilization=float(item.get("gpu_utilization", 0)),
+                memory_utilization=float(item.get("memory_utilization", 0)),
+                encoder_utilization=_optional_float(item.get("encoder_utilization")),
+                decoder_utilization=_optional_float(item.get("decoder_utilization")),
+                temperature_c=_optional_float(item.get("temperature_c")),
+                power_watts=_optional_float(item.get("power_watts")),
+                healthy=not bool(item.get("probe_error")),
+            )
+            for item in data.get("gpu_resources", ())
+            if isinstance(item, dict) and item.get("gpu_uuid")
+        ),
+        host_resources=(
+            dict(data["host_resources"])
+            if isinstance(data.get("host_resources"), dict)
+            else None
+        ),
+        child_resources=tuple(
+            dict(item)
+            for item in data.get("child_resources", ())
+            if isinstance(item, dict)
+        ),
     )
 
 
@@ -627,4 +771,11 @@ def _lease_from_data(data: dict[str, Any]) -> CompositeSlotLease:
         reserved_vram_mb=int(data["reserved_vram_mb"]),
         reserved_gpu_duty_cycle=float(data["reserved_gpu_duty_cycle"]),
         expires_at=datetime.fromtimestamp(data["expires_at"], timezone.utc),
+        gpu_uuid=str(data.get("gpu_uuid", "")),
+        resource_source=str(data.get("resource_source", "request")),
+        resource_profile_id=(
+            str(data["resource_profile_id"])
+            if data.get("resource_profile_id")
+            else None
+        ),
     )

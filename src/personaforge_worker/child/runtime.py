@@ -177,6 +177,12 @@ class CompositeChildRuntime:
     async def _heartbeat(self) -> None:
         while True:
             await asyncio.sleep(self._settings.child_heartbeat_interval_seconds)
+            observed_fps = 0.0
+            av_drift_ms = 0.0
+            if self._session is not None:
+                metrics = getattr(self._session, "media_metrics", None)
+                if callable(metrics):
+                    observed_fps, av_drift_ms = metrics()
             event = self._event(message_id=uuid4().hex)
             event.heartbeat.CopyFrom(
                 child_control_pb2.ChildHeartbeat(
@@ -184,7 +190,8 @@ class CompositeChildRuntime:
                     pid=os.getpid(),
                     last_command_sequence=self._last_command_sequence,
                     livekit_connected=self._session is not None,
-                    fps=self._settings.video_fps,
+                    fps=observed_fps,
+                    av_drift_ms=av_drift_ms,
                 )
             )
             await self._events.put(event)

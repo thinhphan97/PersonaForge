@@ -69,7 +69,7 @@ module = ["grpc", "grpc.*", "grpc_health", "grpc_health.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["nvitop", "nvitop.*"]
+module = ["nvitop", "nvitop.*", "livekit", "livekit.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

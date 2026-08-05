@@ -109,6 +109,8 @@ class WorkerRegistrationService:
             raise InvalidEnrollment("Worker host does not match enrollment host")
         if capabilities.worker_type != claims.worker_type:
             raise InvalidEnrollment("Worker type does not match enrollment grant")
+        if len(capabilities.advertised_gpus()) > claims.max_gpu_count:
+            raise InvalidEnrollment("Worker advertised more GPUs than the enrollment grant")
 
         existing_result = await self._enrollments.result(
             claims.token_id,
@@ -193,11 +195,17 @@ class WorkerRegistrationService:
         if capabilities is not None and (
             capabilities.worker_type != identity.capabilities.worker_type
             or capabilities.host_id != identity.capabilities.host_id
-            or capabilities.gpu_uuid != identity.capabilities.gpu_uuid
         ):
             raise InvalidEnrollment(
-                "Re-registration cannot change worker type, host ID or GPU UUID"
+                "Re-registration cannot change worker type or host ID"
             )
+        if capabilities is not None:
+            original_gpus = {gpu.gpu_uuid for gpu in identity.capabilities.advertised_gpus()}
+            current_gpus = {gpu.gpu_uuid for gpu in capabilities.advertised_gpus()}
+            if not current_gpus or not current_gpus.issubset(original_gpus):
+                raise InvalidEnrollment(
+                    "Re-registration cannot advertise GPUs outside the enrolled set"
+                )
         now = self._clock.now()
         previous_registration = await self._registrations.get(worker_id)
         owner_token = self._secrets.generate()

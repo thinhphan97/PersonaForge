@@ -18,7 +18,12 @@ from personaforge_control.domain.errors import (
     SlotLeaseLost,
     WorkerIdentityCollision,
 )
-from personaforge_control.domain.models import CompositeRequirement, WorkerCapabilities
+from personaforge_control.domain.models import (
+    CompositeRequirement,
+    CompositeSlotLease,
+    GpuCapability,
+    WorkerCapabilities,
+)
 
 
 class EnrollmentTokenRequest(BaseModel):
@@ -34,7 +39,17 @@ class EnrollmentTokenResponse(BaseModel):
     token_type: str = "Bearer"
 
 
-class WorkerCapabilitiesRequest(BaseModel):
+class GpuCapabilityRequest(BaseModel):
+    gpu_uuid: str
+    gpu_name: str
+    compute_capability: str
+    total_vram_mb: int = Field(ge=0)
+    schedulable_vram_mb: int = Field(ge=0)
+    max_slots: int = Field(ge=1)
+    compute_budget: float = Field(gt=0, le=1)
+
+
+class WorkerCapabilitiesRequest(GpuCapabilityRequest):
     worker_type: str = "persona-render"
     host_id: str
     gpu_uuid: str
@@ -45,6 +60,7 @@ class WorkerCapabilitiesRequest(BaseModel):
     max_slots: int = Field(ge=1)
     compute_budget: float = Field(gt=0, le=1)
     supported_runtimes: tuple[str, ...] = ()
+    gpus: tuple[GpuCapabilityRequest, ...] = ()
 
 
 class WorkerRegistrationRequest(BaseModel):
@@ -100,6 +116,12 @@ class WorkerHeartbeatResponse(BaseModel):
     hardware_sampled_at: str
     hardware_probe_error: str | None
     expires_at: str
+    reserved_slots: int
+    queue_depth: int
+    heartbeat_at: str
+    host_resources: dict[str, object] | None
+    gpu_resources: list[dict[str, object]]
+    child_resources: list[dict[str, object]]
 
 
 class WorkerInventoryResponse(BaseModel):
@@ -122,6 +144,12 @@ class CompositeProvisionRequest(BaseModel):
     fps: float = Field(default=25, gt=0, le=120)
     peak_vram_mb: int = Field(default=0, ge=0)
     gpu_duty_cycle: float = Field(default=0.1, gt=0, le=1)
+    voice_id: str = "default"
+    avatar_revision: str = "default"
+    tts_revision: str = "default"
+    runtime_version: str = "default"
+    precision: str = "fp32"
+    isolation_mode: str = "subprocess"
     media_payload: dict[str, str]
 
 
@@ -134,6 +162,9 @@ class CompositeLeaseResponse(BaseModel):
     reserved_vram_mb: int
     reserved_gpu_duty_cycle: float
     expires_at: str
+    gpu_uuid: str
+    resource_source: str
+    resource_profile_id: str | None
 
 
 class CompositeStateRequest(BaseModel):
@@ -145,6 +176,28 @@ class CompositeSpeechRequest(BaseModel):
     turn_id: str
     utterance_id: str
     text: str = Field(min_length=1, max_length=100_000)
+
+
+class PersonaResourceConfigRequest(BaseModel):
+    character_id: str
+    avatar_model_id: str
+    avatar_revision: str = "default"
+    voice_id: str = "default"
+    tts_model_id: str
+    tts_revision: str = "default"
+    runtime: str
+    runtime_version: str = "default"
+    precision: str = "fp32"
+    resolution: str = "640x360"
+    fps: float = Field(default=25, gt=0, le=120)
+    isolation_mode: str = "subprocess"
+    gpu_name: str | None = None
+    minimum_compute_capability: str = "0.0"
+    manifest_peak_vram_mb: int = Field(ge=0)
+    manifest_gpu_duty_cycle: float = Field(gt=0, le=1)
+    bootstrap_vram_margin_mb: int = Field(default=512, ge=0)
+    bootstrap_compute_margin: float = Field(default=0.05, ge=0, le=1)
+    active: bool = True
 
 
 def create_control_app(container: ControlContainer) -> FastAPI:
@@ -219,6 +272,18 @@ def create_control_app(container: ControlContainer) -> FastAPI:
                     max_slots=registration.capabilities.max_slots,
                     compute_budget=registration.capabilities.compute_budget,
                     supported_runtimes=registration.capabilities.supported_runtimes,
+                    gpus=tuple(
+                        GpuCapabilityRequest(
+                            gpu_uuid=gpu.gpu_uuid,
+                            gpu_name=gpu.gpu_name,
+                            compute_capability=gpu.compute_capability,
+                            total_vram_mb=gpu.total_vram_mb,
+                            schedulable_vram_mb=gpu.schedulable_vram_mb,
+                            max_slots=gpu.max_slots,
+                            compute_budget=gpu.compute_budget,
+                        )
+                        for gpu in registration.capabilities.advertised_gpus()
+                    ),
                 ),
                 heartbeat=(
                     WorkerHeartbeatResponse(
@@ -238,6 +303,29 @@ def create_control_app(container: ControlContainer) -> FastAPI:
                         hardware_sampled_at=heartbeat.hardware_sampled_at.isoformat(),
                         hardware_probe_error=heartbeat.hardware_probe_error,
                         expires_at=heartbeat.expires_at.isoformat(),
+                        reserved_slots=heartbeat.reserved_slots,
+                        queue_depth=heartbeat.queue_depth,
+                        heartbeat_at=heartbeat.heartbeat_at.isoformat(),
+                        host_resources=heartbeat.host_resources,
+                        gpu_resources=[
+                            {
+                                "gpu_uuid": gpu.gpu_uuid,
+                                "gpu_name": gpu.gpu_name,
+                                "compute_capability": gpu.compute_capability,
+                                "total_vram_mb": gpu.total_vram_mb,
+                                "free_vram_mb": gpu.free_vram_mb,
+                                "used_vram_mb": gpu.used_vram_mb,
+                                "gpu_utilization": gpu.gpu_utilization,
+                                "memory_utilization": gpu.memory_utilization,
+                                "encoder_utilization": gpu.encoder_utilization,
+                                "decoder_utilization": gpu.decoder_utilization,
+                                "temperature_c": gpu.temperature_c,
+                                "power_watts": gpu.power_watts,
+                                "healthy": gpu.healthy,
+                            }
+                            for gpu in heartbeat.gpu_resources
+                        ],
+                        child_resources=list(heartbeat.child_resources),
                     )
                     if heartbeat is not None
                     else None
@@ -262,6 +350,40 @@ def create_control_app(container: ControlContainer) -> FastAPI:
         )
         return EnrollmentTokenResponse(bootstrap_token=token)
 
+    @app.put(
+        "/internal/resource-configs",
+        dependencies=[Depends(require_operator)],
+    )
+    async def upsert_resource_config(
+        request: PersonaResourceConfigRequest,
+    ) -> dict[str, str]:
+        config_id = await container.telemetry_store.upsert_config(request.model_dump())
+        return {"config_id": config_id}
+
+    @app.get(
+        "/internal/resource-profiles",
+        dependencies=[Depends(require_operator)],
+    )
+    async def list_resource_profiles(limit: int = 100) -> list[dict[str, object]]:
+        return await container.telemetry_store.list_profiles(min(max(limit, 1), 1000))
+
+    @app.get(
+        "/internal/resource-configs",
+        dependencies=[Depends(require_operator)],
+    )
+    async def list_resource_configs(limit: int = 100) -> list[dict[str, object]]:
+        return await container.telemetry_store.list_configs(min(max(limit, 1), 1000))
+
+    @app.get(
+        "/internal/telemetry/status",
+        dependencies=[Depends(require_operator)],
+    )
+    async def telemetry_status() -> dict[str, object]:
+        return {
+            "redis": await container.telemetry_ingestor.status(),
+            "postgres": await container.telemetry_store.statistics(),
+        }
+
     @app.post("/internal/workers/register", response_model=WorkerRegistrationResponse)
     async def register_worker(
         request: WorkerRegistrationRequest,
@@ -274,7 +396,7 @@ def create_control_app(container: ControlContainer) -> FastAPI:
             request.registration_request_id,
             request.proposed_worker_id,
             request.boot_id,
-            WorkerCapabilities(**request.capabilities.model_dump()),
+            _capabilities_from_request(request.capabilities),
         )
         return WorkerRegistrationResponse(
             worker_id=result.worker_id,
@@ -304,7 +426,7 @@ def create_control_app(container: ControlContainer) -> FastAPI:
             authorization.removeprefix("Bearer "),
             request.boot_id,
             (
-                WorkerCapabilities(**request.capabilities.model_dump())
+                _capabilities_from_request(request.capabilities)
                 if request.capabilities is not None
                 else None
             ),
@@ -356,19 +478,16 @@ def create_control_app(container: ControlContainer) -> FastAPI:
                 fps=request.fps,
                 peak_vram_mb=request.peak_vram_mb,
                 gpu_duty_cycle=request.gpu_duty_cycle,
+                voice_id=request.voice_id,
+                avatar_revision=request.avatar_revision,
+                tts_revision=request.tts_revision,
+                runtime_version=request.runtime_version,
+                precision=request.precision,
+                isolation_mode=request.isolation_mode,
             ),
             dict(request.media_payload),
         )
-        return CompositeLeaseResponse(
-            session_id=lease.session_id,
-            worker_id=lease.worker_id,
-            slot_id=lease.slot_id,
-            lease_token=lease.lease_token,
-            generation=lease.generation,
-            reserved_vram_mb=lease.reserved_vram_mb,
-            reserved_gpu_duty_cycle=lease.reserved_gpu_duty_cycle,
-            expires_at=lease.expires_at.isoformat(),
-        )
+        return _lease_response(lease)
 
     @app.post(
         "/internal/render-sessions/{session_id}/renew",
@@ -377,16 +496,7 @@ def create_control_app(container: ControlContainer) -> FastAPI:
     )
     async def renew_composite(session_id: str) -> CompositeLeaseResponse:
         lease = await container.scheduler.renew(session_id)
-        return CompositeLeaseResponse(
-            session_id=lease.session_id,
-            worker_id=lease.worker_id,
-            slot_id=lease.slot_id,
-            lease_token=lease.lease_token,
-            generation=lease.generation,
-            reserved_vram_mb=lease.reserved_vram_mb,
-            reserved_gpu_duty_cycle=lease.reserved_gpu_duty_cycle,
-            expires_at=lease.expires_at.isoformat(),
-        )
+        return _lease_response(lease)
 
     @app.post(
         "/internal/render-sessions/{session_id}/state",
@@ -402,16 +512,7 @@ def create_control_app(container: ControlContainer) -> FastAPI:
             request.state,
             request.state_version,
         )
-        return CompositeLeaseResponse(
-            session_id=lease.session_id,
-            worker_id=lease.worker_id,
-            slot_id=lease.slot_id,
-            lease_token=lease.lease_token,
-            generation=lease.generation,
-            reserved_vram_mb=lease.reserved_vram_mb,
-            reserved_gpu_duty_cycle=lease.reserved_gpu_duty_cycle,
-            expires_at=lease.expires_at.isoformat(),
-        )
+        return _lease_response(lease)
 
     @app.post(
         "/internal/render-sessions/{session_id}/speech",
@@ -428,16 +529,7 @@ def create_control_app(container: ControlContainer) -> FastAPI:
             request.utterance_id,
             request.text,
         )
-        return CompositeLeaseResponse(
-            session_id=lease.session_id,
-            worker_id=lease.worker_id,
-            slot_id=lease.slot_id,
-            lease_token=lease.lease_token,
-            generation=lease.generation,
-            reserved_vram_mb=lease.reserved_vram_mb,
-            reserved_gpu_duty_cycle=lease.reserved_gpu_duty_cycle,
-            expires_at=lease.expires_at.isoformat(),
-        )
+        return _lease_response(lease)
 
     @app.delete(
         "/internal/render-sessions/{session_id}",
@@ -449,3 +541,27 @@ def create_control_app(container: ControlContainer) -> FastAPI:
         return Response(status_code=204)
 
     return app
+
+
+def _capabilities_from_request(request: WorkerCapabilitiesRequest) -> WorkerCapabilities:
+    data = request.model_dump(exclude={"gpus"})
+    return WorkerCapabilities(
+        **data,
+        gpus=tuple(GpuCapability(**gpu.model_dump()) for gpu in request.gpus),
+    )
+
+
+def _lease_response(lease: CompositeSlotLease) -> CompositeLeaseResponse:
+    return CompositeLeaseResponse(
+        session_id=lease.session_id,
+        worker_id=lease.worker_id,
+        gpu_uuid=lease.gpu_uuid,
+        slot_id=lease.slot_id,
+        lease_token=lease.lease_token,
+        generation=lease.generation,
+        reserved_vram_mb=lease.reserved_vram_mb,
+        reserved_gpu_duty_cycle=lease.reserved_gpu_duty_cycle,
+        resource_source=lease.resource_source,
+        resource_profile_id=lease.resource_profile_id,
+        expires_at=lease.expires_at.isoformat(),
+    )

@@ -124,6 +124,14 @@ thu host CPU/RAM, GPU VRAM/utilization/temperature/power và host/GPU resource t
 Child PID. Chi tiết xem
 [`worker-master-child-grpc.md`](worker-master-child-grpc.md#131-resource-collector-dùng-nvitop).
 
+Heartbeat còn được append vào `avatar:worker:{worker_id}:telemetry`. Control consumer-group lưu
+raw GPU/Child samples vào PostgreSQL, duy trì EWMA/cooldown realtime trong Redis, tổng hợp
+resource profile và dùng profile/DB persona config để chọn cặp `worker_id + gpu_uuid`. Assignment
+và capacity counter đều per-GPU; request hint không được hạ thấp safety floor trong DB.
+Nếu chưa có exact profile, resolver dùng số lớn nhất từ profile cùng avatar revision hoặc cùng
+voice/TTS revision trên đúng GPU/runtime, cộng compatibility margin rồi mới xét capacity. Manifest
+DB vẫn là floor trong cả exact/compatible path; lease ghi nguồn dữ liệu để truy vết.
+
 Model TTS/lip-sync thật chỉ cần implement application ports; không đổi chat/session business.
 
 ## 6. Chạy enrollment mode bằng Docker Compose

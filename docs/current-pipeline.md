@@ -26,6 +26,9 @@ Pipeline hiện giải quyết được các yêu cầu sau:
   - `livekit`: Render Worker publish media vào LiveKit SFU, API chỉ điều phối.
 - Core không import FastAPI, aiortc, AV, HTTPX hoặc SQLAlchemy.
 - Chat provider, database, media runtime và renderer có thể thay qua port/adapter.
+- Worker Master quản lý nhiều Composite Child và pin mỗi Child vào GPU do Scheduler cấp.
+- Heartbeat host/GPU/PID được buffer bằng Redis Stream và lưu PostgreSQL để tạo profile.
+- Scheduler chọn cặp `worker_id + gpu_uuid` từ DB config, observed profile và tải realtime.
 
 ## 2. Kiến trúc tổng thể
 
@@ -35,11 +38,13 @@ Pipeline hiện giải quyết được các yêu cầu sau:
 flowchart LR
     U[Browser]
     API[avatar-chat\nFastAPI + application core]
-    R[(Redis Streams\nmedia commands)]
+    R[(Redis Streams\ncommands + telemetry)]
     P[(Redis Pub/Sub\nchat events)]
-    W[avatar-worker\nrender + A/V publisher]
+    C[PersonaForge Control\nidentity + GPU scheduler]
+    W[Worker Master\nresource + child supervisor]
+    CH[Composite Child\nTTS + lip-sync + publisher]
     SFU[LiveKit SFU]
-    DB[(Memory / SQL database)]
+    DB[(PostgreSQL\nbusiness + telemetry + profiles)]
     LLM[Scripted / HTTP model service]
 
     U -->|REST: session/media access| API
@@ -48,9 +53,14 @@ flowchart LR
     API -->|stream prompt/history| LLM
     LLM -->|reply chunks| API
     API <-->|cross-replica chat events| P
-    API -->|start/state/stop commands| R
-    R -->|consumer group| W
-    W -->|WebRTC publish audio + video| SFU
+    API -->|provision/state/speech/release| C
+    C -->|fenced per-GPU commands| R
+    R -->|one consumer per Master| W
+    W <-->|gRPC stream over UDS| CH
+    CH -->|WebRTC publish audio + video| SFU
+    W -->|latest heartbeat + telemetry stream| R
+    R -->|at-least-once ingest| C
+    C -->|raw samples + resource profiles| DB
     SFU -->|WebRTC subscribe audio + video| U
 ```
 
@@ -61,8 +71,9 @@ flowchart LR
 | Control plane | Browser, FastAPI, Redis, model adapter | Session, chat, state, token, command |
 | Media plane | Render Worker, LiveKit SFU, browser | Decode/render, pacing, encode, RTP/WebRTC |
 
-Model/render nặng chạy trong `avatar-worker`, vì vậy không block event loop xử lý REST và
-WebSocket của Core API. Có thể scale worker theo GPU trong tương lai mà không thay domain.
+Model/render nặng chạy trong Composite Child, vì vậy không block event loop REST/WebSocket hoặc
+Worker Master. Control flatten mỗi Worker thành candidate per-GPU, atomically reserve ledger và
+đưa `gpu_uuid` vào lease; Master không được tự đổi GPU.
 
 ### 2.2. Chế độ aiortc — đơn giản cho local/MVP
 
@@ -1561,20 +1572,23 @@ Smoke test end-to-end cần xác nhận thêm ngoài automated test:
 
 - Video vẫn là ba clip thu sẵn, chưa có avatar generation/lip-sync.
 - Audio là silence/beep, chưa có TTS nội dung.
-- Một worker ID tĩnh, chưa scheduler/capacity management.
-- Worker-ready/error đã correlation theo `command_id`; chưa có scheduler để reschedule.
+- Control đã schedule động theo cặp worker/GPU và atomic reservation; chưa tự reschedule sau khi
+  host mất heartbeat.
+- Worker-ready/error đã correlation theo `command_id`; cross-host recovery vẫn là HA roadmap.
 - Command pending chưa được reclaim và chưa có DLQ.
 - Publisher token nằm trong Redis command.
 - Room close dựa vào LiveKit tự cleanup.
 - Health endpoint chưa aggregate dependency readiness.
-- In-memory là mặc định và không hỗ trợ multi-replica API.
+- In-memory chỉ dùng local/test; Docker pipeline dùng PostgreSQL, Redis distributed turn lock và
+  Redis event fan-out để hỗ trợ nhiều API replica.
 - Redis Pub/Sub fan-out chat event giữa replica nhưng là kênh tạm thời; database cursor là
   nguồn phục hồi khi client reconnect. Session lock nằm trong process; optimistic version
   bảo vệ repository nhưng chưa thay distributed ownership khi hai replica đồng thời nhận chat.
 - Chưa TLS, TURN mặc định, quota hoặc production secret handling.
 - Frontend LiveKit SDK tải từ CDN và chưa pin/bundle version.
 - Chưa có metrics exporter/dashboard/alert.
-- Chưa có Kubernetes manifests, autoscaling hoặc GPU scheduling.
+- Chưa có Kubernetes manifests/autoscaling; Control Plane đã GPU scheduling ở application layer,
+  chưa tích hợp Kubernetes/MIG.
 
 ## 27. Thứ tự nâng cấp được khuyến nghị
 
@@ -1604,8 +1618,8 @@ Smoke test end-to-end cần xác nhận thêm ngoài automated test:
 
 ### Giai đoạn D — scale và production hardening
 
-- Scheduler + worker registry + session affinity.
-- PostgreSQL + migration + distributed ownership.
+- Scheduler/Worker registry HA và cross-host reschedule automation.
+- PostgreSQL partition maintenance và telemetry archival tier.
 - TLS, auth, TURN, secret manager và rate limiting.
 - Metrics/tracing/dashboard/alert.
 - Rolling deploy và graceful drain.
@@ -1625,9 +1639,11 @@ Smoke test end-to-end cần xác nhận thêm ngoài automated test:
 
 ### Sau khi start
 
-- [ ] Năm container running, PostgreSQL và Redis healthy.
+- [ ] API, Control, Agent, Worker, LiveKit, PostgreSQL và Redis running/healthy.
 - [ ] `/api/health` trả 200.
 - [ ] Worker heartbeat tồn tại.
+- [ ] `/internal/telemetry/status` có Redis Stream và PostgreSQL sample tăng.
+- [ ] Lease provision có cả `worker_id`, `gpu_uuid` và `resource_source`.
 - [ ] Browser connection state là connected.
 - [ ] Client subscribed audio và video.
 - [ ] Frame counter tăng.
@@ -1650,6 +1666,11 @@ Smoke test end-to-end cần xác nhận thêm ngoài automated test:
 10. Queue phải hữu hạn để kiểm soát latency và backpressure.
 11. Beep/flash và frame counter là observability nằm ngay trong media payload.
 12. Mọi external provider được thay bằng adapter và composition-root wiring.
+13. DB persona/model config là safety floor; request không được hạ thấp reservation.
+14. Observed profile được resolve theo GPU model/compute capability, không dùng chéo GPU class.
+15. Reservation ledger là authority; utilization/temperature chỉ dùng health và scoring.
+16. Persona/avatar/voice/TTS config trong DB là safety floor khi so sánh candidate GPU.
+17. Compatible profile chỉ dùng cùng GPU/runtime/output shape và phải cộng margin lớn hơn.
 
 Những quyết định này cho phép pipeline hiện tại tiếp tục chạy bằng clip demo, đồng thời mở
 đường thay clip decoder bằng model sinh avatar thật mà không viết lại session, chat, API hay

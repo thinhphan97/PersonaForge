@@ -43,6 +43,11 @@ class ChildConnection:
     last_event_sequence: int = 0
     stream_active: bool = False
     token_consumed: bool = False
+    runtime_state: str = "starting"
+    livekit_connected: bool = False
+    observed_fps: float = 0
+    av_drift_ms: float = 0
+    last_command_sequence: int = 0
 
     def __post_init__(self) -> None:
         self.outbound = asyncio.Queue(maxsize=self.queue_size)
@@ -174,6 +179,11 @@ class ChildControlService(child_control_pb2_grpc.CompositeChildControlServicer):
             child.last_event_sequence = event.meta.sequence
             if payload_name == "heartbeat":
                 child.last_heartbeat_monotonic = time.monotonic()
+                child.runtime_state = event.heartbeat.state
+                child.livekit_connected = event.heartbeat.livekit_connected
+                child.observed_fps = event.heartbeat.fps
+                child.av_drift_ms = event.heartbeat.av_drift_ms
+                child.last_command_sequence = event.heartbeat.last_command_sequence
             elif payload_name == "accepted":
                 child.resolve_accepted(event.accepted.command_id)
             elif payload_name == "stopped":

@@ -3,6 +3,7 @@ import os
 from logging.config import fileConfig
 
 from alembic import context
+from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from personaforge_chat.adapters.outbound.sqlalchemy_repositories import Base
@@ -26,7 +27,12 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
-def _run_migrations(connection: object) -> None:
+def _run_migrations(connection: Connection) -> None:
+    if connection.dialect.name == "postgresql":
+        # The lock belongs to the same outer transaction that commits the migration.
+        # A session lock executed on a plain connection starts an implicit transaction;
+        # closing that connection would roll the complete migration back.
+        connection.exec_driver_sql("SELECT pg_advisory_xact_lock(734928451)")
     context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
     with context.begin_transaction():
         context.run_migrations()
@@ -38,7 +44,7 @@ async def run_migrations_online() -> None:
         prefix="sqlalchemy.",
         poolclass=None,
     )
-    async with connectable.connect() as connection:
+    async with connectable.begin() as connection:
         await connection.run_sync(_run_migrations)
     await connectable.dispose()
 

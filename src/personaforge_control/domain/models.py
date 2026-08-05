@@ -18,6 +18,24 @@ class WorkerStatus(str, Enum):
     FAILED = "failed"
 
 
+class ResourceProfileState(str, Enum):
+    BOOTSTRAP = "bootstrap"
+    LEARNING = "learning"
+    TRUSTED = "trusted"
+    DEGRADED = "degraded"
+
+
+@dataclass(frozen=True, slots=True)
+class GpuCapability:
+    gpu_uuid: str
+    gpu_name: str
+    compute_capability: str
+    total_vram_mb: int
+    schedulable_vram_mb: int
+    max_slots: int
+    compute_budget: float
+
+
 @dataclass(frozen=True, slots=True)
 class EnrollmentClaims:
     subject: str
@@ -55,6 +73,22 @@ class WorkerCapabilities:
     max_slots: int
     compute_budget: float
     supported_runtimes: tuple[str, ...] = ()
+    gpus: tuple[GpuCapability, ...] = ()
+
+    def advertised_gpus(self) -> tuple[GpuCapability, ...]:
+        if self.gpus:
+            return self.gpus
+        return (
+            GpuCapability(
+                gpu_uuid=self.gpu_uuid,
+                gpu_name=self.gpu_name,
+                compute_capability=self.compute_capability,
+                total_vram_mb=self.total_vram_mb,
+                schedulable_vram_mb=self.schedulable_vram_mb,
+                max_slots=self.max_slots,
+                compute_budget=self.compute_budget,
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +150,26 @@ class WorkerHeartbeat:
     hardware_probe_error: str | None
     heartbeat_at: datetime
     expires_at: datetime
+    gpu_resources: tuple["GpuHeartbeat", ...] = ()
+    host_resources: dict[str, object] | None = None
+    child_resources: tuple[dict[str, object], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class GpuHeartbeat:
+    gpu_uuid: str
+    gpu_name: str
+    compute_capability: str
+    total_vram_mb: int
+    free_vram_mb: int
+    used_vram_mb: int
+    gpu_utilization: float
+    memory_utilization: float
+    encoder_utilization: float | None = None
+    decoder_utilization: float | None = None
+    temperature_c: float | None = None
+    power_watts: float | None = None
+    healthy: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +184,34 @@ class CompositeRequirement:
     fps: float
     peak_vram_mb: int
     gpu_duty_cycle: float
+    voice_id: str = "default"
+    avatar_revision: str = "default"
+    tts_revision: str = "default"
+    runtime_version: str = "default"
+    precision: str = "fp32"
+    isolation_mode: str = "subprocess"
+
+
+@dataclass(frozen=True, slots=True)
+class GpuCandidate:
+    registration: WorkerRegistration
+    heartbeat: WorkerHeartbeat
+    gpu: GpuHeartbeat
+    reserved_slots: int
+    reserved_vram_mb: int
+    reserved_compute: float
+    utilization_ewma: float
+    recent_failure_penalty: float = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceResolution:
+    peak_vram_mb: int
+    gpu_duty_cycle: float
+    source: str
+    profile_state: ResourceProfileState
+    profile_id: str | None = None
+    minimum_compute_capability: str = "0.0"
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,3 +224,6 @@ class CompositeSlotLease:
     reserved_vram_mb: int
     reserved_gpu_duty_cycle: float
     expires_at: datetime
+    gpu_uuid: str = ""
+    resource_source: str = "request"
+    resource_profile_id: str | None = None

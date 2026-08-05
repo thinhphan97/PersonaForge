@@ -10,6 +10,11 @@ from personaforge_control.domain.errors import NoWorkerCapacity
 from personaforge_control.domain.models import (
     CompositeRequirement,
     CompositeSlotLease,
+    GpuCandidate,
+    GpuCapability,
+    GpuHeartbeat,
+    ResourceProfileState,
+    ResourceResolution,
     WorkerCapabilities,
     WorkerHeartbeat,
     WorkerRegistration,
@@ -59,6 +64,37 @@ class RecoveryRedis:
 
     async def xadd(self, stream: str, fields: dict[str, str]) -> None:
         self.commands.append((stream, fields))
+
+
+class CandidateRegistry:
+    def __init__(self, candidates: tuple[GpuCandidate, ...]) -> None:
+        self._candidates = candidates
+
+    async def candidates(
+        self,
+        requirement: CompositeRequirement,
+        now: datetime,
+    ) -> tuple[GpuCandidate, ...]:
+        del requirement, now
+        return self._candidates
+
+
+class PerGpuProfileResolver:
+    async def resolve(
+        self,
+        requirement: CompositeRequirement,
+        gpu_name: str,
+        compute_capability: str,
+    ) -> ResourceResolution:
+        del requirement, compute_capability
+        peak = 11_000 if gpu_name == "GPU overloaded profile" else 4_000
+        return ResourceResolution(
+            peak_vram_mb=peak,
+            gpu_duty_cycle=0.3,
+            source="profile:trusted",
+            profile_state=ResourceProfileState.TRUSTED,
+            profile_id=f"profile-{gpu_name}",
+        )
 
 
 def requirement(session_id: str = "session-1") -> CompositeRequirement:
@@ -197,6 +233,106 @@ async def test_scheduler_rolls_back_assignment_when_command_delivery_fails() -> 
     recovered = await scheduler.provision(requirement(), {})
     assert recovered.generation == 2
     assert await allocator.release(recovered)
+
+
+@pytest.mark.asyncio
+async def test_scheduler_resolves_profile_per_gpu_and_returns_worker_gpu_pair() -> None:
+    clock = FixedClock()
+    candidates: list[GpuCandidate] = []
+    for worker_id, gpu_uuid, gpu_name in (
+        ("worker-a", "GPU-A", "GPU overloaded profile"),
+        ("worker-b", "GPU-B", "GPU suitable profile"),
+    ):
+        capability = GpuCapability(
+            gpu_uuid=gpu_uuid,
+            gpu_name=gpu_name,
+            compute_capability="8.6",
+            total_vram_mb=12_000,
+            schedulable_vram_mb=10_000,
+            max_slots=2,
+            compute_budget=0.85,
+        )
+        registration = WorkerRegistration(
+            worker_id=worker_id,
+            boot_id=f"boot-{worker_id}",
+            owner_token_hash="owner",
+            management_token_hash="management",
+            management_family_id="family",
+            identity_generation=1,
+            capabilities=WorkerCapabilities(
+                worker_type="persona-render",
+                host_id=worker_id,
+                gpu_uuid=gpu_uuid,
+                gpu_name=gpu_name,
+                compute_capability="8.6",
+                total_vram_mb=12_000,
+                schedulable_vram_mb=10_000,
+                max_slots=2,
+                compute_budget=0.85,
+                supported_runtimes=("scripted",),
+                gpus=(capability,),
+            ),
+            status=WorkerStatus.READY,
+            registered_at=clock.now(),
+            lease_expires_at=clock.now() + timedelta(seconds=30),
+            redis_username="worker-user",
+        )
+        heartbeat = WorkerHeartbeat(
+            worker_id=worker_id,
+            boot_id=registration.boot_id,
+            identity_generation=1,
+            status=WorkerStatus.READY,
+            draining=False,
+            active_slots=0,
+            reserved_slots=0,
+            reserved_vram_mb=0,
+            reserved_compute=0,
+            free_vram_mb=10_000,
+            queue_depth=0,
+            observed_fps=25,
+            gpu_used_vram_mb=2_000,
+            gpu_utilization=10,
+            gpu_memory_utilization=15,
+            gpu_temperature_c=55,
+            gpu_power_watts=80,
+            hardware_source="test",
+            hardware_sampled_at=clock.now(),
+            hardware_probe_error=None,
+            heartbeat_at=clock.now(),
+            expires_at=clock.now() + timedelta(seconds=30),
+        )
+        gpu = GpuHeartbeat(
+            gpu_uuid=gpu_uuid,
+            gpu_name=gpu_name,
+            compute_capability="8.6",
+            total_vram_mb=12_000,
+            free_vram_mb=10_000,
+            used_vram_mb=2_000,
+            gpu_utilization=10,
+            memory_utilization=15,
+            temperature_c=55,
+        )
+        candidates.append(
+            GpuCandidate(registration, heartbeat, gpu, 0, 0, 0, 10)
+        )
+
+    assignments = InMemoryCompositeAssignmentRepository()
+    commands = RecordingRenderCommands()
+    scheduler = CompositeScheduler(
+        CandidateRegistry(tuple(candidates)),
+        InMemoryCompositeSlotAllocator(DeterministicSecrets()),
+        assignments,
+        commands,
+        clock,
+        resource_profiles=PerGpuProfileResolver(),
+    )
+
+    lease = await scheduler.provision(requirement(), {})
+
+    assert lease.worker_id == "worker-b"
+    assert lease.gpu_uuid == "GPU-B"
+    assert lease.reserved_vram_mb == 4_000
+    assert lease.resource_source == "profile:trusted"
 
 
 @pytest.mark.asyncio

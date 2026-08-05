@@ -15,6 +15,7 @@ from personaforge_control.domain.errors import (
 from personaforge_control.domain.models import (
     EnrollmentClaims,
     EnrollmentGrant,
+    GpuCapability,
     WorkerCapabilities,
 )
 
@@ -226,4 +227,50 @@ async def test_management_token_reregistration_rotates_token_and_boot_identity()
             first.worker_id,
             first.management_token,
             "boot-replay",
+        )
+
+
+@pytest.mark.asyncio
+async def test_registration_rejects_gpu_inventory_above_enrollment_grant() -> None:
+    enrollment, registration, _registrations, _credentials = services()
+    token = await enrollment.issue(
+        "controller",
+        "development",
+        "gpu-host-a",
+        "persona-render",
+        1,
+        timedelta(minutes=5),
+    )
+    gpu = capabilities()
+    advertised = replace(
+        gpu,
+        gpus=(
+            GpuCapability(
+                gpu_uuid="GPU-1",
+                gpu_name="GPU one",
+                compute_capability="8.6",
+                total_vram_mb=24_576,
+                schedulable_vram_mb=24_064,
+                max_slots=4,
+                compute_budget=0.85,
+            ),
+            GpuCapability(
+                gpu_uuid="GPU-2",
+                gpu_name="GPU two",
+                compute_capability="8.6",
+                total_vram_mb=24_576,
+                schedulable_vram_mb=24_064,
+                max_slots=4,
+                compute_budget=0.85,
+            ),
+        ),
+    )
+
+    with pytest.raises(InvalidEnrollment, match="more GPUs"):
+        await registration.register(
+            token,
+            "request-too-many-gpus",
+            "configured-worker",
+            "boot-1",
+            advertised,
         )

@@ -6,8 +6,10 @@ from personaforge_control.domain.models import (
     CompositeSlotLease,
     EnrollmentClaims,
     EnrollmentGrant,
+    GpuCandidate,
     RedisWorkerCredential,
     RegistrationResult,
+    ResourceResolution,
     WorkerHeartbeat,
     WorkerRegistration,
 )
@@ -76,7 +78,7 @@ class WorkerRegistryPort(Protocol):
         self,
         requirement: CompositeRequirement,
         now: datetime,
-    ) -> tuple[tuple[WorkerRegistration, WorkerHeartbeat], ...]: ...
+    ) -> tuple[GpuCandidate, ...]: ...
 
 
 class WorkerInventoryPort(Protocol):
@@ -89,9 +91,9 @@ class WorkerInventoryPort(Protocol):
 class CompositeSlotAllocatorPort(Protocol):
     async def acquire(
         self,
-        registration: WorkerRegistration,
-        heartbeat: WorkerHeartbeat,
+        candidate: GpuCandidate,
         requirement: CompositeRequirement,
+        resolution: ResourceResolution,
         now: datetime,
         ttl: timedelta,
     ) -> CompositeSlotLease | None: ...
@@ -131,3 +133,12 @@ class RenderCommandPort(Protocol):
         text: str,
     ) -> None: ...
     async def stop(self, lease: CompositeSlotLease) -> None: ...
+
+
+class ResourceProfileResolverPort(Protocol):
+    async def resolve(
+        self,
+        requirement: CompositeRequirement,
+        gpu_name: str,
+        compute_capability: str,
+    ) -> ResourceResolution: ...

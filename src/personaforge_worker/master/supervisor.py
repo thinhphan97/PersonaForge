@@ -66,10 +66,7 @@ class ChildSupervisor:
                     await self._send_and_wait_accepted(current, command)
                     return
                 await self._stop_child(current, send_command=None)
-            local_limit = min(
-                self._settings.master_max_children,
-                self._settings.maximum_slots,
-            )
+            local_limit = self._settings.master_max_children
             if len(self._children) >= local_limit:
                 raise RuntimeError("Worker Master child capacity is full")
             self._assert_local_capacity(command)
@@ -366,15 +363,23 @@ class ChildSupervisor:
         return self._settings.master_socket.parent / f"{child.child_id}.token"
 
     def _assert_local_capacity(self, command: dict[str, Any]) -> None:
+        gpu_uuid = optional_string(command, "gpu_uuid", self._default_gpu_uuid)
         requested_vram = optional_int(command, "reserved_vram_mb", 0)
         requested_compute = optional_float(command, "reserved_gpu_duty_cycle", 0)
+        gpu_children = tuple(
+            child for child in self._children.values() if child.gpu_uuid == gpu_uuid
+        )
+        if len(gpu_children) >= self._settings.maximum_slots:
+            raise RuntimeError("Worker Master observed insufficient GPU slot capacity")
+        reserved_vram = sum(child.reserved_vram_mb for child in gpu_children)
+        reserved_compute = sum(child.reserved_gpu_duty_cycle for child in gpu_children)
         if (
             self._settings.schedulable_vram_mb > 0
-            and self.reserved_vram_mb + requested_vram
+            and reserved_vram + requested_vram
             > self._settings.schedulable_vram_mb
         ):
             raise RuntimeError("Worker Master observed insufficient reserved VRAM capacity")
-        if self.reserved_compute + requested_compute > self._settings.compute_budget:
+        if reserved_compute + requested_compute > self._settings.compute_budget:
             raise RuntimeError("Worker Master observed insufficient compute capacity")
 
 

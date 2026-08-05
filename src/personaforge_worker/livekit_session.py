@@ -90,6 +90,11 @@ class LiveKitRenderSession:
         self._pipeline_started = False
         self._pipeline_stopped = False
         self._speech_lock = asyncio.Lock()
+        self._observed_fps = 0.0
+        self._av_drift_ms = 0.0
+
+    def media_metrics(self) -> tuple[float, float]:
+        return self._observed_fps, self._av_drift_ms
 
     def set_state(self, state: AvatarState, state_version: int) -> None:
         if state not in {
@@ -322,6 +327,8 @@ class LiveKitRenderSession:
                 drift_ms = (
                     synchronizer.last_video_time - synchronizer.last_audio_time
                 ) * 1_000
+                self._observed_fps = synchronizer.actual_fps
+                self._av_drift_ms = drift_ms
                 logger.info(
                     "Media cadence session=%s fps=%.2f av_drift_ms=%.2f",
                     self.session_id,

@@ -5,10 +5,17 @@ from personaforge_control.application.ports import (
     CompositeAssignmentRepositoryPort,
     CompositeSlotAllocatorPort,
     RenderCommandPort,
+    ResourceProfileResolverPort,
     WorkerRegistryPort,
 )
 from personaforge_control.domain.errors import NoWorkerCapacity, SlotLeaseLost
-from personaforge_control.domain.models import CompositeRequirement, CompositeSlotLease
+from personaforge_control.domain.models import (
+    CompositeRequirement,
+    CompositeSlotLease,
+    GpuCandidate,
+    ResourceProfileState,
+    ResourceResolution,
+)
 
 
 class CompositeScheduler:
@@ -20,6 +27,7 @@ class CompositeScheduler:
         commands: RenderCommandPort,
         clock: ClockPort,
         lease_ttl: timedelta = timedelta(seconds=30),
+        resource_profiles: ResourceProfileResolverPort | None = None,
     ) -> None:
         self._registry = registry
         self._allocator = allocator
@@ -27,6 +35,7 @@ class CompositeScheduler:
         self._commands = commands
         self._clock = clock
         self._lease_ttl = lease_ttl
+        self._resource_profiles = resource_profiles
 
     async def provision(
         self,
@@ -43,20 +52,44 @@ class CompositeScheduler:
             return current
 
         candidates = await self._registry.candidates(requirement, now)
+        evaluated = []
+        for candidate in candidates:
+            resolution = await self._resolve_resources(requirement, candidate)
+            normalized = _with_resolution(requirement, resolution)
+            capability = next(
+                item
+                for item in candidate.registration.capabilities.advertised_gpus()
+                if item.gpu_uuid == candidate.gpu.gpu_uuid
+            )
+            if _compute_capability(capability.compute_capability) < _compute_capability(
+                normalized.minimum_compute_capability
+            ):
+                continue
+            if candidate.reserved_slots + 1 > capability.max_slots:
+                continue
+            if (
+                candidate.reserved_vram_mb + normalized.peak_vram_mb
+                > capability.schedulable_vram_mb
+            ):
+                continue
+            if candidate.reserved_compute + normalized.gpu_duty_cycle > capability.compute_budget:
+                continue
+            if candidate.gpu.free_vram_mb < normalized.peak_vram_mb:
+                continue
+            evaluated.append((candidate, resolution, normalized))
         ordered = sorted(
-            candidates,
+            evaluated,
             key=lambda item: (
-                item[1].queue_depth,
-                item[1].reserved_compute,
-                -item[1].free_vram_mb,
-                item[0].worker_id,
+                -_candidate_score(item[0], item[2]),
+                item[0].registration.worker_id,
+                item[0].gpu.gpu_uuid,
             ),
         )
-        for registration, heartbeat in ordered:
+        for candidate, resolution, normalized in ordered[:8]:
             lease = await self._allocator.acquire(
-                registration,
-                heartbeat,
-                requirement,
+                candidate,
+                normalized,
+                resolution,
                 now,
                 self._lease_ttl,
             )
@@ -64,7 +97,7 @@ class CompositeScheduler:
                 continue
             try:
                 await self._assignments.save(lease)
-                await self._commands.start(lease, requirement, media_payload)
+                await self._commands.start(lease, normalized, media_payload)
             except BaseException:
                 await self._assignments.delete(
                     lease.session_id,
@@ -75,6 +108,24 @@ class CompositeScheduler:
                 raise
             return lease
         raise NoWorkerCapacity("No healthy worker can reserve the composite requirement")
+
+    async def _resolve_resources(
+        self,
+        requirement: CompositeRequirement,
+        candidate: GpuCandidate,
+    ) -> ResourceResolution:
+        if self._resource_profiles is not None:
+            return await self._resource_profiles.resolve(
+                requirement,
+                candidate.gpu.gpu_name,
+                candidate.gpu.compute_capability,
+            )
+        return ResourceResolution(
+            peak_vram_mb=requirement.peak_vram_mb,
+            gpu_duty_cycle=requirement.gpu_duty_cycle,
+            source="request",
+            profile_state=ResourceProfileState.BOOTSTRAP,
+        )
 
     async def renew(self, session_id: str) -> CompositeSlotLease:
         lease = await self._assignments.get(session_id)
@@ -130,3 +181,83 @@ class CompositeScheduler:
         if not deleted or not released:
             raise SlotLeaseLost("Composite slot release lost lease ownership")
         return True
+
+
+def _candidate_score(candidate: GpuCandidate, requirement: CompositeRequirement) -> float:
+    gpu = candidate.gpu
+    capability = next(
+        item
+        for item in candidate.registration.capabilities.advertised_gpus()
+        if item.gpu_uuid == gpu.gpu_uuid
+    )
+    vram_after = max(
+        0,
+        capability.schedulable_vram_mb
+        - candidate.reserved_vram_mb
+        - requirement.peak_vram_mb,
+    )
+    vram_headroom = vram_after / max(1, capability.schedulable_vram_mb)
+    compute_after = max(
+        0.0,
+        capability.compute_budget
+        - candidate.reserved_compute
+        - requirement.gpu_duty_cycle,
+    )
+    compute_headroom = compute_after / max(0.01, capability.compute_budget)
+    queue_headroom = 1 / (1 + candidate.heartbeat.queue_depth)
+    runtime_headroom = max(0.0, 1 - candidate.utilization_ewma / 100)
+    thermal_headroom = (
+        0.5 if gpu.temperature_c is None else max(0.0, min(1.0, (90 - gpu.temperature_c) / 40))
+    )
+    reliability = max(0.0, 1 - candidate.recent_failure_penalty)
+    # Cache affinity and region locality remain zero until the Worker advertises trusted
+    # model-residency and region data. Capacity/reliability terms are already versionable at
+    # this boundary and deterministic tie-breaking is applied by the caller.
+    return (
+        0.20 * vram_headroom
+        + 0.15 * compute_headroom
+        + 0.10 * queue_headroom
+        + 0.10 * reliability
+        + 0.10 * runtime_headroom
+        + 0.05 * thermal_headroom
+        - 0.15 * candidate.recent_failure_penalty
+    )
+
+
+def _with_resolution(
+    requirement: CompositeRequirement,
+    resolution: ResourceResolution,
+) -> CompositeRequirement:
+    return CompositeRequirement(
+        session_id=requirement.session_id,
+        character_id=requirement.character_id,
+        avatar_model_id=requirement.avatar_model_id,
+        tts_model_id=requirement.tts_model_id,
+        runtime=requirement.runtime,
+        minimum_compute_capability=_maximum_compute_capability(
+            requirement.minimum_compute_capability,
+            resolution.minimum_compute_capability,
+        ),
+        resolution=requirement.resolution,
+        fps=requirement.fps,
+        peak_vram_mb=resolution.peak_vram_mb,
+        gpu_duty_cycle=resolution.gpu_duty_cycle,
+        voice_id=requirement.voice_id,
+        avatar_revision=requirement.avatar_revision,
+        tts_revision=requirement.tts_revision,
+        runtime_version=requirement.runtime_version,
+        precision=requirement.precision,
+        isolation_mode=requirement.isolation_mode,
+    )
+
+
+def _maximum_compute_capability(first: str, second: str) -> str:
+    return first if _compute_capability(first) >= _compute_capability(second) else second
+
+
+def _compute_capability(value: str) -> tuple[int, int]:
+    major, _, minor = value.partition(".")
+    try:
+        return int(major), int(minor or 0)
+    except ValueError:
+        return 0, 0

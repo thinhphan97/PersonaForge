@@ -1289,6 +1289,11 @@ Sau OOM, worker phải:
 
 ### 12.5. Lưu từng heartbeat
 
+> Trạng thái triển khai: Worker hiện ghi đồng thời latest snapshot có TTL và worker-scoped Redis
+> Stream. Control Telemetry Ingestor consumer-group ghi idempotent vào PostgreSQL, chỉ ACK sau
+> transaction thành công, reclaim pending entry, đưa poison event vào DLQ, chạy retention và
+> aggregate profile định kỳ. Media/Child không có PostgreSQL credential và không chờ analytics.
+
 Mỗi heartbeat hợp lệ phải được lưu trước khi dùng cho phân tích lịch sử, nhưng storage được tách
 theo mục đích:
 
@@ -1296,8 +1301,8 @@ theo mục đích:
 |---|---|---|---|
 | Snapshot mới nhất của worker/GPU | Redis key có TTL | 2–3 lần heartbeat TTL | Filter và score realtime |
 | Telemetry ingest buffer | Redis Stream | 1–24 giờ, consumer ACK sau DB insert | Chống mất mẫu khi PostgreSQL chậm |
-| Raw GPU heartbeat samples | PostgreSQL partition theo ngày | 7–30 ngày | Điều tra spike, OOM và capacity trend |
-| Raw composite/process samples | PostgreSQL partition theo ngày | 7–30 ngày | Attribution theo avatar/voice/session |
+| Raw GPU heartbeat samples | PostgreSQL indexed table; partition là bước production | 7–30 ngày | Điều tra spike, OOM và capacity trend |
+| Raw composite/process samples | PostgreSQL indexed table; partition là bước production | 7–30 ngày | Attribution theo avatar/voice/session |
 | Resource profile P50/P95/P99 | PostgreSQL | Dài hạn, versioned | Input ổn định cho Scheduler |
 | Active reservation counters | Redis atomic keys | Theo lease lifecycle | Chống over-allocation |
 
@@ -1393,6 +1398,41 @@ shared process/executor, process VRAM không còn phân tách theo session; runt
 allocation/model refcount và đánh dấu sample là `estimated` thay vì giả vờ chính xác.
 
 ### 12.7. Tổng hợp peak và fallback ban đầu
+
+Resolver hiện chạy theo từng candidate GPU và dùng thứ tự:
+
+```text
+exact observed profile của GPU
+-> compatible/learning profile với margin
+-> persona/avatar/TTS/voice config trong PostgreSQL
+-> platform conservative default
+```
+
+Request từ Core chỉ được dùng như một floor bổ sung. Nó không thể hạ thấp
+`manifest_peak_vram_mb`, duty cycle hoặc minimum compute capability lưu trong DB. Lease lưu
+`resource_source` và `resource_profile_id` để audit quyết định cấp phát.
+
+Config DB khớp theo `character_id`, avatar model/revision, `voice_id`, TTS model/revision,
+runtime/version, precision, resolution, FPS và isolation mode. `gpu_name='*'` là manifest dùng
+chung; bản ghi đúng tên GPU được ưu tiên. Vì vậy khi thông tin nhân vật và audio đã có trong DB,
+Scheduler không phụ thuộc vào số VRAM do Core tự khai báo mà dùng manifest đó làm dữ liệu so
+sánh cho từng candidate:
+
+```text
+config_floor_vram = max(request_vram, db_manifest_peak_vram)
+config_floor_compute = max(request_compute, db_manifest_gpu_duty_cycle)
+
+exact profile:
+  required_vram = max(config_floor_vram, exact_p99, exact_high_watermark) + state_margin
+compatible avatar hoặc voice/TTS profile:
+  required_vram = max(config_floor_vram, compatible_max_peak) + compatibility_margin
+không có profile:
+  required_vram = config_floor_vram + bootstrap_margin
+```
+
+Profile tương thích chỉ được lấy khi GPU name, compute capability, runtime version, precision,
+resolution/FPS và isolation mode giống nhau. Nó phải cùng avatar revision **hoặc** cùng
+voice/TTS revision, bị hạ confidence về `LEARNING` và không bao giờ bỏ qua DB safety floor.
 
 Aggregation job nhóm sample theo tuple không được trộn lẫn:
 
@@ -1741,9 +1781,10 @@ Vẫn chưa triển khai:
 
 - TTS/Avatar GPU runtime factories thật và GPU execution coordinator.
 - Artifact registry, signed download, checksum và local NVMe cache.
-- CUDA per-session measurement và observed resource profile store.
+- CUDA-event instrumentation trong model runtime thật; fake runtime hiện dùng nvitop PID VRAM,
+  measured LiveKit FPS/A-V drift và reservation duty cycle làm số liệu bootstrap.
 - Progress state đầy đủ `downloading/model-loading/connecting` và asynchronous `202` UI flow.
-- Redis/Scheduler HA, subprocess-per-slot/MIG và production telemetry pipeline.
+- Redis/Scheduler HA, MIG và shared per-GPU model executor.
 
 ### 14.6. Phạm vi HA tương lai
 
@@ -1911,8 +1952,10 @@ Các trường cần kiểm tra:
 - nếu `hardware_source=configured`, đọc `probe_errors`, kiểm tra GPU device, PID namespace và
   NVIDIA Container Toolkit/NVML availability.
 
-Heartbeat được lưu Redis với TTL, không nằm trong RAM Control Service. Scheduler loại worker khi
-heartbeat hết hạn hoặc free VRAM nhỏ hơn `peak_vram_mb` của persona requirement.
+Latest heartbeat được lưu Redis với TTL và sample được append vào worker-scoped Redis Stream.
+Control chỉ ACK sau khi insert idempotent vào `gpu_heartbeat_samples` và
+`composite_resource_samples`. Scheduler loại worker khi heartbeat hết hạn; sau đó resolve
+requirement theo profile/DB config cho từng GPU, kiểm tra per-GPU ledger và observed free VRAM.
 
 ### 15.5. Restart và re-register
 

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from redis.asyncio import Redis
@@ -42,6 +43,7 @@ class RedisRenderWorker:
             settings.gpu_probe_timeout_seconds,
         )
         self._hardware: GpuHardwareSnapshot | None = None
+        self._resources: WorkerResourceSnapshot | None = None
 
     async def run(self) -> None:
         heartbeat: asyncio.Task[None] | None = None
@@ -164,6 +166,63 @@ class RedisRenderWorker:
             maxlen=100,
             approximate=True,
         )
+        if event_type == "avatar.session.failed":
+            await self._publish_failure_telemetry(command, detail or "unknown failure")
+
+    async def _publish_failure_telemetry(
+        self,
+        command: dict[str, Any],
+        detail: str,
+    ) -> None:
+        session_id = _required_string(command, "session_id")
+        gpu_uuid = str(command.get("gpu_uuid") or self._settings.gpu_uuid)
+        specification: dict[str, Any] = {}
+        recovery = await self._require_redis().get(
+            f"personaforge:control:recovery-start:{session_id}"
+        )
+        if recovery:
+            parsed = json.loads(recovery)
+            if isinstance(parsed, dict):
+                specification = parsed
+        gpu_payload = (
+            []
+            if self._resources is None
+            else _gpu_resource_payload(
+                self._resources,
+                gpu_uuid,
+                self._settings.maximum_gpu_count,
+            )
+        )
+        sample = {
+            "telemetry_type": "composite_failure",
+            "worker_id": self._worker_id,
+            "boot_id": self._boot_id,
+            "identity_generation": self._identity_generation,
+            "hardware_sampled_at": datetime.now(timezone.utc).timestamp(),
+            "gpu_resources": gpu_payload,
+            "child_resources": [
+                {
+                    **specification,
+                    "session_id": session_id,
+                    "child_id": f"failed-{session_id}-{command.get('generation', 0)}",
+                    "generation": command.get("generation", 0),
+                    "assigned_gpu_uuid": gpu_uuid,
+                    "phase": "failed",
+                    "reserved_vram_mb": command.get("reserved_vram_mb", 0),
+                    "reserved_gpu_duty_cycle": command.get(
+                        "reserved_gpu_duty_cycle", 0
+                    ),
+                    "oom": "oom" in detail.lower() or "out of memory" in detail.lower(),
+                    "failure_detail": detail[:1000],
+                }
+            ],
+        }
+        await self._require_redis().xadd(
+            f"avatar:worker:{self._worker_id}:telemetry",
+            {"data": json.dumps(sample)},
+            maxlen=self._settings.telemetry_stream_maxlen,
+            approximate=True,
+        )
 
     async def _ensure_group(self) -> None:
         try:
@@ -190,6 +249,7 @@ class RedisRenderWorker:
                     if child.process is not None and child.process.pid is not None
                 )
             )
+            self._resources = resources
             hardware = _select_gpu(resources, self._settings.gpu_uuid)
             self._hardware = hardware
             schedulable_limit = (
@@ -200,8 +260,10 @@ class RedisRenderWorker:
                     hardware.total_vram_mb - self._settings.gpu_reserve_vram_mb,
                 )
             )
-            payload = json.dumps(
-                {
+            observed_fps_values = [
+                child.observed_fps for child in children if child.observed_fps > 0
+            ]
+            heartbeat_data = {
                     "worker_id": self._worker_id,
                     "boot_id": self._boot_id,
                     "identity_generation": self._identity_generation,
@@ -213,7 +275,11 @@ class RedisRenderWorker:
                     "reserved_compute": self._require_supervisor().reserved_compute,
                     "free_vram_mb": min(hardware.free_vram_mb, schedulable_limit),
                     "queue_depth": 0,
-                    "observed_fps": self._settings.video_fps,
+                    "observed_fps": (
+                        sum(observed_fps_values) / len(observed_fps_values)
+                        if observed_fps_values
+                        else 0.0
+                    ),
                     "gpu_used_vram_mb": hardware.used_vram_mb,
                     "gpu_utilization": hardware.gpu_utilization,
                     "gpu_memory_utilization": hardware.memory_utilization,
@@ -221,27 +287,40 @@ class RedisRenderWorker:
                     "gpu_power_watts": hardware.power_watts,
                     "hardware_source": hardware.source,
                     "hardware_sampled_at": hardware.sampled_at.timestamp(),
+                    "heartbeat_at": datetime.now(timezone.utc).timestamp(),
                     "hardware_probe_error": hardware.probe_error,
                     "host_resources": _host_resource_payload(resources),
-                    "gpu_resources": _gpu_resource_payload(resources),
+                    "gpu_resources": _gpu_resource_payload(
+                        resources,
+                        self._settings.gpu_uuid,
+                        self._settings.maximum_gpu_count,
+                    ),
                     "child_resources": _child_resource_payload(resources, children),
                 }
-            )
+            payload = json.dumps(heartbeat_data)
             await self._require_redis().set(
                 key,
                 payload,
                 ex=self._settings.registration_ttl_seconds,
             )
+            await self._require_redis().xadd(
+                f"avatar:worker:{self._worker_id}:telemetry",
+                {"data": payload},
+                maxlen=self._settings.telemetry_stream_maxlen,
+                approximate=True,
+            )
             await asyncio.sleep(self._settings.heartbeat_interval_seconds)
 
     async def _connect(self) -> None:
-        self._hardware = await self._hardware_probe.sample()
+        resources = await self._hardware_probe.sample_resources(())
+        self._resources = resources
+        self._hardware = _select_gpu(resources, self._settings.gpu_uuid)
         if self._settings.registration_url is None:
             self._redis = Redis.from_url(self._settings.redis_url, decode_responses=True)
             return
         identity_client = WorkerIdentityClient(self._settings)
         try:
-            identity = await identity_client.enroll(self._hardware)
+            identity = await identity_client.enroll(self._hardware, resources)
         except BaseException:
             await identity_client.close()
             raise
@@ -327,7 +406,12 @@ def _host_resource_payload(resources: WorkerResourceSnapshot) -> dict[str, objec
     }
 
 
-def _gpu_resource_payload(resources: WorkerResourceSnapshot) -> list[dict[str, object]]:
+def _gpu_resource_payload(
+    resources: WorkerResourceSnapshot,
+    selected_uuid: str,
+    maximum_gpu_count: int,
+) -> list[dict[str, object]]:
+    ordered = sorted(resources.gpus, key=lambda gpu: gpu.uuid != selected_uuid)
     return [
         {
             "gpu_uuid": gpu.uuid,
@@ -348,7 +432,7 @@ def _gpu_resource_payload(resources: WorkerResourceSnapshot) -> list[dict[str, o
             "pcie_tx_bytes_per_second": gpu.pcie_tx_bytes_per_second,
             "pcie_rx_bytes_per_second": gpu.pcie_rx_bytes_per_second,
         }
-        for gpu in resources.gpus
+        for gpu in ordered[:maximum_gpu_count]
     ]
 
 
@@ -366,6 +450,13 @@ def _child_resource_payload(
         child = ownership.get(process.pid)
         if child is None:
             continue
+        start_payload = (
+            child.lifecycle_command.get("payload", {})
+            if child.lifecycle_command is not None
+            else {}
+        )
+        if not isinstance(start_payload, dict):
+            start_payload = {}
         payload.append(
             {
                 "child_id": child.child_id,
@@ -380,6 +471,7 @@ def _child_resource_payload(
                 "cpu_utilization": process.cpu_utilization,
                 "host_rss_bytes": process.host_rss_bytes,
                 "host_memory_percent": process.host_memory_percent,
+                "assigned_gpu_uuid": child.gpu_uuid,
                 "gpu_uuid": process.gpu_uuid,
                 "gpu_memory_bytes": process.gpu_memory_bytes,
                 "gpu_memory_percent": process.gpu_memory_percent,
@@ -387,6 +479,25 @@ def _child_resource_payload(
                 "gpu_memory_utilization": process.gpu_memory_utilization,
                 "gpu_encoder_utilization": process.gpu_encoder_utilization,
                 "gpu_decoder_utilization": process.gpu_decoder_utilization,
+                "phase": child.runtime_state,
+                "livekit_connected": child.livekit_connected,
+                "render_fps": child.observed_fps,
+                "av_drift_ms": child.av_drift_ms,
+                "last_command_sequence": child.last_command_sequence,
+                "generation": child.generation,
+                "reserved_vram_mb": child.reserved_vram_mb,
+                "reserved_gpu_duty_cycle": child.reserved_gpu_duty_cycle,
+                "character_id": start_payload.get("character_id", "default"),
+                "avatar_model_id": start_payload.get("avatar_model_id", "recorded-avatar"),
+                "avatar_revision": start_payload.get("avatar_revision", "default"),
+                "voice_id": start_payload.get("voice_id", "default"),
+                "tts_model_id": start_payload.get("tts_model_id", "scripted-tone"),
+                "tts_revision": start_payload.get("tts_revision", "default"),
+                "runtime_version": start_payload.get("runtime_version", "default"),
+                "precision": start_payload.get("precision", "fp32"),
+                "resolution": start_payload.get("resolution", "640x360"),
+                "fps": start_payload.get("fps", 25),
+                "isolation_mode": "subprocess",
             }
         )
     return payload

@@ -282,6 +282,59 @@ Kết quả cần có `status=ready`, `worker_id`, GPU capability và `heartbeat
 `reregister` và nhận Redis ACL credential mới, không cần bootstrap token mới. Chỉ phát token
 mới khi identity bị revoke hoặc volume identity bị xóa có chủ đích.
 
+`max_gpu_count` trong enrollment token và `AVATAR_WORKER_MAX_GPU_COUNT` phải bằng nhau. Control
+từ chối Worker advertise nhiều GPU hơn token. Một Master có thể quản lý nhiều GPU; Scheduler
+reserve theo key `(worker_id, gpu_uuid)` và lease trả về cả hai ID. Nếu identity cũ đã enrollment
+với một GPU, cần deregister identity cũ và cấp bootstrap token mới trước khi mở rộng inventory.
+
+Heartbeat được append vào Redis Stream và Control lưu raw samples vào PostgreSQL. Kiểm tra:
+
+```bash
+docker compose exec -T postgres psql -U avatar -d avatar -c \
+  "select worker_id,gpu_uuid,sampled_at,used_vram_mb,gpu_utilization \
+   from gpu_heartbeat_samples order by sampled_at desc limit 10;"
+```
+
+Cấu hình safety floor cho một cặp nhân vật/giọng đọc bằng operator API:
+
+```bash
+curl -fsS -X PUT http://127.0.0.1:8090/internal/resource-configs \
+  -H "Authorization: Bearer ${CONTROL_OPERATOR_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "character_id":"default",
+    "avatar_model_id":"recorded-avatar",
+    "avatar_revision":"default",
+    "voice_id":"default",
+    "tts_model_id":"scripted-tone",
+    "tts_revision":"default",
+    "runtime":"scripted",
+    "runtime_version":"default",
+    "precision":"fp32",
+    "resolution":"640x360",
+    "fps":25,
+    "isolation_mode":"subprocess",
+    "gpu_name":"NVIDIA GeForce RTX 3090",
+    "minimum_compute_capability":"8.0",
+    "manifest_peak_vram_mb":6000,
+    "manifest_gpu_duty_cycle":0.30,
+    "bootstrap_vram_margin_mb":512,
+    "bootstrap_compute_margin":0.05,
+    "active":true
+  }'
+```
+
+Scheduler đối chiếu đủ tuple nhân vật + avatar revision + voice + TTS revision trong PostgreSQL.
+Cấu hình này luôn là safety floor. Nếu có profile đo đúng cặp trên đúng GPU thì dùng P99/high
+watermark; nếu chưa có, Control có thể dùng profile tương thích cùng avatar hoặc cùng voice/TTS
+trên đúng GPU/runtime và cộng `CONTROL_RESOURCE_COMPATIBLE_VRAM_MARGIN_MB`. Chỉ khi không có cả
+profile lẫn config mới dùng platform default. Đặt `gpu_name: null` để manifest áp dụng cho mọi
+GPU; Control lưu nó bằng khóa chuẩn `*` để upsert idempotent.
+
+`GET /internal/resource-profiles`, `GET /internal/resource-configs` và
+`GET /internal/telemetry/status` lần lượt cho phép operator xem P50/P95/P99, manifest đang dùng
+và trạng thái ingest. Mỗi lease trả `resource_source`/`resource_profile_id` để audit quyết định.
+
 Muốn chạy legacy không enrollment, đặt `CONTROL_PLANE_URL=` và `AVATAR_REGISTRATION_URL=`;
 Worker khi đó kết nối trực tiếp bằng `REDIS_URL` và không có dynamic Redis ACL identity.
 
@@ -360,6 +413,7 @@ cũng reconcile snapshot định kỳ để tránh giữ UI cũ.
 - Audio hiện là track im lặng 48 kHz; chưa có nội dung TTS.
 - Agent Runtime đã tách process và bảo vệ bằng delegated JWT, nhưng TTS/Avatar model thật
   chưa được gắn; audio/video vẫn do media runtime demo hiện tại phát.
-- Chế độ LiveKit hiện dùng một worker tĩnh qua `RENDER_WORKER_ID`; chưa có scheduler động.
+- Chế độ LiveKit + Control Plane đã chọn động cặp `worker_id + gpu_uuid`; `RENDER_WORKER_ID` chỉ
+  còn dùng trong legacy mode khi `CONTROL_PLANE_URL` để trống.
 - Redis Streams chưa có pending reclaim/DLQ; readiness đã được xác nhận theo `command_id`
   sau khi worker publish đủ audio và video track.

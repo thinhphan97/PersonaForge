@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import httpx
 
-from personaforge_worker.domain.hardware import GpuHardwareSnapshot
+from personaforge_worker.domain.hardware import GpuHardwareSnapshot, WorkerResourceSnapshot
 from personaforge_worker.settings import WorkerSettings
 
 
@@ -37,10 +37,11 @@ class WorkerIdentityClient:
     async def enroll(
         self,
         hardware: GpuHardwareSnapshot | None = None,
+        resources: WorkerResourceSnapshot | None = None,
     ) -> WorkerRedisIdentity:
         persisted = _read_identity_state(self._settings.state_dir)
         if persisted is not None:
-            identity = await self._reregister(persisted, hardware)
+            identity = await self._reregister(persisted, hardware, resources)
             _write_identity_state(self._settings.state_dir, identity)
             self._identity = identity
             return identity
@@ -63,7 +64,7 @@ class WorkerIdentityClient:
                 "registration_request_id": request_id,
                 "proposed_worker_id": proposed_worker_id,
                 "boot_id": boot_id,
-                "capabilities": self._capabilities(host_id, hardware),
+                "capabilities": self._capabilities(host_id, hardware, resources),
             },
         )
         response.raise_for_status()
@@ -76,6 +77,7 @@ class WorkerIdentityClient:
         self,
         persisted: dict[str, object],
         hardware: GpuHardwareSnapshot | None,
+        resources: WorkerResourceSnapshot | None,
     ) -> WorkerRedisIdentity:
         worker_id = persisted.get("worker_id")
         management_token = persisted.get("management_token")
@@ -90,6 +92,7 @@ class WorkerIdentityClient:
                 "capabilities": self._capabilities(
                     self._settings.host_id or _stable_host_id(),
                     hardware,
+                    resources,
                 ),
             },
         )
@@ -138,6 +141,7 @@ class WorkerIdentityClient:
         self,
         host_id: str,
         hardware: GpuHardwareSnapshot | None,
+        resources: WorkerResourceSnapshot | None,
     ) -> dict[str, object]:
         gpu_uuid = hardware.uuid if hardware is not None else self._settings.gpu_uuid
         gpu_name = hardware.name if hardware is not None else self._settings.gpu_name
@@ -157,6 +161,29 @@ class WorkerIdentityClient:
             if configured_capacity > 0
             else max(0, total_vram_mb - self._settings.gpu_reserve_vram_mb)
         )
+        visible = list(resources.gpus) if resources is not None else []
+        if hardware is not None and not any(item.uuid == hardware.uuid for item in visible):
+            visible.insert(0, hardware)
+        if hardware is not None:
+            visible.sort(key=lambda item: item.uuid != hardware.uuid)
+        visible = visible[: self._settings.maximum_gpu_count]
+
+        def gpu_capability(item: GpuHardwareSnapshot) -> dict[str, object]:
+            capacity = self._settings.schedulable_vram_mb
+            return {
+                "gpu_uuid": item.uuid,
+                "gpu_name": item.name,
+                "compute_capability": item.compute_capability,
+                "total_vram_mb": item.total_vram_mb,
+                "schedulable_vram_mb": (
+                    capacity
+                    if capacity > 0
+                    else max(0, item.total_vram_mb - self._settings.gpu_reserve_vram_mb)
+                ),
+                "max_slots": self._settings.maximum_slots,
+                "compute_budget": self._settings.compute_budget,
+            }
+
         return {
             "worker_type": "persona-render",
             "host_id": host_id,
@@ -168,6 +195,7 @@ class WorkerIdentityClient:
             "max_slots": self._settings.maximum_slots,
             "compute_budget": self._settings.compute_budget,
             "supported_runtimes": ["recorded", "scripted"],
+            "gpus": [gpu_capability(item) for item in visible],
         }
 
 
