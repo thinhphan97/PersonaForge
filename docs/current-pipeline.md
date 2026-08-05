@@ -110,7 +110,7 @@ adapter implement `Protocol`, sau đó wire adapter trong `bootstrap/container.p
 
 ```text
 src/
-├── avatar_chat/
+├── personaforge_chat/
 │   ├── domain/
 │   │   ├── models.py                 # Entity, enum, state transition
 │   │   └── errors.py                 # Domain errors
@@ -142,7 +142,7 @@ src/
 │   │   ├── settings.py               # Env → typed settings
 │   │   └── container.py              # Composition root
 │   └── main.py                       # ASGI entrypoint
-└── avatar_worker/
+└── personaforge_worker/
     ├── main.py                       # Worker entrypoint
     ├── settings.py                   # Worker env settings
     ├── consumer.py                   # Redis consumer + session manager
@@ -1226,7 +1226,7 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e '.[dev]'
 bash scripts/generate_demo_videos.sh
-MEDIA_PROVIDER=aiortc uvicorn avatar_chat.main:app --host 0.0.0.0 --port 8000
+MEDIA_PROVIDER=aiortc uvicorn personaforge_chat.main:app --host 0.0.0.0 --port 8000
 ```
 
 Mở `http://localhost:8000`.

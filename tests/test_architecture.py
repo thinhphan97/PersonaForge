@@ -5,7 +5,7 @@ FORBIDDEN_ROOTS = {"aiortc", "av", "fastapi", "httpx", "pydantic", "sqlalchemy"}
 
 
 def test_core_does_not_import_frameworks_or_infrastructure() -> None:
-    core = Path("src/avatar_chat")
+    core = Path("src/personaforge_chat")
     files = [
         *core.joinpath("domain").rglob("*.py"),
         *core.joinpath("application").rglob("*.py"),
@@ -21,7 +21,7 @@ def test_core_does_not_import_frameworks_or_infrastructure() -> None:
                 names = [node.module]
             for name in names:
                 root = name.split(".", 1)[0]
-                if root in FORBIDDEN_ROOTS or name.startswith("avatar_chat.adapters"):
+                if root in FORBIDDEN_ROOTS or name.startswith("personaforge_chat.adapters"):
                     violations.append(f"{path}: {name}")
 
     assert not violations, "Core dependency violations:\n" + "\n".join(violations)
@@ -31,8 +31,8 @@ def test_control_and_worker_application_cores_do_not_import_infrastructure() -> 
     roots = (
         Path("src/personaforge_control/domain"),
         Path("src/personaforge_control/application"),
-        Path("src/avatar_worker/domain"),
-        Path("src/avatar_worker/application"),
+        Path("src/personaforge_worker/domain"),
+        Path("src/personaforge_worker/application"),
     )
     forbidden = FORBIDDEN_ROOTS | {"redis", "livekit", "httpx"}
     violations: list[str] = []

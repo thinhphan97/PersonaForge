@@ -1,18 +1,18 @@
 import pytest
 
-from avatar_worker.application.composite import (
+from personaforge_worker.application.composite import (
     CompositeCapacityExceeded,
     CompositeLeaseRejected,
     CompositeSlotManager,
 )
-from avatar_worker.domain.models import (
+from personaforge_worker.domain.models import (
     CompositeReservation,
     CompositeStartRequest,
     PersonaRuntimeSpec,
     PersonaSessionState,
 )
 
-from ..support.avatar_worker_deterministic import (
+from ..support.personaforge_worker_deterministic import (
     DeterministicPersonaSessionFactory,
     RecordingWorkerEvents,
 )

@@ -4,14 +4,14 @@ from datetime import datetime, timezone
 
 import pytest
 
-from avatar_chat.adapters.outbound.agent_runtime import LegacyReplyAgentAdapter
-from avatar_chat.adapters.outbound.memory import (
+from personaforge_chat.adapters.outbound.agent_runtime import LegacyReplyAgentAdapter
+from personaforge_chat.adapters.outbound.memory import (
     InMemoryAgentTurnRepository,
     InMemoryConversationRepository,
     InMemorySessionRepository,
     InMemorySessionShareRepository,
 )
-from avatar_chat.application.dto import (
+from personaforge_chat.application.dto import (
     CharacterSummary,
     ChatEventType,
     MediaAccess,
@@ -20,8 +20,8 @@ from avatar_chat.application.dto import (
     WebRtcAnswer,
     WebRtcOffer,
 )
-from avatar_chat.application.session_access import SessionAccessPolicy
-from avatar_chat.application.use_cases import (
+from personaforge_chat.application.session_access import SessionAccessPolicy
+from personaforge_chat.application.use_cases import (
     CloseSession,
     CreateSession,
     GetConversation,
@@ -31,13 +31,13 @@ from avatar_chat.application.use_cases import (
     ProvisionMedia,
     ProvisionPublicMedia,
 )
-from avatar_chat.domain.errors import (
+from personaforge_chat.domain.errors import (
     CharacterNotFound,
     SessionBusy,
     SessionClosed,
     SessionNotFound,
 )
-from avatar_chat.domain.models import (
+from personaforge_chat.domain.models import (
     AgentTurnStatus,
     AvatarState,
     ChatMessage,

@@ -2,18 +2,18 @@ import asyncio
 
 import pytest
 
-from avatar_worker.adapters.outbound.queued_media import (
+from personaforge_worker.adapters.outbound.queued_media import (
     QueuedMediaPublisher,
     acknowledge,
 )
-from avatar_worker.adapters.outbound.scripted_media import (
+from personaforge_worker.adapters.outbound.scripted_media import (
     PcmS16MonoCanonicalizer,
     ScriptedToneTtsRuntime,
     SolidColorLipSyncRuntime,
 )
-from avatar_worker.application.audio_timeline import BoundedAudioTimeline
-from avatar_worker.application.speech_pipeline import CompositeSpeechPipeline
-from avatar_worker.domain.media import SpeechSegment
+from personaforge_worker.application.audio_timeline import BoundedAudioTimeline
+from personaforge_worker.application.speech_pipeline import CompositeSpeechPipeline
+from personaforge_worker.domain.media import SpeechSegment
 
 from ..support.avatar_media import RecordingMediaPublisher
 

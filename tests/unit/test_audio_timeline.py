@@ -2,8 +2,8 @@ import asyncio
 
 import pytest
 
-from avatar_worker.application.audio_timeline import BoundedAudioTimeline
-from avatar_worker.domain.media import CanonicalAudioChunk
+from personaforge_worker.application.audio_timeline import BoundedAudioTimeline
+from personaforge_worker.domain.media import CanonicalAudioChunk
 
 
 def chunk(sequence: int, end: bool = False) -> CanonicalAudioChunk:

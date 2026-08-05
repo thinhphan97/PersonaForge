@@ -429,7 +429,7 @@ utterance fail hoặc chuyển fallback theo policy.
 ## 11. Source structure đề xuất
 
 ```text
-src/avatar_worker/
+src/personaforge_worker/
 ├── domain/
 │   ├── audio.py
 │   ├── video.py

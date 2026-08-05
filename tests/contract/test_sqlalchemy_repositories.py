@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from avatar_chat.adapters.outbound.sqlalchemy_repositories import (
+from personaforge_chat.adapters.outbound.sqlalchemy_repositories import (
     SqlAlchemyAgentTurnRepository,
     SqlAlchemyConversationRepository,
     SqlAlchemyDatabase,
@@ -12,13 +12,13 @@ from avatar_chat.adapters.outbound.sqlalchemy_repositories import (
     SqlAlchemySessionRepository,
     SqlAlchemyUserRepository,
 )
-from avatar_chat.application.dto import (
+from personaforge_chat.application.dto import (
     ChatEventType,
     ChatOutputEvent,
     RealtimeOutboxEvent,
 )
-from avatar_chat.domain.errors import ConcurrentSessionUpdate
-from avatar_chat.domain.models import (
+from personaforge_chat.domain.errors import ConcurrentSessionUpdate
+from personaforge_chat.domain.models import (
     AgentTurn,
     AgentTurnStatus,
     AuditLog,

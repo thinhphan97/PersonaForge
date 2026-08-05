@@ -1,10 +1,10 @@
 from av import VideoFrame
 
-from avatar_chat.domain.models import AvatarState
-from avatar_worker.adapters.outbound.recorded_lipsync import (
+from personaforge_chat.domain.models import AvatarState
+from personaforge_worker.adapters.outbound.recorded_lipsync import (
     RecordedClipLipSyncRuntime,
 )
-from avatar_worker.domain.media import LipSyncRenderRequest, PixelFormat
+from personaforge_worker.domain.media import LipSyncRenderRequest, PixelFormat
 
 
 class FakeRecordedSource:

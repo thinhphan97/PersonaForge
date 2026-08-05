@@ -29,8 +29,8 @@ flowchart LR
 Package chính:
 
 - `personaforge_control`: Enrollment/Registration Service, scheduler và Redis adapters.
-- `avatar_worker.application`: composite slot manager, audio timeline và speech pipeline.
-- `avatar_worker.identity`: auto identity, first enrollment và management-token re-registration.
+- `personaforge_worker.application`: composite slot manager, audio timeline và speech pipeline.
+- `personaforge_worker.identity`: auto identity, first enrollment và management-token re-registration.
 - `ControlPlaneAvatarStreamAdapter`: Core API gọi Control Plane mà không giữ assignment trong
   RAM tiến trình.
 

@@ -1,6 +1,6 @@
 from av import VideoFrame
 
-from avatar_chat.adapters.outbound.media.switchable_track import (
+from personaforge_chat.adapters.outbound.media.switchable_track import (
     draw_frame_number,
     draw_sync_flash,
 )

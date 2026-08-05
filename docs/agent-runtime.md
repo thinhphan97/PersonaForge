@@ -225,7 +225,7 @@ Nếu chạy service ngoài Docker:
 ```bash
 AGENT_GRPC_TARGET=127.0.0.1:50051 \
 AGENT_RUNTIME_PROVIDER=grpc \
-uvicorn avatar_chat.main:app --host 0.0.0.0 --port 8000
+uvicorn personaforge_chat.main:app --host 0.0.0.0 --port 8000
 
 python -m personaforge_agent.main
 ```

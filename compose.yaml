@@ -2,7 +2,7 @@ services:
   avatar-chat:
     build: .
     command:
-      ["sh", "-c", "alembic upgrade head && exec uvicorn avatar_chat.main:app --host 0.0.0.0 --port 8000"]
+      ["sh", "-c", "alembic upgrade head && exec uvicorn personaforge_chat.main:app --host 0.0.0.0 --port 8000"]
     ports:
       - "${APP_HTTP_PORT:-8000}:8000"
     environment:
@@ -175,7 +175,7 @@ services:
       context: .
       dockerfile: Dockerfile.worker
     image: personaforge-avatar-worker:local
-    command: ["python", "-m", "avatar_worker.main"]
+    command: ["python", "-m", "personaforge_worker.main"]
     profiles: ["livekit"]
     environment:
       AVATAR_WORKER_ID: ${AVATAR_WORKER_ID:-}

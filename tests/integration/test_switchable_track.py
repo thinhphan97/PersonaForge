@@ -1,9 +1,9 @@
 import pytest
 
-from avatar_chat.adapters.outbound.media.recorded_source import RecordedClipCatalog
-from avatar_chat.adapters.outbound.media.switchable_track import SwitchableAvatarVideoTrack
-from avatar_chat.bootstrap.settings import Settings
-from avatar_chat.domain.models import AvatarState
+from personaforge_chat.adapters.outbound.media.recorded_source import RecordedClipCatalog
+from personaforge_chat.adapters.outbound.media.switchable_track import SwitchableAvatarVideoTrack
+from personaforge_chat.bootstrap.settings import Settings
+from personaforge_chat.domain.models import AvatarState
 
 
 @pytest.mark.asyncio

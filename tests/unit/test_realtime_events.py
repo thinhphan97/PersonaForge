@@ -2,14 +2,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from avatar_chat.adapters.inbound.fastapi_app import ChatConnectionHub
-from avatar_chat.adapters.outbound.realtime_events import (
+from personaforge_chat.adapters.inbound.fastapi_app import ChatConnectionHub
+from personaforge_chat.adapters.outbound.realtime_events import (
     InMemoryRealtimeEventBus,
     _event_from_payload,
     _event_payload,
 )
-from avatar_chat.application.dto import ChatEventType, ChatOutputEvent
-from avatar_chat.domain.errors import AccessDenied, AuthenticationRequired
+from personaforge_chat.application.dto import ChatEventType, ChatOutputEvent
+from personaforge_chat.domain.errors import AccessDenied, AuthenticationRequired
 
 
 class FakeWebSocket:

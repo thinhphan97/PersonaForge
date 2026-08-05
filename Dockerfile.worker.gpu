@@ -25,8 +25,8 @@ COPY requirements.worker.txt ./requirements.worker.txt
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.worker.txt
 
-COPY src/avatar_chat ./src/avatar_chat
-COPY src/avatar_worker ./src/avatar_worker
+COPY src/personaforge_chat ./src/personaforge_chat
+COPY src/personaforge_worker ./src/personaforge_worker
 COPY scripts/generate_demo_videos.sh ./scripts/generate_demo_videos.sh
 RUN bash scripts/generate_demo_videos.sh \
     && useradd --create-home --uid 10001 personaforge \
@@ -36,4 +36,4 @@ RUN bash scripts/generate_demo_videos.sh \
 
 USER personaforge
 
-CMD ["python", "-m", "avatar_worker.main"]
+CMD ["python", "-m", "personaforge_worker.main"]

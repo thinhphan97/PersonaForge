@@ -20,4 +20,4 @@ COPY scripts ./scripts
 RUN bash scripts/generate_demo_videos.sh
 
 EXPOSE 8000
-CMD ["uvicorn", "avatar_chat.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "personaforge_chat.main:app", "--host", "0.0.0.0", "--port", "8000"]

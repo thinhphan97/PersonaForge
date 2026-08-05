@@ -2,7 +2,7 @@ from datetime import timezone
 
 import pytest
 
-from avatar_worker.adapters.outbound.gpu_probe import (
+from personaforge_worker.adapters.outbound.gpu_probe import (
     ConfiguredGpuProbe,
     NvidiaSmiGpuProbe,
     parse_nvidia_smi,

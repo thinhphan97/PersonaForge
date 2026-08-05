@@ -1,19 +1,19 @@
 import av
 
-from avatar_chat.adapters.outbound.media.recorded_source import (
+from personaforge_chat.adapters.outbound.media.recorded_source import (
     RecordedCharacterCatalog,
     RecordedClipCatalog,
 )
-from avatar_chat.bootstrap.settings import Settings
-from avatar_chat.domain.models import AvatarState
-from avatar_worker.livekit_session import (
+from personaforge_chat.bootstrap.settings import Settings
+from personaforge_chat.domain.models import AvatarState
+from personaforge_worker.livekit_session import (
     LiveKitRenderSession,
     _audio_frame,
     _to_livekit_video_frame,
     _video_publish_options,
 )
-from avatar_worker.recorded_frames import LoopingRecordedFrameSource
-from avatar_worker.settings import WorkerSettings
+from personaforge_worker.recorded_frames import LoopingRecordedFrameSource
+from personaforge_worker.settings import WorkerSettings
 
 
 def test_worker_audio_uses_exact_twenty_millisecond_pcm_frames() -> None:

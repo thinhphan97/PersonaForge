@@ -50,7 +50,7 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e '.[dev]'
 bash scripts/generate_demo_videos.sh
-uvicorn avatar_chat.main:app --reload
+uvicorn personaforge_chat.main:app --reload
 ```
 
 Mở <http://localhost:8000>. Trên máy khác cần HTTPS và cấu hình STUN/TURN trong `.env`.
@@ -319,7 +319,7 @@ Chạy worker ngoài Docker, khi Redis và LiveKit đã có sẵn:
 
 ```bash
 REDIS_URL=redis://localhost:6379/0 \
-python -m avatar_worker.main
+python -m personaforge_worker.main
 ```
 
 Chi tiết thiết kế và hướng tích hợp model thật nằm trong

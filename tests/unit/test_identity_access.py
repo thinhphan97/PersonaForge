@@ -2,23 +2,23 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from avatar_chat.adapters.outbound.jwt_tokens import PyJwtTokenAdapter
-from avatar_chat.adapters.outbound.memory import (
+from personaforge_chat.adapters.outbound.jwt_tokens import PyJwtTokenAdapter
+from personaforge_chat.adapters.outbound.memory import (
     InMemoryAuthSessionRepository,
     InMemorySessionShareRepository,
     InMemoryUserRepository,
 )
-from avatar_chat.adapters.outbound.system import Argon2PasswordHasher, SecureTokenGenerator
-from avatar_chat.application.auth_use_cases import (
+from personaforge_chat.adapters.outbound.system import Argon2PasswordHasher, SecureTokenGenerator
+from personaforge_chat.application.auth_use_cases import (
     AuthenticateAccessToken,
     LoginUser,
     LogoutUser,
     RefreshAccessToken,
     RegisterUser,
 )
-from avatar_chat.application.session_access import SessionAccessPolicy
-from avatar_chat.domain.errors import AccessDenied, AuthenticationRequired, UserAlreadyExists
-from avatar_chat.domain.models import (
+from personaforge_chat.application.session_access import SessionAccessPolicy
+from personaforge_chat.domain.errors import AccessDenied, AuthenticationRequired, UserAlreadyExists
+from personaforge_chat.domain.models import (
     AvatarSession,
     AvatarState,
     SessionAction,

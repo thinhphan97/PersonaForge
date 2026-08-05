@@ -2,12 +2,6 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from avatar_worker.application.composite import CompositeSlotManager
-from avatar_worker.domain.models import (
-    CompositeReservation,
-    CompositeStartRequest,
-    PersonaRuntimeSpec,
-)
 from personaforge_control.application.identity import (
     EnrollmentService,
     WorkerRegistrationService,
@@ -23,11 +17,13 @@ from personaforge_control.domain.models import (
     WorkerHeartbeat,
     WorkerStatus,
 )
-
-from ..support.avatar_worker_deterministic import (
-    DeterministicPersonaSessionFactory,
-    RecordingWorkerEvents,
+from personaforge_worker.application.composite import CompositeSlotManager
+from personaforge_worker.domain.models import (
+    CompositeReservation,
+    CompositeStartRequest,
+    PersonaRuntimeSpec,
 )
+
 from ..support.persona_control_memory import (
     InMemoryCompositeAssignmentRepository,
     InMemoryCompositeSlotAllocator,
@@ -35,6 +31,10 @@ from ..support.persona_control_memory import (
     InMemoryWorkerCredentialIssuer,
     InMemoryWorkerRegistrationRepository,
     InMemoryWorkerRegistry,
+)
+from ..support.personaforge_worker_deterministic import (
+    DeterministicPersonaSessionFactory,
+    RecordingWorkerEvents,
 )
 
 

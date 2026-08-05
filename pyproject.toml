@@ -58,7 +58,7 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 [tool.mypy]
 python_version = "3.10"
 strict = true
-packages = ["avatar_chat", "avatar_worker", "personaforge_agent", "personaforge_control"]
+packages = ["personaforge_chat", "personaforge_worker", "personaforge_agent", "personaforge_control"]
 
 [[tool.mypy.overrides]]
 module = ["grpc", "grpc.*", "grpc_health", "grpc_health.*"]
@@ -70,7 +70,7 @@ ignore_errors = true
 
 [[tool.mypy.overrides]]
 module = [
-    "avatar_chat.adapters.outbound.agent_runtime",
+    "personaforge_chat.adapters.outbound.agent_runtime",
     "personaforge_agent.adapters.inbound.grpc_service",
     "personaforge_agent.main",
 ]

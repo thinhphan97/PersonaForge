@@ -5,7 +5,7 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-from avatar_chat.adapters.outbound.sqlalchemy_repositories import Base
+from personaforge_chat.adapters.outbound.sqlalchemy_repositories import Base
 
 config = context.config
 if config.config_file_name is not None:

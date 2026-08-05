@@ -1,6 +1,6 @@
 """Media publisher test double; never used by production composition roots."""
 
-from avatar_worker.domain.media import CanonicalAudioChunk, TimedVideoFrame
+from personaforge_worker.domain.media import CanonicalAudioChunk, TimedVideoFrame
 
 
 class RecordingMediaPublisher:
