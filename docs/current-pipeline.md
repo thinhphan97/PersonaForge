@@ -1412,16 +1412,31 @@ Nguyên tắc:
 
 ## 24. Scale worker trong tương lai
 
+Sơ đồ đầy đủ cho composite TTS/Avatar GPU slot, load voice/avatar model theo session,
+multi-reader audio master timeline và release lifecycle nằm tại
+[`tts-avatar-render-flow.md`](tts-avatar-render-flow.md).
+
+DTO, application ports, dependency direction, source structure và test strategy của Worker
+Application Core được mô tả riêng tại
+[`persona-worker-core-architecture.md`](persona-worker-core-architecture.md).
+
+Quyết định cho giai đoạn model/TTS đầu tiên là worker auto-register qua Registration Service,
+nhận Redis ACL username/password động và giao tiếp Redis trực tiếp qua TLS. Scheduler replica,
+Redis HA/Cluster và Worker Control Service chỉ là target tương lai, chưa phải dependency MVP.
+
 Hiện tại API gửi mọi session tới một `RENDER_WORKER_ID` tĩnh. Kiến trúc production nên thêm:
 
-1. Worker registry dựa trên heartbeat/capabilities.
-2. Scheduler chọn worker theo GPU memory, active session và model affinity.
-3. Session-to-worker mapping bền vững.
-4. Worker-ready event sau khi track publish thành công.
-5. Timeout và reschedule nếu worker không ready.
-6. Graceful drain khi deploy worker.
-7. Idempotency/deduplication theo `command_id`.
-8. Pending reclaim và dead-letter stream.
+1. Worker registration bằng one-time bootstrap token.
+2. Dynamic Redis ACL credential theo `worker_id + boot_id`.
+3. Worker registry dựa trên heartbeat/capabilities.
+4. Scheduler chọn worker theo composite TTS/Avatar VRAM, compute budget, active session và
+   model/voice cache affinity.
+5. Session-to-worker mapping bền vững.
+6. Worker-ready event sau khi track publish thành công.
+7. Timeout và reschedule nếu worker không ready.
+8. Graceful drain khi deploy worker.
+9. Idempotency/deduplication theo `command_id`.
+10. Pending reclaim và dead-letter stream.
 
 Ví dụ mapping:
 
@@ -1429,7 +1444,7 @@ Ví dụ mapping:
 avatar:session:{session_id}:worker -> worker-7
 avatar:worker:worker-7             -> heartbeat/capabilities/load
 avatar:commands:worker-7           -> ordered commands
-avatar:events:{session_id}         -> ready/error/stopped events
+avatar:events:worker-7:{session_id} -> ready/error/stopped events
 ```
 
 ## 25. Test và quality gates

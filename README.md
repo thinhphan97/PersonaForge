@@ -15,6 +15,10 @@ Tài liệu kiến trúc:
   [docs/direct-worker-streaming.md](docs/direct-worker-streaming.md).
 - Agent Runtime, gRPC streaming và delegated authorization:
   [docs/agent-runtime.md](docs/agent-runtime.md).
+- Luồng mục tiêu Core, composite TTS/Avatar GPU slot, audio timeline và LiveKit:
+  [docs/tts-avatar-render-flow.md](docs/tts-avatar-render-flow.md).
+- Worker Application Core, TTS/lip-sync interfaces và adapter boundaries:
+  [docs/persona-worker-core-architecture.md](docs/persona-worker-core-architecture.md).
 
 Phiên bản hiện tại là nền tảng MVP của PersonaForge, được triển khai theo Hexagonal
 Architecture. FastAPI nhận signaling/chat; media có thể chạy
