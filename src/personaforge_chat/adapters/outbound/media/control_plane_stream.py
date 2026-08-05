@@ -6,6 +6,7 @@ import httpx
 from redis.asyncio import Redis
 
 from personaforge_chat.application.dto import WebRtcAnswer, WebRtcOffer
+from personaforge_chat.domain.errors import MediaCapacityUnavailable
 from personaforge_chat.domain.models import AvatarState
 
 
@@ -60,6 +61,8 @@ class ControlPlaneAvatarStreamAdapter:
                 },
             },
         )
+        if response.status_code == 503:
+            raise MediaCapacityUnavailable() from None
         response.raise_for_status()
         lease = response.json()
         await self._wait_event(

@@ -61,6 +61,13 @@ class SessionBusy(DomainError):
         self.session_id = session_id
 
 
+class MediaCapacityUnavailable(DomainError):
+    def __init__(self) -> None:
+        super().__init__(
+            "Không còn GPU worker slot khả dụng; hãy đóng một session đang chạy hoặc thử lại sau"
+        )
+
+
 class SessionClosed(DomainError):
     def __init__(self, session_id: str) -> None:
         super().__init__(f"Session '{session_id}' is closed and read-only")

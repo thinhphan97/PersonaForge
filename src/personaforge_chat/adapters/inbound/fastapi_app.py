@@ -37,6 +37,7 @@ from personaforge_chat.domain.errors import (
     ConcurrentSessionUpdate,
     DomainError,
     InvalidInput,
+    MediaCapacityUnavailable,
     RateLimitExceeded,
     SessionBusy,
     SessionClosed,
@@ -357,6 +358,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             status = 403
         elif isinstance(exc, RateLimitExceeded):
             status = 429
+        elif isinstance(exc, MediaCapacityUnavailable):
+            status = 503
+            headers["Retry-After"] = "5"
         elif isinstance(exc, SessionNotFound | UserNotFound):
             status = 404
         elif isinstance(
@@ -366,11 +370,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             status = 409
         else:
             status = 400
-        return JSONResponse(
-            status_code=status,
-            content={"detail": str(exc)},
-            headers=headers,
-        )
+        content = {"detail": str(exc)}
+        if isinstance(exc, MediaCapacityUnavailable):
+            content["code"] = "media_capacity_unavailable"
+        return JSONResponse(status_code=status, content=content, headers=headers)
 
     @router.get("/health")
     async def health() -> dict[str, str]:
