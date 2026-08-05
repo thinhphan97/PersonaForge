@@ -107,8 +107,17 @@ class PostgresTelemetryStore:
                     continue
                 gpu_memory = _float_or_none(child.get("gpu_memory_bytes"))
                 process_vram_mb = None if gpu_memory is None else gpu_memory / 1024 / 1024
-                if process_vram_mb is None and bool(child.get("oom", False)):
-                    process_vram_mb = float(child.get("reserved_vram_mb", 0))
+                baseline_vram_mb = _float_or_none(child.get("composite_baseline_vram_mb"))
+                attributed_vram_mb = _float_or_none(child.get("attributed_vram_mb"))
+                if attributed_vram_mb is None and process_vram_mb is not None:
+                    attributed_vram_mb = max(
+                        0.0,
+                        process_vram_mb - (baseline_vram_mb or 0.0),
+                    )
+                gpu_sm_utilization = _float_or_none(child.get("gpu_sm_utilization"))
+                observed_gpu_duty_cycle = _float_or_none(child.get("gpu_duty_cycle"))
+                if observed_gpu_duty_cycle is None and gpu_sm_utilization is not None:
+                    observed_gpu_duty_cycle = max(0.0, min(1.0, gpu_sm_utilization / 100.0))
                 await connection.execute(
                     text(_INSERT_COMPOSITE_SAMPLE),
                     {
@@ -122,9 +131,7 @@ class PostgresTelemetryStore:
                         "boot_id": boot_id,
                         "gpu_uuid": gpu_uuid,
                         "gpu_name": str(child_gpu.get("gpu_name", "unknown")),
-                        "compute_capability": str(
-                            child_gpu.get("compute_capability", "0.0")
-                        ),
+                        "compute_capability": str(child_gpu.get("compute_capability", "0.0")),
                         "process_id": int(child.get("pid", 0)),
                         "sampled_at": sampled_at,
                         "received_at": received_at,
@@ -140,18 +147,36 @@ class PostgresTelemetryStore:
                         "resolution": str(child.get("resolution", "640x360")),
                         "fps": float(child.get("fps", 25)),
                         "isolation_mode": str(child.get("isolation_mode", "subprocess")),
+                        "process_identity_matches": _bool_or_none(
+                            child.get("process_identity_matches")
+                        ),
+                        "process_status": _string_or_none(child.get("status")),
+                        "process_cpu_utilization": _float_or_none(child.get("cpu_utilization")),
+                        "process_host_rss_bytes": _int_or_none(child.get("host_rss_bytes")),
+                        "process_host_memory_percent": _float_or_none(
+                            child.get("host_memory_percent")
+                        ),
                         "process_vram_mb": process_vram_mb,
-                        "composite_baseline_vram_mb": _float_or_none(
-                            child.get("composite_baseline_vram_mb")
+                        "process_gpu_memory_percent": _float_or_none(
+                            child.get("gpu_memory_percent")
                         ),
-                        "attributed_vram_mb": process_vram_mb,
+                        "process_gpu_sm_utilization": gpu_sm_utilization,
+                        "process_gpu_memory_utilization": _float_or_none(
+                            child.get("gpu_memory_utilization")
+                        ),
+                        "process_gpu_encoder_utilization": _float_or_none(
+                            child.get("gpu_encoder_utilization")
+                        ),
+                        "process_gpu_decoder_utilization": _float_or_none(
+                            child.get("gpu_decoder_utilization")
+                        ),
+                        "reserved_vram_mb": int(child.get("reserved_vram_mb", 0)),
+                        "reserved_gpu_duty_cycle": float(child.get("reserved_gpu_duty_cycle", 0)),
+                        "composite_baseline_vram_mb": baseline_vram_mb,
+                        "attributed_vram_mb": attributed_vram_mb,
                         "gpu_execution_ms": _float_or_none(child.get("gpu_execution_ms")),
-                        "gpu_duty_cycle": float(
-                            child.get("reserved_gpu_duty_cycle", 0)
-                        ),
-                        "tts_realtime_factor": _float_or_none(
-                            child.get("tts_realtime_factor")
-                        ),
+                        "gpu_duty_cycle": observed_gpu_duty_cycle,
+                        "tts_realtime_factor": _float_or_none(child.get("tts_realtime_factor")),
                         "render_fps": _float_or_none(child.get("render_fps")),
                         "av_drift_ms": _float_or_none(child.get("av_drift_ms")),
                         "oom": bool(child.get("oom", False)),
@@ -183,26 +208,32 @@ class PostgresTelemetryStore:
     ) -> ResourceResolution:
         async with self._engine.connect() as connection:
             config = (
-                await connection.execute(
-                    text(_SELECT_CONFIG),
-                    _requirement_params(requirement, gpu_name, compute_capability),
+                (
+                    await connection.execute(
+                        text(_SELECT_CONFIG),
+                        _requirement_params(requirement, gpu_name, compute_capability),
+                    )
                 )
-            ).mappings().first()
+                .mappings()
+                .first()
+            )
             profile = (
-                await connection.execute(
-                    text(_SELECT_PROFILE),
-                    _requirement_params(requirement, gpu_name, compute_capability),
+                (
+                    await connection.execute(
+                        text(_SELECT_PROFILE),
+                        _requirement_params(requirement, gpu_name, compute_capability),
+                    )
                 )
-            ).mappings().first()
+                .mappings()
+                .first()
+            )
             compatible_profiles = []
             if profile is None:
                 compatible_profiles = list(
                     (
                         await connection.execute(
                             text(_SELECT_COMPATIBLE_PROFILES),
-                            _requirement_params(
-                                requirement, gpu_name, compute_capability
-                            ),
+                            _requirement_params(requirement, gpu_name, compute_capability),
                         )
                     ).mappings()
                 )
@@ -262,8 +293,7 @@ class PostgresTelemetryStore:
                 for item in compatible_profiles
             )
             observed_compute = max(
-                float(item["speaking_compute_p95"])
-                for item in compatible_profiles
+                float(item["speaking_compute_p95"]) for item in compatible_profiles
             )
             has_degraded_profile = any(
                 str(item["state"]) == ResourceProfileState.DEGRADED.value
@@ -279,8 +309,7 @@ class PostgresTelemetryStore:
                     self._learning_vram_margin_mb * 2,
                 )
             return ResourceResolution(
-                peak_vram_mb=max(floor_peak, int(observed_peak))
-                + compatibility_margin,
+                peak_vram_mb=max(floor_peak, int(observed_peak)) + compatibility_margin,
                 gpu_duty_cycle=min(1.0, max(floor_compute, observed_compute)),
                 source="profile:compatible",
                 profile_state=(
@@ -335,8 +364,7 @@ class PostgresTelemetryStore:
         async with self._engine.connect() as connection:
             rows = await connection.execute(
                 text(
-                    "SELECT * FROM persona_resource_configs "
-                    "ORDER BY updated_at DESC LIMIT :limit"
+                    "SELECT * FROM persona_resource_configs ORDER BY updated_at DESC LIMIT :limit"
                 ),
                 {"limit": limit},
             )
@@ -345,24 +373,26 @@ class PostgresTelemetryStore:
     async def statistics(self) -> dict[str, int | str | None]:
         async with self._engine.connect() as connection:
             row = (
-                await connection.execute(
-                    text(
-                        "SELECT "
-                        "(SELECT count(*) FROM gpu_heartbeat_samples) AS gpu_samples, "
-                        "(SELECT count(*) FROM composite_resource_samples) AS composite_samples, "
-                        "(SELECT count(*) FROM resource_profiles) AS profiles, "
-                        "(SELECT max(received_at) FROM gpu_heartbeat_samples) AS last_received_at"
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT "
+                            "(SELECT count(*) FROM gpu_heartbeat_samples) AS gpu_samples, "
+                            "(SELECT count(*) FROM composite_resource_samples) AS composite_samples, "
+                            "(SELECT count(*) FROM resource_profiles) AS profiles, "
+                            "(SELECT max(received_at) FROM gpu_heartbeat_samples) AS last_received_at"
+                        )
                     )
                 )
-            ).mappings().one()
+                .mappings()
+                .one()
+            )
         return {
             "gpu_samples": int(row["gpu_samples"]),
             "composite_samples": int(row["composite_samples"]),
             "profiles": int(row["profiles"]),
             "last_received_at": (
-                row["last_received_at"].isoformat()
-                if row["last_received_at"] is not None
-                else None
+                row["last_received_at"].isoformat() if row["last_received_at"] is not None else None
             ),
         }
 
@@ -378,6 +408,26 @@ def _float_or_none(value: object) -> float | None:
     if isinstance(value, int | float | str):
         return float(value)
     raise TypeError("Expected an optional numeric telemetry value")
+
+
+def _int_or_none(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, int | float | str):
+        return int(value)
+    raise TypeError("Expected an optional integer telemetry value")
+
+
+def _bool_or_none(value: object) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    raise TypeError("Expected an optional boolean telemetry value")
+
+
+def _string_or_none(value: object) -> str | None:
+    return None if value is None else str(value)
 
 
 def _utc_now() -> datetime:
@@ -429,15 +479,25 @@ INSERT INTO composite_resource_samples (
  gpu_name, compute_capability, process_id, sampled_at, received_at, phase,
  character_id, avatar_model_id, avatar_revision, voice_id, tts_model_id,
  tts_revision, runtime_version, precision, resolution, fps, isolation_mode,
- process_vram_mb, composite_baseline_vram_mb, attributed_vram_mb,
- gpu_execution_ms, gpu_duty_cycle, tts_realtime_factor, render_fps, av_drift_ms, oom
+ process_identity_matches, process_status, process_cpu_utilization,
+ process_host_rss_bytes, process_host_memory_percent, process_vram_mb,
+ process_gpu_memory_percent, process_gpu_sm_utilization,
+ process_gpu_memory_utilization, process_gpu_encoder_utilization,
+ process_gpu_decoder_utilization, reserved_vram_mb, reserved_gpu_duty_cycle,
+ composite_baseline_vram_mb, attributed_vram_mb, gpu_execution_ms,
+ gpu_duty_cycle, tts_realtime_factor, render_fps, av_drift_ms, oom
 ) VALUES (
  :sample_id, :session_id, :generation, :child_id, :worker_id, :boot_id, :gpu_uuid,
  :gpu_name, :compute_capability, :process_id, :sampled_at, :received_at, :phase,
  :character_id, :avatar_model_id, :avatar_revision, :voice_id, :tts_model_id,
  :tts_revision, :runtime_version, :precision, :resolution, :fps, :isolation_mode,
- :process_vram_mb, :composite_baseline_vram_mb, :attributed_vram_mb,
- :gpu_execution_ms, :gpu_duty_cycle, :tts_realtime_factor, :render_fps, :av_drift_ms, :oom
+ :process_identity_matches, :process_status, :process_cpu_utilization,
+ :process_host_rss_bytes, :process_host_memory_percent, :process_vram_mb,
+ :process_gpu_memory_percent, :process_gpu_sm_utilization,
+ :process_gpu_memory_utilization, :process_gpu_encoder_utilization,
+ :process_gpu_decoder_utilization, :reserved_vram_mb, :reserved_gpu_duty_cycle,
+ :composite_baseline_vram_mb, :attributed_vram_mb, :gpu_execution_ms,
+ :gpu_duty_cycle, :tts_realtime_factor, :render_fps, :av_drift_ms, :oom
 ) ON CONFLICT (worker_id, boot_id, child_id, sampled_at) DO NOTHING
 """
 

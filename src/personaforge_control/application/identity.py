@@ -118,14 +118,15 @@ class WorkerRegistrationService:
         )
         if existing_result is not None:
             return existing_result
-        claimed = await self._enrollments.claim(claims.token_id, registration_request_id, now)
-        if claimed.registration_request_id != registration_request_id:
-            raise EnrollmentReplay("Enrollment token was claimed by another request")
-
         worker_id = _canonical_worker_id(proposed_worker_id)
         current = await self._registrations.get(worker_id)
         if current is not None and current.lease_expires_at > now:
+            # Do not consume the one-time grant when the caller only collided
+            # with a still-active boot. It may retry after that lease expires.
             raise WorkerIdentityCollision(f"Worker identity is active: {worker_id}")
+        claimed = await self._enrollments.claim(claims.token_id, registration_request_id, now)
+        if claimed.registration_request_id != registration_request_id:
+            raise EnrollmentReplay("Enrollment token was claimed by another request")
 
         owner_token = self._secrets.generate()
         management_token = self._secrets.generate()
@@ -136,9 +137,7 @@ class WorkerRegistrationService:
             self._credential_ttl,
         )
         stable_identity = await self._registrations.get_identity(worker_id)
-        generation = (
-            1 if stable_identity is None else stable_identity.identity_generation + 1
-        )
+        generation = 1 if stable_identity is None else stable_identity.identity_generation + 1
         registration = WorkerRegistration(
             worker_id=worker_id,
             boot_id=boot_id,
@@ -196,9 +195,7 @@ class WorkerRegistrationService:
             capabilities.worker_type != identity.capabilities.worker_type
             or capabilities.host_id != identity.capabilities.host_id
         ):
-            raise InvalidEnrollment(
-                "Re-registration cannot change worker type or host ID"
-            )
+            raise InvalidEnrollment("Re-registration cannot change worker type or host ID")
         if capabilities is not None:
             original_gpus = {gpu.gpu_uuid for gpu in identity.capabilities.advertised_gpus()}
             current_gpus = {gpu.gpu_uuid for gpu in capabilities.advertised_gpus()}

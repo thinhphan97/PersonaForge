@@ -1354,6 +1354,8 @@ composite_resource_samples
   worker_id
   gpu_uuid
   process_id
+  process_identity_matches
+  process_status
   sampled_at
   phase
   character_id
@@ -1366,7 +1368,17 @@ composite_resource_samples
   precision
   resolution
   fps
+  process_cpu_utilization
+  process_host_rss_bytes
+  process_host_memory_percent
   process_vram_mb
+  process_gpu_memory_percent
+  process_gpu_sm_utilization
+  process_gpu_memory_utilization
+  process_gpu_encoder_utilization
+  process_gpu_decoder_utilization
+  reserved_vram_mb
+  reserved_gpu_duty_cycle
   composite_baseline_vram_mb
   attributed_vram_mb
   gpu_execution_ms
@@ -1383,6 +1395,19 @@ attribution tương đối rõ:
 attributed_vram = process_vram - process_baseline_before_model_load
 session_peak = max(process_vram during loading and speaking)
 ```
+
+Mỗi hàng là đúng một hardware snapshot của một Composite tại `sampled_at`. Ba nhóm số liệu không
+được trộn lẫn:
+
+- `reserved_vram_mb` và `reserved_gpu_duty_cycle`: capacity Scheduler đã giữ, không phải usage;
+- các cột `process_*`: nvitop/NVML đo thực tế theo `pid`, chỉ hợp lệ khi
+  `process_identity_matches=true`;
+- `render_fps`, `av_drift_ms`, `gpu_execution_ms`, `tts_realtime_factor`: chất lượng runtime.
+
+Nếu fake runtime không tạo CUDA context, `process_vram_mb` phải là `NULL` hoặc `0` tùy NVML trả
+về, trong khi reservation vẫn có thể là 4096 MB. Không dùng reservation để điền thay usage thực.
+`attributed_vram_mb` bằng `max(0, process_vram_mb - composite_baseline_vram_mb)`; với subprocess
+dành riêng và chưa có baseline thì toàn bộ `process_vram_mb` được quy thuộc cho Composite.
 
 Scheduler vẫn reserve cả CUDA context/encoder/session overhead; không chỉ reserve delta của
 weights. GPU heartbeat được join theo `gpu_uuid` và time window để đối chiếu:

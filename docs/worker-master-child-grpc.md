@@ -923,9 +923,22 @@ thoát.
 - Không dùng instantaneous utilization làm hard capacity. Reservation ledger vẫn là authority;
   utilization, nhiệt độ và power chỉ phục vụ health/scoring/cooldown.
 
-Container Master và Child giai đoạn đầu chạy cùng PID namespace, nên Master đọc được Child PID.
-Nếu sau này Child chuyển sang container/pod riêng, phải truyền host PID/cgroup identity hoặc dùng
-node-level collector; container PID và host PID không được giả định giống nhau.
+Master và Child giai đoạn đầu chạy trong cùng container, nhưng điều đó chưa đủ để map metric GPU
+theo PID: NVML trả PID trong namespace của host, còn `subprocess.pid` mặc định thuộc PID namespace
+của container. GPU Compose vì vậy phải chạy Worker với `pid: host`. Khi đó PID do Master quản lý,
+`nvitop.HostProcess(pid)` và PID từ `Device.processes()` cùng một namespace; mapping vẫn phải kiểm
+tra thêm `process_create_time` để chống PID reuse.
+
+`pid: host` làm Worker nhìn thấy process table của host và giảm mức cô lập. Chỉ bật nó trong
+`compose.gpu.yaml`, không bật cho API, Control, Redis, PostgreSQL hoặc Worker CPU/demo; không export
+command line/environment của process vào telemetry. Nếu sau này Child chuyển sang container/pod
+riêng, ưu tiên node-level collector hoặc truyền host PID/cgroup identity một cách tường minh;
+không được giả định container PID và host PID giống nhau.
+
+`reserved_vram_mb` trong heartbeat là reservation ledger do Scheduler cấp trước, không phải VRAM
+đo được của Child. VRAM thực chỉ nằm ở `gpu_memory_bytes`/`process_vram_mb` khi NVML map được PID.
+Vì vậy một fake Composite chưa tạo CUDA context vẫn có thể có `reserved_vram_mb=4096` nhưng
+`gpu_memory_bytes=0` hoặc `null`; reservation này chỉ bảo vệ capacity cho model sẽ load sau đó.
 
 Snapshot phải ghi `resource_scope=host|container|cgroup`. `Device.all()` chỉ thấy GPU được
 NVIDIA Container Runtime expose. `nvitop.host` cung cấp OS metric nhưng không thay thế cgroup-v2

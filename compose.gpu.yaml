@@ -1,5 +1,8 @@
 services:
   avatar-worker:
+    # NVML reports host PIDs. Sharing the host PID namespace lets the Master
+    # correlate each supervised Child PID with nvitop/NVML process metrics.
+    pid: host
     build:
       context: .
       dockerfile: Dockerfile.worker.gpu

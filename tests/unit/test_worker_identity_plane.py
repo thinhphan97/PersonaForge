@@ -11,6 +11,7 @@ from personaforge_control.domain.errors import (
     EnrollmentReplay,
     InvalidEnrollment,
     RegistrationLeaseLost,
+    WorkerIdentityCollision,
 )
 from personaforge_control.domain.models import (
     EnrollmentClaims,
@@ -185,6 +186,57 @@ async def test_registration_renew_and_deregister_are_owner_fenced() -> None:
     await registration.deregister(result.worker_id, result.boot_id, result.owner_token)
     assert await registrations.get(result.worker_id) is None
     assert not credentials.active
+
+
+@pytest.mark.asyncio
+async def test_active_identity_collision_does_not_consume_enrollment_grant() -> None:
+    enrollment, registration, _, _ = services()
+    first_token = await enrollment.issue(
+        "controller",
+        "development",
+        "gpu-host-a",
+        "persona-render",
+        1,
+        timedelta(minutes=5),
+    )
+    active = await registration.register(
+        first_token,
+        "request-active",
+        "configured-worker",
+        "boot-active",
+        capabilities(),
+    )
+    replacement_token = await enrollment.issue(
+        "controller",
+        "development",
+        "gpu-host-a",
+        "persona-render",
+        1,
+        timedelta(minutes=5),
+    )
+
+    with pytest.raises(WorkerIdentityCollision):
+        await registration.register(
+            replacement_token,
+            "request-replacement",
+            "configured-worker",
+            "boot-replacement",
+            capabilities(),
+        )
+
+    await registration.deregister(
+        active.worker_id,
+        active.boot_id,
+        active.owner_token,
+    )
+    replacement = await registration.register(
+        replacement_token,
+        "request-replacement",
+        "configured-worker",
+        "boot-replacement",
+        capabilities(),
+    )
+    assert replacement.worker_id == active.worker_id
 
 
 @pytest.mark.asyncio
