@@ -19,6 +19,8 @@ Tài liệu kiến trúc:
   [docs/tts-avatar-render-flow.md](docs/tts-avatar-render-flow.md).
 - Worker Application Core, TTS/lip-sync interfaces và adapter boundaries:
   [docs/persona-worker-core-architecture.md](docs/persona-worker-core-architecture.md).
+- Worker Master–Child, gRPC bidirectional stream qua Unix Domain Socket và multi-GPU:
+  [docs/worker-master-child-grpc.md](docs/worker-master-child-grpc.md).
 - Control Plane đã triển khai, data ownership, enrollment và Docker runbook:
   [docs/control-plane-implementation.md](docs/control-plane-implementation.md).
 

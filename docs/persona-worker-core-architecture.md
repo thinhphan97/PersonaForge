@@ -5,6 +5,11 @@
 > khai end-to-end. Worker cũng report GPU snapshot từ `nvidia-smi`; model GPU thật, per-session
 > CUDA profiler và execution coordinator vẫn là target tiếp theo.
 
+Target process topology đã chốt dùng Worker Master đọc Redis và Composite Child giao tiếp bằng
+gRPC bidirectional stream qua Unix Domain Socket. Xem
+[`worker-master-child-grpc.md`](worker-master-child-grpc.md). Các domain DTO/ports trong tài liệu
+này tiếp tục được dùng bên trong Child và không phụ thuộc transport gRPC.
+
 ## 1. Mục tiêu và phạm vi
 
 Tài liệu này định nghĩa ranh giới Hexagonal Architecture bên trong Persona Render Worker. Mục

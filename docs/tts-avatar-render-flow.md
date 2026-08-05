@@ -22,6 +22,10 @@
   đổi `idle`, `thinking` hoặc `speaking`.
 - Giai đoạn MVP, worker giao tiếp Redis trực tiếp qua TLS bằng Redis ACL credential được cấp
   động cho riêng từng `worker_id + boot_id`.
+- Kiến trúc target đã chốt chuyển worker thành Master quản lý host: chỉ Master đọc Redis;
+  Composite Child giao tiếp với Master bằng gRPC bidirectional stream qua Unix Domain Socket và
+  publish media trực tiếp lên LiveKit. Chi tiết tại
+  [`worker-master-child-grpc.md`](worker-master-child-grpc.md).
 - Multi-replica Scheduler, Redis HA/Cluster và Worker Control Service là target tương lai, không
   thuộc phạm vi triển khai model/TTS đầu tiên.
 
@@ -1111,6 +1115,10 @@ Kết quả reservation:
 Worker renew lease trong cả download, TTS/Avatar load, room connect và render. `generation` là
 fencing token; Core và event consumer bỏ qua event có generation cũ sau reschedule.
 
+Thuật toán target chi tiết cho candidate per-GPU, hard filter, scoring, atomic retry và local
+admission được chuẩn hóa tại
+[`worker-master-child-grpc.md`, mục 8](worker-master-child-grpc.md#8-multi-gpu-inventory-và-assignment).
+
 ## 12. Tracking VRAM và GPU utilization theo composite session
 
 Mục tiêu tracking là trả lời được bốn câu hỏi:
@@ -1271,21 +1279,201 @@ Sau OOM, worker phải:
 5. Đánh dấu resource profile cần re-benchmark hoặc tăng estimate.
 6. Có thể fallback xuống resolution/FPS thấp hơn nếu policy cho phép.
 
-### 12.5. Storage và observability
+### 12.5. Lưu từng heartbeat
+
+Mỗi heartbeat hợp lệ phải được lưu trước khi dùng cho phân tích lịch sử, nhưng storage được tách
+theo mục đích:
+
+| Dữ liệu | Storage | Retention | Mục đích |
+|---|---|---|---|
+| Snapshot mới nhất của worker/GPU | Redis key có TTL | 2–3 lần heartbeat TTL | Filter và score realtime |
+| Telemetry ingest buffer | Redis Stream | 1–24 giờ, consumer ACK sau DB insert | Chống mất mẫu khi PostgreSQL chậm |
+| Raw GPU heartbeat samples | PostgreSQL partition theo ngày | 7–30 ngày | Điều tra spike, OOM và capacity trend |
+| Raw composite/process samples | PostgreSQL partition theo ngày | 7–30 ngày | Attribution theo avatar/voice/session |
+| Resource profile P50/P95/P99 | PostgreSQL | Dài hạn, versioned | Input ổn định cho Scheduler |
+| Active reservation counters | Redis atomic keys | Theo lease lifecycle | Chống over-allocation |
+
+Không lưu lịch sử heartbeat vào process memory và không cấp PostgreSQL credential cho Master.
+Master publish sample vào worker-scoped Redis Stream; Telemetry Ingestor của Control batch insert
+PostgreSQL và chỉ `XACK` sau khi insert idempotent thành công. In-process batch chỉ là buffer có
+giới hạn, không phải source of truth. Snapshot Redis và media loop không chờ analytics writer.
+Nếu PostgreSQL tạm lỗi, pending entry được reclaim; nếu backlog vượt retention/capacity, hệ thống
+ưu tiên render, phát alert và metric dropped sample thay vì làm nghẽn media.
+
+Schema raw GPU heartbeat tối thiểu:
+
+```text
+gpu_heartbeat_samples
+  worker_id
+  boot_id
+  identity_generation
+  gpu_uuid
+  sampled_at
+  received_at
+  total_vram_mb
+  used_vram_mb
+  free_vram_mb
+  gpu_utilization
+  memory_utilization
+  encoder_utilization
+  temperature_c
+  power_watts
+  active_children
+  reserved_vram_mb
+  reserved_compute
+```
+
+Unique key `(worker_id, boot_id, gpu_uuid, sampled_at)` giúp ingest idempotent. Dùng
+`sampled_at` để phân tích hardware và `received_at` để phát hiện clock skew/network delay.
+Heartbeat interval production nên ở mức 2–5 giây; lưu mỗi heartbeat không đồng nghĩa sample ở
+tần suất frame hoặc inference batch.
+
+### 12.6. Attribution theo nhân vật và giọng đọc
+
+GPU heartbeat là tổng của cả card nên không thể tự kết luận avatar/voice nào tạo ra peak khi
+nhiều Child cùng chạy. Mỗi Composite Child gửi thêm sample theo PID/session/generation:
+
+```text
+composite_resource_samples
+  session_id
+  generation
+  child_id
+  worker_id
+  gpu_uuid
+  process_id
+  sampled_at
+  phase
+  character_id
+  avatar_model_id
+  avatar_revision
+  voice_id
+  tts_model_id
+  tts_revision
+  runtime_version
+  precision
+  resolution
+  fps
+  process_vram_mb
+  composite_baseline_vram_mb
+  attributed_vram_mb
+  gpu_execution_ms
+  tts_realtime_factor
+  render_fps
+  av_drift_ms
+  oom
+```
+
+Với subprocess-per-composite, NVML map PID sang VRAM nên attribution tương đối rõ:
+
+```text
+attributed_vram = process_vram - process_baseline_before_model_load
+session_peak = max(process_vram during loading and speaking)
+```
+
+Scheduler vẫn reserve cả CUDA context/encoder/session overhead; không chỉ reserve delta của
+weights. GPU heartbeat được join theo `gpu_uuid` và time window để đối chiếu:
+
+```text
+gpu_used_vram ~= system_baseline
+              + sum(child_process_vram)
+              + unattributed_driver_or_external_vram
+```
+
+Nếu sai số `unattributed` vượt threshold, GPU bị giảm điểm hoặc tạm ngừng nhận session mới. Với
+shared process/executor, process VRAM không còn phân tách theo session; runtime phải instrument
+allocation/model refcount và đánh dấu sample là `estimated` thay vì giả vờ chính xác.
+
+### 12.7. Tổng hợp peak và fallback ban đầu
+
+Aggregation job nhóm sample theo tuple không được trộn lẫn:
+
+```text
+avatar model + revision
+TTS model + revision
+voice or adapter revision
+GPU model + compute capability
+runtime version + precision
+resolution + FPS
+process isolation mode
+```
+
+Profile chính để reserve là peak của **cặp avatar + voice/TTS chạy đồng thời**, không lấy peak
+avatar cộng peak TTS độc lập. Hai model có thể xen kẽ hoặc trùng workspace nên phép cộng đó có
+thể vừa over-reserve vừa bỏ sót concurrent peak. Profile riêng theo avatar và theo voice vẫn
+được giữ làm dữ liệu chẩn đoán và fallback khi chưa từng thấy đúng cặp, nhưng phải cộng
+compatibility/bootstrap margin lớn hơn.
+
+Profile có state:
+
+```text
+BOOTSTRAP -> LEARNING -> TRUSTED -> DEGRADED
+```
+
+- `BOOTSTRAP`: chưa có sample, dùng manifest/config.
+- `LEARNING`: có sample nhưng chưa đạt minimum sample count; vẫn lấy max với config và dùng margin
+  lớn hơn.
+- `TRUSTED`: đủ session hoàn tất sạch, profile còn mới và không có regression/OOM gần đây.
+- `DEGRADED`: profile cũ, OOM, model revision đổi hoặc telemetry sai lệch; quay về conservative
+  estimate.
+
+Thứ tự resolve requirement:
+
+```text
+1. Exact TRUSTED profile của đúng tuple
+2. Exact LEARNING profile với learning safety margin
+3. Compatible profile của cùng model revision và GPU class với compatibility margin
+4. Operator/model manifest config với bootstrap safety margin
+5. Platform conservative default hoặc từ chối provision nếu không có safe default
+```
+
+Config do người dùng cuối gửi chỉ là hint. Control phải validate/clamp bằng giới hạn tối thiểu
+của model manifest; không cho tenant khai báo VRAM thấp tùy ý vì có thể gây OOM cho session khác.
+
+VRAM dùng P99 hoặc observed maximum có giới hạn outlier, compute dùng speaking P95:
+
+```text
+observed_vram = max(clean_session_p99, recent_high_watermark, oom_lower_bound)
+required_vram = max(configured_manifest_vram, observed_vram) + safety_margin
+
+required_compute = max(configured_compute, speaking_gpu_duty_cycle_p95)
+```
+
+OOM sample không bị loại như outlier: lượng VRAM ngay trước OOM là lower bound và lập tức nâng
+estimate/cooldown profile. Estimate được phép tăng nhanh nhưng chỉ giảm chậm sau nhiều sample sạch
+để tránh Scheduler dao động và tái tạo OOM.
+
+Profile row cần lưu `sample_count`, `clean_session_count`, `first_seen_at`, `last_seen_at`,
+`last_oom_at`, percentile, high-watermark, safety-margin version và policy version. Mỗi thay đổi
+model/runtime revision tạo profile key mới, không ghi đè profile của revision cũ.
+
+### 12.8. Storage và observability
 
 ```mermaid
 flowchart LR
     NVML[NVML sampler]
     Runtime[TTS and Avatar instrumentation]
     Tracker[Persona resource tracker]
+    Master[Worker Master]
+    Ingest[(Redis telemetry stream)]
+    Latest[(Redis latest heartbeat)]
+    Writer[Control telemetry ingestor]
+    Raw[(PostgreSQL raw samples)]
+    Aggregator[Resource profile aggregator]
     Metrics[Prometheus or OpenTelemetry]
-    Profiles[(Resource profile store)]
+    Profiles[(PostgreSQL resource profiles)]
     Scheduler[GPU scheduler]
 
     NVML --> Tracker
     Runtime --> Tracker
+    Tracker --> Master
+    Master --> Ingest
+    Master --> Latest
+    Ingest --> Writer
+    Writer --> Raw
+    Raw --> Aggregator
+    Aggregator --> Profiles
     Tracker --> Metrics
-    Tracker --> Profiles
+    Latest --> Scheduler
     Profiles --> Scheduler
     Metrics --> Scheduler
 ```
@@ -1325,7 +1513,7 @@ Một schema usage event tối thiểu:
 session; exporter cần bounded queue và drop/aggregate policy để observability không tạo
 backpressure lên media loop.
 
-### 12.6. Khi nào cần subprocess hoặc MIG
+### 12.9. Khi nào cần subprocess hoặc MIG
 
 - Một process/GPU, nhiều session context: ít overhead nhất nhưng VRAM theo session là estimate.
 - Một subprocess/slot: NVML map PID sang VRAM rõ hơn và giải phóng CUDA context chắc chắn hơn,
