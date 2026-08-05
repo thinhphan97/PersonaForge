@@ -120,6 +120,17 @@ class AiortcAvatarStreamAdapter:
             raise RuntimeError(f"No WebRTC peer exists for session '{session_id}'")
         await context.video.switch(state)
 
+    async def speak(
+        self,
+        session_id: str,
+        turn_id: str,
+        utterance_id: str,
+        text: str,
+    ) -> None:
+        # The aiortc demo retains its clocked silence track. Composite TTS is
+        # provided by the standalone LiveKit worker.
+        del session_id, turn_id, utterance_id, text
+
     async def close(self, session_id: str) -> None:
         async with self._lock:
             context = self._peers.pop(session_id, None)

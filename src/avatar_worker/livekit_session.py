@@ -9,6 +9,21 @@ from livekit import rtc
 
 from avatar_chat.adapters.outbound.media.recorded_source import RecordedCharacterCatalog
 from avatar_chat.domain.models import AvatarState
+from avatar_worker.adapters.outbound.queued_media import (
+    QueuedMediaPublisher,
+    acknowledge,
+    reject,
+)
+from avatar_worker.adapters.outbound.recorded_lipsync import (
+    RecordedClipLipSyncRuntime,
+)
+from avatar_worker.adapters.outbound.scripted_media import (
+    PcmS16MonoCanonicalizer,
+    ScriptedToneTtsRuntime,
+)
+from avatar_worker.application.audio_timeline import BoundedAudioTimeline
+from avatar_worker.application.speech_pipeline import CompositeSpeechPipeline
+from avatar_worker.domain.media import SpeechSegment, TimedVideoFrame
 from avatar_worker.recorded_frames import LoopingRecordedFrameSource
 from avatar_worker.settings import WorkerSettings
 
@@ -37,6 +52,39 @@ class LiveKitRenderSession:
         self._ready = asyncio.Event()
         self._finished = asyncio.Event()
         self._startup_error: Exception | None = None
+        self._media_publisher = QueuedMediaPublisher()
+        character_clips = RecordedCharacterCatalog(
+            settings.characters_root,
+            settings.avatar_clips,
+        ).clips_for(character_id)
+        self._speech_pipeline = CompositeSpeechPipeline(
+            ScriptedToneTtsRuntime(
+                sample_rate=settings.audio_sample_rate,
+                frame_samples=round(
+                    settings.audio_sample_rate * settings.audio_frame_duration_seconds
+                ),
+                milliseconds_per_character=settings.scripted_tts_ms_per_character,
+            ),
+            PcmS16MonoCanonicalizer(sample_rate=settings.audio_sample_rate),
+            BoundedAudioTimeline(
+                maximum_buffer_samples=round(
+                    settings.audio_sample_rate * settings.audio_buffer_max_ms / 1_000
+                )
+            ),
+            RecordedClipLipSyncRuntime(
+                LoopingRecordedFrameSource(
+                    character_clips,
+                    settings.video_width,
+                    settings.video_height,
+                )
+            ),
+            self._media_publisher,
+            video_fps=settings.video_fps,
+            sample_rate=settings.audio_sample_rate,
+        )
+        self._pipeline_started = False
+        self._pipeline_stopped = False
+        self._speech_lock = asyncio.Lock()
 
     def set_state(self, state: AvatarState, state_version: int) -> None:
         if state not in {
@@ -63,7 +111,33 @@ class LiveKitRenderSession:
         )
 
     async def stop(self) -> None:
+        if self._pipeline_started and not self._pipeline_stopped:
+            await self._speech_pipeline.stop()
+            self._pipeline_stopped = True
         self._stop.set()
+
+    async def speak(
+        self,
+        turn_id: str,
+        utterance_id: str,
+        text: str,
+        sequence: int,
+        is_final: bool,
+    ) -> None:
+        if not text.strip():
+            raise ValueError("Speech text cannot be empty")
+        async with self._speech_lock:
+            await self._speech_pipeline.speak(
+                SpeechSegment(
+                    session_id=self.session_id,
+                    turn_id=turn_id,
+                    utterance_id=utterance_id,
+                    sequence=sequence,
+                    text=text,
+                    is_final=is_final,
+                )
+            )
+            await self._speech_pipeline.wait_playback(utterance_id)
 
     async def wait_ready(self, timeout_seconds: float = 15) -> None:
         ready = asyncio.create_task(self._ready.wait())
@@ -121,6 +195,9 @@ class LiveKitRenderSession:
                 video_track,
                 _video_publish_options(settings),
             )
+            await self._speech_pipeline.start()
+            self._pipeline_started = True
+            await self._speech_pipeline.wait_ready()
             self._ready.set()
             logger.info(
                 "LiveKit media ready session=%s character=%s",
@@ -133,6 +210,13 @@ class LiveKitRenderSession:
             raise
         finally:
             self._finished.set()
+            if self._pipeline_started and not self._pipeline_stopped:
+                self._media_publisher.abort(
+                    RuntimeError("LiveKit publishing loop stopped")
+                )
+                with contextlib.suppress(Exception):
+                    await self._speech_pipeline.stop()
+                self._pipeline_stopped = True
             recorded.close()
             await synchronizer.aclose()
             with contextlib.suppress(Exception):
@@ -159,18 +243,30 @@ class LiveKitRenderSession:
             audio_start = audio_sample / settings.audio_sample_rate
             next_video_time = video_frame_number / settings.video_fps
             while next_video_time <= audio_start + 1e-9:
-                av_frame = recorded.next_frame(
-                    self._state,
-                    video_frame_number + 1,
-                    self._is_sync_pulse(next_video_time),
-                )
-                await synchronizer.push(
-                    _to_livekit_video_frame(av_frame),
-                    timestamp=next_video_time,
-                )
+                video_delivery = self._media_publisher.pop_video()
+                try:
+                    video_frame = (
+                        _to_livekit_timed_video_frame(video_delivery.frame)
+                        if video_delivery is not None
+                        else _to_livekit_video_frame(
+                            recorded.next_frame(
+                                self._state,
+                                video_frame_number + 1,
+                                self._is_sync_pulse(next_video_time),
+                            )
+                        )
+                    )
+                    await synchronizer.push(video_frame, timestamp=next_video_time)
+                except BaseException as exc:
+                    if video_delivery is not None:
+                        reject(video_delivery, exc)
+                    raise
+                if video_delivery is not None:
+                    acknowledge(video_delivery)
                 video_frame_number += 1
                 next_video_time = video_frame_number / settings.video_fps
 
+            audio_delivery = self._media_publisher.pop_audio()
             audio_frame = _audio_frame(
                 sample_rate=settings.audio_sample_rate,
                 start_sample=audio_sample,
@@ -178,12 +274,24 @@ class LiveKitRenderSession:
                 debug_enabled=settings.av_sync_debug,
                 sync_interval=settings.av_sync_interval_seconds,
                 sync_duration=settings.av_sync_pulse_duration_seconds,
+                pcm=(
+                    audio_delivery.frame.samples
+                    if audio_delivery is not None
+                    else None
+                ),
             )
             audio_sample += samples_per_audio_frame
-            await synchronizer.push(
-                audio_frame,
-                timestamp=audio_sample / settings.audio_sample_rate,
-            )
+            try:
+                await synchronizer.push(
+                    audio_frame,
+                    timestamp=audio_sample / settings.audio_sample_rate,
+                )
+            except BaseException as exc:
+                if audio_delivery is not None:
+                    reject(audio_delivery, exc)
+                raise
+            if audio_delivery is not None:
+                acknowledge(audio_delivery)
             media_time = audio_sample / settings.audio_sample_rate
             if media_time >= next_metrics_at:
                 drift_ms = (
@@ -225,6 +333,18 @@ def _to_livekit_video_frame(frame: AvVideoFrame) -> rtc.VideoFrame:
     )
 
 
+def _to_livekit_timed_video_frame(frame: TimedVideoFrame) -> rtc.VideoFrame:
+    expected = frame.width * frame.height * 4
+    if len(frame.data) != expected:
+        raise ValueError("Lip-sync RGBA frame does not match its declared resolution")
+    return rtc.VideoFrame(
+        frame.width,
+        frame.height,
+        rtc.VideoBufferType.RGBA,
+        frame.data,
+    )
+
+
 def _video_publish_options(settings: WorkerSettings) -> rtc.TrackPublishOptions:
     """Publish exactly one layer and keep the configured source resolution.
 
@@ -252,18 +372,21 @@ def _audio_frame(
     debug_enabled: bool,
     sync_interval: float,
     sync_duration: float,
+    pcm: bytes | None = None,
 ) -> rtc.AudioFrame:
-    pcm = bytearray(samples_per_channel * 2)
-    if debug_enabled and sync_interval > 0:
+    if pcm is not None and len(pcm) != samples_per_channel * 2:
+        raise ValueError("TTS PCM frame does not match configured audio cadence")
+    frame_data = bytearray(pcm) if pcm is not None else bytearray(samples_per_channel * 2)
+    if pcm is None and debug_enabled and sync_interval > 0:
         peak = int(32_767 * 0.25)
         for offset in range(samples_per_channel):
             sample_number = start_sample + offset
             media_time = sample_number / sample_rate
             if media_time % sync_interval < sync_duration:
                 value = int(peak * math.sin(2 * math.pi * 1_000 * media_time))
-                struct.pack_into("<h", pcm, offset * 2, value)
+                struct.pack_into("<h", frame_data, offset * 2, value)
     return rtc.AudioFrame(
-        data=pcm,
+        data=frame_data,
         sample_rate=sample_rate,
         num_channels=1,
         samples_per_channel=samples_per_channel,

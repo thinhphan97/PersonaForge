@@ -226,6 +226,14 @@ class AvatarStreamPort(Protocol):
         state_version: int,
     ) -> None: ...
 
+    async def speak(
+        self,
+        session_id: str,
+        turn_id: str,
+        utterance_id: str,
+        text: str,
+    ) -> None: ...
+
     async def close(self, session_id: str) -> None: ...
 
     async def shutdown(self) -> None: ...

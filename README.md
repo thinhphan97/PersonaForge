@@ -19,12 +19,17 @@ Tài liệu kiến trúc:
   [docs/tts-avatar-render-flow.md](docs/tts-avatar-render-flow.md).
 - Worker Application Core, TTS/lip-sync interfaces và adapter boundaries:
   [docs/persona-worker-core-architecture.md](docs/persona-worker-core-architecture.md).
+- Control Plane đã triển khai, data ownership, enrollment và Docker runbook:
+  [docs/control-plane-implementation.md](docs/control-plane-implementation.md).
 
 Phiên bản hiện tại là nền tảng MVP của PersonaForge, được triển khai theo Hexagonal
 Architecture. FastAPI nhận signaling/chat; media có thể chạy
 trực tiếp bằng aiortc hoặc qua Render Worker + LiveKit SFU. Video chuyển giữa các trạng thái
 `idle`, `thinking`, `speaking`, và core không phụ thuộc framework.
-Server đồng thời phát một audio track PCM im lặng; track này là điểm thay thế dành cho TTS.
+Trong LiveKit worker mode, text đi qua fake `CompositeSpeechPipeline`: tone PCM 440 Hz và frame
+lip-sync lấy từ `speaking.mp4` dùng chung audio master timeline. Tin nhắn bỏ cursor ngay khi
+Agent sinh xong text; avatar tiếp tục `speaking` cho đến khi audio/video playback hoàn tất.
+Các application port này là điểm thay thế dành cho model TTS/avatar thật.
 Mỗi frame video có bộ đếm sáu chữ số ở góc trái để quan sát stream còn đang chạy.
 Trạng thái `thinking` được giữ tối thiểu một giây và có thể chỉnh bằng
 `THINKING_MIN_DURATION`.
@@ -197,13 +202,98 @@ Browser <-- WebRTC --> LiveKit SFU <-- WebRTC --> avatar-worker
 Browser <-- HTTP/WS --> avatar-chat <-- Redis Streams --> avatar-worker
 ```
 
-Chạy đầy đủ bằng Docker:
+### Khởi động LiveKit lần đầu với Worker enrollment
+
+Enrollment không thể dùng lệnh `up` tất cả ngay lần đầu vì Worker cần bootstrap token do
+Control Plane cấp trước khi nó khởi động. Chuẩn bị `.env`:
 
 ```bash
 cp .env.example .env
 sed -i 's/MEDIA_PROVIDER=aiortc/MEDIA_PROVIDER=livekit/' .env
-docker compose --profile livekit up --build
 ```
+
+Thay các development secret trong `.env`, đồng thời giữ các URL nội bộ và `host_id`:
+
+```env
+CONTROL_OPERATOR_TOKEN=<operator-secret>
+CONTROL_CORE_TOKEN=<different-core-secret>
+CONTROL_ENROLLMENT_JWT_SECRET=<random-secret-at-least-32-bytes>
+CONTROL_PLANE_URL=http://personaforge-control:8090
+AVATAR_REGISTRATION_URL=http://personaforge-control:8090
+AVATAR_HOST_ID=demo-host
+AVATAR_WORKER_BOOTSTRAP_TOKEN=
+```
+
+Khởi động storage, SFU, Control Plane và Agent trước; chưa start Worker:
+
+```bash
+docker compose --profile livekit --profile agent up -d --build \
+  postgres redis livekit personaforge-control personaforge-agent
+curl -fsS http://127.0.0.1:8090/health/live
+```
+
+Cấp bootstrap token bằng đúng `CONTROL_OPERATOR_TOKEN` và `AVATAR_HOST_ID` trong `.env`:
+
+```bash
+export CONTROL_OPERATOR_TOKEN='<same-operator-secret-as-env>'
+curl -fsS http://127.0.0.1:8090/internal/worker-enrollment-tokens \
+  -H "Authorization: Bearer ${CONTROL_OPERATOR_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "worker_type":"persona-render",
+    "cluster_id":"development",
+    "host_id":"demo-host",
+    "max_gpu_count":1,
+    "ttl_seconds":600
+  }'
+```
+
+Copy `bootstrap_token` trong response vào `.env`, rồi start Core và Worker CPU:
+
+```env
+AVATAR_WORKER_BOOTSTRAP_TOKEN=<returned-bootstrap-token>
+```
+
+```bash
+docker compose --profile livekit --profile agent up -d --build \
+  avatar-chat avatar-worker
+```
+
+Đối với Worker GPU, dùng file override ở bước cuối:
+
+```bash
+docker compose -f compose.yaml -f compose.gpu.yaml \
+  --profile livekit --profile agent up -d --build avatar-chat avatar-worker
+```
+
+Kiểm tra Worker đã register và đang gửi hardware heartbeat:
+
+```bash
+curl -fsS http://127.0.0.1:8090/internal/workers \
+  -H "Authorization: Bearer ${CONTROL_OPERATOR_TOKEN}"
+docker compose --profile livekit logs -f avatar-worker
+```
+
+Kết quả cần có `status=ready`, `worker_id`, GPU capability và `heartbeat`. Sau lần enrollment
+đầu, Worker lưu management token trong volume `avatar_worker_identity`; có thể xóa
+`AVATAR_WORKER_BOOTSTRAP_TOKEN` khỏi `.env`. Khi restart, Worker dùng management token để
+`reregister` và nhận Redis ACL credential mới, không cần bootstrap token mới. Chỉ phát token
+mới khi identity bị revoke hoặc volume identity bị xóa có chủ đích.
+
+Muốn chạy legacy không enrollment, đặt `CONTROL_PLANE_URL=` và `AVATAR_REGISTRATION_URL=`;
+Worker khi đó kết nối trực tiếp bằng `REDIS_URL` và không có dynamic Redis ACL identity.
+
+Worker được tách khỏi image API: `Dockerfile.worker` dành cho fake pipeline CPU/local/CI.
+Trên NVIDIA host đã cài driver và NVIDIA Container Toolkit, dùng CUDA/cuDNN Worker bằng file
+override có sẵn:
+
+```bash
+docker compose -f compose.yaml -f compose.gpu.yaml \
+  --profile livekit --profile agent up -d --build
+```
+
+`WORKER_CUDA_IMAGE` trong `.env` cho phép pin CUDA/cuDNN base image phù hợp với framework model.
+Image GPU chưa cài PyTorch/ONNX/TensorRT cho đến khi adapter model thật được chọn.
 
 Sau đó mở <http://localhost:8000>. Các giá trị `devkey/secret` trong `.env.example` chỉ
 dành cho local. Frontend demo tải LiveKit browser SDK từ jsDelivr nên trình duyệt cần truy

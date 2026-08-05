@@ -15,6 +15,7 @@ class RedisAvatarStreamAdapter:
 
     def __init__(self, redis_url: str, worker_id: str, livekit_url: str) -> None:
         self._redis: Redis = Redis.from_url(redis_url, decode_responses=True)
+        self._worker_id = worker_id
         self._stream = f"avatar:commands:{worker_id}"
         self._livekit_url = livekit_url
 
@@ -25,7 +26,7 @@ class RedisAvatarStreamAdapter:
         room_name: str,
         publisher_token: str,
     ) -> None:
-        event_stream = f"avatar:events:{session_id}"
+        event_stream = f"avatar:events:{self._worker_id}:{session_id}"
         latest = await self._redis.xrevrange(event_stream, count=1)
         last_event_id = latest[0][0] if latest else "0-0"
         command_id = await self._send(
@@ -66,6 +67,36 @@ class RedisAvatarStreamAdapter:
             {"state": state.value, "state_version": state_version},
         )
 
+    async def speak(
+        self,
+        session_id: str,
+        turn_id: str,
+        utterance_id: str,
+        text: str,
+    ) -> None:
+        event_stream = f"avatar:events:{self._worker_id}:{session_id}"
+        latest = await self._redis.xrevrange(event_stream, count=1)
+        last_event_id = latest[0][0] if latest else "0-0"
+        command_id = await self._send(
+            "avatar.speech.synthesize",
+            session_id,
+            {
+                "turn_id": turn_id,
+                "utterance_id": utterance_id,
+                "text": text,
+                "sequence": 1,
+                "is_final": True,
+            },
+        )
+        await self._wait_for_event(
+            session_id,
+            event_stream,
+            last_event_id,
+            command_id,
+            "avatar.speech.completed",
+            timeout_seconds=max(30, len(text) * 0.08),
+        )
+
     async def close(self, session_id: str) -> None:
         await self._send("avatar.session.stop", session_id, {})
 
@@ -98,6 +129,24 @@ class RedisAvatarStreamAdapter:
         command_id: str,
         timeout_seconds: float = 15,
     ) -> None:
+        await self._wait_for_event(
+            session_id,
+            event_stream,
+            last_event_id,
+            command_id,
+            "avatar.session.ready",
+            timeout_seconds,
+        )
+
+    async def _wait_for_event(
+        self,
+        session_id: str,
+        event_stream: str,
+        last_event_id: str,
+        command_id: str,
+        success_event: str,
+        timeout_seconds: float,
+    ) -> None:
         deadline = time.monotonic() + timeout_seconds
         cursor = last_event_id
         while True:
@@ -119,7 +168,7 @@ class RedisAvatarStreamAdapter:
                     if event.get("command_id") != command_id:
                         continue
                     event_type = event.get("type")
-                    if event_type == "avatar.session.ready":
+                    if event_type == success_event:
                         return
                     if event_type == "avatar.session.failed":
                         detail = event.get("detail", "Render worker failed")

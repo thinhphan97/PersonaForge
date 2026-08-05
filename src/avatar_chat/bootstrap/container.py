@@ -12,6 +12,9 @@ from avatar_chat.adapters.outbound.agent_runtime import (
 from avatar_chat.adapters.outbound.http_reply import HttpStreamingReplyAdapter
 from avatar_chat.adapters.outbound.jwt_tokens import PyJwtTokenAdapter
 from avatar_chat.adapters.outbound.media.aiortc_stream import AiortcAvatarStreamAdapter
+from avatar_chat.adapters.outbound.media.control_plane_stream import (
+    ControlPlaneAvatarStreamAdapter,
+)
 from avatar_chat.adapters.outbound.media.livekit_room import LiveKitMediaRoomAdapter
 from avatar_chat.adapters.outbound.media.recorded_source import RecordedCharacterCatalog
 from avatar_chat.adapters.outbound.media.redis_render import RedisAvatarStreamAdapter
@@ -253,11 +256,23 @@ def build_container(settings: Settings) -> Container:
             api_secret=cast(str, settings.livekit_api_secret),
             api_url=settings.livekit_api_url,
         )
-        avatar_stream = RedisAvatarStreamAdapter(
-            redis_url=settings.redis_url,
-            worker_id=settings.render_worker_id,
-            livekit_url=settings.livekit_worker_url or livekit_url,
-        )
+        if settings.control_plane_url:
+            avatar_stream = ControlPlaneAvatarStreamAdapter(
+                control_url=settings.control_plane_url,
+                core_token=settings.control_core_token,
+                redis_url=settings.redis_url,
+                livekit_url=settings.livekit_worker_url or livekit_url,
+                resolution=settings.persona_resolution,
+                fps=settings.persona_fps,
+                peak_vram_mb=settings.persona_peak_vram_mb,
+                gpu_duty_cycle=settings.persona_gpu_duty_cycle,
+            )
+        else:
+            avatar_stream = RedisAvatarStreamAdapter(
+                redis_url=settings.redis_url,
+                worker_id=settings.render_worker_id,
+                livekit_url=settings.livekit_worker_url or livekit_url,
+            )
         provision_media = ProvisionMedia(sessions, avatar_stream, rooms, clock, access)
     else:
         raise ValueError(f"Unsupported MEDIA_PROVIDER: {settings.media_provider}")

@@ -1,0 +1,28 @@
+FROM python:3.10-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/src \
+    PROJECT_ROOT=/app
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Worker-only runtime dependencies. The API/database/auth stack is intentionally absent.
+COPY requirements.worker.txt ./requirements.worker.txt
+RUN pip install --no-cache-dir -r requirements.worker.txt
+
+COPY src/avatar_chat ./src/avatar_chat
+COPY src/avatar_worker ./src/avatar_worker
+COPY scripts/generate_demo_videos.sh ./scripts/generate_demo_videos.sh
+RUN bash scripts/generate_demo_videos.sh \
+    && useradd --create-home --uid 10001 personaforge \
+    && mkdir -p /var/lib/personaforge/avatar-worker \
+    && chown -R personaforge:personaforge /app /var/lib/personaforge
+
+USER personaforge
+
+CMD ["python", "-m", "avatar_worker.main"]

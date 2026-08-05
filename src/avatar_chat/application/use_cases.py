@@ -454,6 +454,24 @@ class HandleMessage:
                         completed_at=completed_at,
                     )
                     await self.agent_turns.save(agent_turn)
+
+                    # Text streaming is complete when the Agent finishes. Do not keep the UI
+                    # cursor alive while the independent media pipeline drains playback.
+                    yield ChatOutputEvent(
+                        type=ChatEventType.ASSISTANT_COMPLETE,
+                        content=full_reply,
+                        message_id=assistant_message.message_id,
+                        sequence=assistant_message.sequence,
+                        revision=assistant_message.revision,
+                    )
+
+                    if full_reply:
+                        await self.avatar.speak(
+                            session_id,
+                            agent_turn.turn_id,
+                            assistant_message.message_id,
+                            full_reply,
+                        )
                 except BaseException as exc:
                     if agent_turn is not None and agent_turn.status is AgentTurnStatus.RUNNING:
                         try:
@@ -531,13 +549,6 @@ class HandleMessage:
                 yield ChatOutputEvent(
                     type=ChatEventType.AVATAR_STATE,
                     avatar_state=AvatarState.IDLE,
-                )
-                yield ChatOutputEvent(
-                    type=ChatEventType.ASSISTANT_COMPLETE,
-                    content=full_reply,
-                    message_id=assistant_message.message_id,
-                    sequence=assistant_message.sequence,
-                    revision=assistant_message.revision,
                 )
         finally:
             if distributed_lease is not None:

@@ -1,0 +1,19 @@
+services:
+  avatar-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker.gpu
+      args:
+        CUDA_IMAGE: ${WORKER_CUDA_IMAGE:-nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04}
+    image: personaforge-avatar-worker-gpu:local
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility,video}
+      AVATAR_GPU_PROBE_PROVIDER: ${GPU_AVATAR_GPU_PROBE_PROVIDER:-nvidia-smi}

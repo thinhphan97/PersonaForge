@@ -1,8 +1,9 @@
 # Luồng Composite TTS và Avatar Render Worker
 
-> Trạng thái: tài liệu thiết kế mục tiêu cho giai đoạn tích hợp model thật. Pipeline hiện tại
-> đã có Core API, Redis Streams, một Render Worker cố định và LiveKit, nhưng vẫn phát video
-> thu sẵn cùng audio silence/beep. Dynamic slot scheduler, TTS model và Avatar GPU model chưa
+> Trạng thái: Enrollment/Identity Plane, Redis ACL, Control Plane scheduler, composite lease,
+> worker heartbeat và application-level `CompositeSpeechPipeline` đã được triển khai. Luồng
+> LiveKit hiện chạy end-to-end bằng scripted tone TTS và recorded-clip lip-sync giả qua bounded
+> multi-reader audio timeline. Model TTS/lip-sync GPU, artifact storage và production HA chưa
 > được triển khai.
 
 ## 1. Các quyết định kiến trúc
@@ -1339,24 +1340,22 @@ tại từ đầu để không phụ thuộc phương án process isolation.
 
 Hiện trạng:
 
-- `RedisAvatarStreamAdapter` gửi command vào `avatar:commands:{worker_id}`.
-- `RENDER_WORKER_ID` đang cố định nên chưa có dynamic assignment.
-- `RedisRenderWorker` và session manager sở hữu lifecycle render session.
+- `ControlPlaneAvatarStreamAdapter` gọi scheduler; assignment bền vững nằm ở Redis.
+- Worker ID được auto-generate hoặc cấu hình; command đi vào `avatar:commands:{worker_id}`.
+- `RedisRenderWorker` crawl hardware, heartbeat và sở hữu lifecycle render session.
 - `LiveKitRenderSession` giữ stable audio/video track và audio master timeline.
 - Start command hiện chờ `avatar.session.ready` tối đa 15 giây.
-- Frame source hiện tại là video thu sẵn; audio là silence/beep.
+- Idle/thinking dùng video thu sẵn; speaking dùng tone TTS và frame từ `speaking.mp4` qua
+  `CompositeSpeechPipeline`. Silence/beep chỉ dùng khi không có speech hoặc AV debug.
 
 Khi tích hợp model, giữ nguyên Core port và command boundary, sau đó triển khai lần lượt:
 
-1. `PersonaRuntimeSpec` chứa versioned Avatar và voice/TTS specification.
-2. `TtsRuntimeFactory`, `AvatarModelFactory` và session-scoped runtime interfaces.
-3. Multi-reader `AudioTimeline`, resampler/rechunker và GPU execution coordinator.
-4. Local `CompositeSlotManager` cùng composite resource tracker cho một worker/GPU.
-5. Speech-segment command, timed audio contract và playback-completed event.
-6. Provision bất đồng bộ cùng progress event.
-7. Worker auto-registration, persistent identity và token-owned heartbeat lease.
-8. One-time bootstrap token, dynamic Redis ACL credential, rotation và revoke lifecycle.
-9. Redis scheduler/renewable composite-slot lease khi thật sự có nhiều GPU worker.
+1. Mở rộng `PersonaRuntimeSpec` với artifact URI/checksum và voice/TTS version thật.
+2. Implement `TtsRuntimeFactory` và `AvatarModelFactory` bằng model thật.
+3. Thêm resampler native và GPU execution coordinator; multi-reader timeline đã có.
+4. Nối local `CompositeSlotManager` vào Redis Worker runtime thay `RenderSessionManager` cũ.
+5. Bổ sung provision bất đồng bộ và progress event khi download/load/connect.
+6. Thêm NVML/DCGM per-session tracker và observed resource profile cho scheduler.
 
 ## 14. Review kiến trúc và ranh giới triển khai
 
@@ -1501,7 +1500,7 @@ NvmlGpuProbe
 LocalGpuTtsRuntimeFactory
 RecordedAvatarModelFactory
 GpuAvatarModelFactory
-InMemoryAudioTimeline
+BoundedAudioTimeline
 ```
 
 `RedisOssAclCredentialIssuer` và adapter managed Redis implement cùng port vì một số managed
@@ -1509,26 +1508,38 @@ provider không cho ứng dụng gọi `ACL SETUSER` trực tiếp mà yêu cầ
 
 ### 14.5. Trạng thái implementation
 
-Những phần đã tồn tại trong source hiện tại:
+Đã chạy trong production composition root/Docker flow:
 
-- Core `AvatarStreamPort` và Redis command adapter.
-- Worker-specific command stream bằng `RENDER_WORKER_ID` tĩnh.
-- Redis consumer, Render Session Manager và idempotent stop cơ bản.
-- Stable LiveKit publisher, audio master timeline và recorded frame source.
-- Redis renewable lock cho chat turn và Redis turn claim cho Agent Runtime.
+- Enrollment Token API, one-time JTI, idempotent registration và operator/core scope.
+- Persistent worker identity, management-token rotation và boot owner fencing.
+- Dynamic Redis ACL credential create/revoke và worker-scoped command/event namespace.
+- Auto-generated `host:gpu:instance` worker ID khi `AVATAR_WORKER_ID` rỗng.
+- Registration/heartbeat TTL, GPU hardware snapshot và Control inventory API.
+- `nvidia-smi` probe cho VRAM, utilization, temperature và power; `auto` fallback về config.
+- Redis scheduler, dynamic worker selection, atomic slot/VRAM/compute reservation, renewable
+  lease, assignment persistence và generation fencing.
+- Core `ControlPlaneAvatarStreamAdapter` cho provision/state/speech/release.
+- Stable LiveKit publisher với recorded idle/thinking fallback.
+- `CompositeSpeechPipeline`: scripted streaming TTS, PCM canonicalizer, bounded multi-reader
+  timeline, recorded-clip fake lip-sync và queued LiveKit publisher acknowledgement.
+- `PlaybackCompleted` chỉ phát sau audio và video cuối đã được LiveKit publishing loop nhận.
+- `assistant_complete` phản ánh Agent đã sinh xong text và được gửi trước khi chờ playback;
+  avatar chỉ về `idle` sau `PlaybackCompleted`. Cursor text và trạng thái phát media vì vậy có
+  lifecycle độc lập, tránh giữ cursor giả trong lúc avatar vẫn đang đọc.
 
-Những phần trong tài liệu này vẫn là thiết kế, chưa được code:
+Đã có application core và test nhưng local `CompositeSlotManager` chưa thay hoàn toàn
+`RenderSessionManager` trong Redis Worker runtime:
 
-- Enrollment Token API và operator scope.
-- Registration Service cùng idempotency state machine.
-- Persistent worker management token family.
-- Dynamic Redis ACL credential issuer/rotation/revoke.
-- Worker-scoped event namespace mới.
-- Auto-generated worker identity và registration heartbeat lease.
-- In-worker TTS runtime, audio timeline và composite session orchestrator.
-- GPU scheduler, composite resource manifest và atomic composite-slot reservation.
-- NVML/session resource tracker.
-- TTS/Avatar GPU runtime factories và execution coordinator.
+- Local composite capacity guard và session runtime factory ports.
+- Neutral TTS/lip-sync/media DTO và interface để thay fake adapter bằng model thật.
+
+Vẫn chưa triển khai:
+
+- TTS/Avatar GPU runtime factories thật và GPU execution coordinator.
+- Artifact registry, signed download, checksum và local NVMe cache.
+- NVML/DCGM native adapter, CUDA per-session measurement và observed resource profile store.
+- Progress state đầy đủ `downloading/model-loading/connecting` và asynchronous `202` UI flow.
+- Redis/Scheduler HA, subprocess-per-slot/MIG và production telemetry pipeline.
 
 ### 14.6. Phạm vi HA tương lai
 
@@ -1560,3 +1571,167 @@ sau được giữ explicit vì cần quyết định bằng spike/benchmark, kh
 
 Các quyết định này không cản trở tài liệu hóa boundary, nhưng mục 1, 2, 3 và 4 phải được khóa
 trước khi triển khai security/model runtime thật.
+
+## 15. Runbook đăng ký Persona Render Worker hiện tại
+
+### 15.1. Chọn chế độ GPU probe
+
+```env
+# auto: gọi nvidia-smi; nếu container không thấy GPU thì dùng giá trị config và báo probe_error.
+# nvidia-smi: worker fail-fast nếu không crawl được GPU.
+# configured: không chạy command hệ thống, phù hợp demo CPU/CI.
+AVATAR_GPU_PROBE_PROVIDER=auto
+AVATAR_GPU_PROBE_TIMEOUT_SECONDS=3
+AVATAR_GPU_RESERVE_VRAM_MB=512
+
+# Để rỗng thì worker ID được sinh ổn định từ host_id + GPU UUID + instance ID.
+AVATAR_WORKER_ID=
+AVATAR_HOST_ID=gpu-host-a
+```
+
+Repo cung cấp hai image Worker độc lập:
+
+- `Dockerfile.worker`: `python:3.10-slim`, dùng cho fake pipeline CPU, local và CI. Image này có
+  thể gọi `nvidia-smi` khi NVIDIA Container Toolkit inject utility/driver vào container, nhưng
+  không có CUDA/cuDNN để chạy model.
+- `Dockerfile.worker.gpu`: CUDA + cuDNN runtime cho NVIDIA GPU. `compose.gpu.yaml` tự override
+  image Worker CPU và cấp GPU device cho container.
+
+Host GPU cần cài NVIDIA driver và NVIDIA Container Toolkit. Kiểm tra trước khi start:
+
+```bash
+docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+```
+
+CUDA base image có thể đổi để khớp framework/model:
+
+```env
+WORKER_CUDA_IMAGE=nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+NVIDIA_VISIBLE_DEVICES=all
+NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+GPU_AVATAR_GPU_PROBE_PROVIDER=nvidia-smi
+```
+
+File `compose.gpu.yaml` đã có trong repo và có cấu hình tương đương:
+
+```yaml
+services:
+  avatar-worker:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+```
+
+Sau đó chạy các lệnh Compose với cả hai file:
+
+```bash
+docker compose -f compose.yaml -f compose.gpu.yaml \
+  --profile livekit --profile agent up -d --build avatar-worker
+```
+
+Image GPU hiện cung cấp CUDA/cuDNN và dependency của fake composite pipeline. PyTorch,
+ONNX Runtime GPU, TensorRT và dependency riêng của model chưa được cài vì model thật chưa được
+chọn; bổ sung chúng vào requirements/image GPU khi implement adapter model tương ứng.
+
+### 15.2. Khởi động storage, LiveKit và Control Plane
+
+```bash
+docker compose --profile livekit up -d postgres redis livekit personaforge-control
+curl -fsS http://127.0.0.1:8090/health/live
+```
+
+Các secret bắt buộc nên đặt khác nhau trong `.env`:
+
+```env
+CONTROL_OPERATOR_TOKEN=<operator-secret>
+CONTROL_CORE_TOKEN=<core-secret>
+CONTROL_ENROLLMENT_JWT_SECRET=<at-least-32-random-bytes>
+CONTROL_PLANE_URL=http://personaforge-control:8090
+AVATAR_REGISTRATION_URL=http://personaforge-control:8090
+```
+
+### 15.3. Phát one-time bootstrap token
+
+`host_id` trong token phải giống `AVATAR_HOST_ID` của Worker:
+
+```bash
+curl -fsS http://127.0.0.1:8090/internal/worker-enrollment-tokens \
+  -H "Authorization: Bearer ${CONTROL_OPERATOR_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "worker_type":"persona-render",
+    "cluster_id":"development",
+    "host_id":"gpu-host-a",
+    "max_gpu_count":1,
+    "ttl_seconds":600
+  }'
+```
+
+Copy `bootstrap_token` từ response vào `.env`:
+
+```env
+AVATAR_WORKER_BOOTSTRAP_TOKEN=<one-time-bootstrap-token>
+```
+
+### 15.4. Start Worker và kiểm tra hardware heartbeat
+
+```bash
+docker compose --profile livekit up -d avatar-worker
+docker compose --profile livekit logs -f avatar-worker
+```
+
+Control Plane cung cấp inventory cho operator; endpoint không trả management token hoặc Redis
+password:
+
+```bash
+curl -fsS http://127.0.0.1:8090/internal/workers \
+  -H "Authorization: Bearer ${CONTROL_OPERATOR_TOKEN}"
+```
+
+Các trường cần kiểm tra:
+
+- registration `status=ready` và có `heartbeat`;
+- `capabilities.gpu_uuid`, compute capability và schedulable VRAM đúng GPU;
+- `heartbeat.hardware_source=nvidia-smi` trên GPU host;
+- `free_vram_mb`, `gpu_used_vram_mb`, `gpu_utilization`, temperature và power thay đổi theo tải;
+- nếu `hardware_source=configured-fallback`, đọc `hardware_probe_error` và kiểm tra GPU device,
+  NVIDIA Container Toolkit cùng quyền thực thi `nvidia-smi`.
+
+Heartbeat được lưu Redis với TTL, không nằm trong RAM Control Service. Scheduler loại worker khi
+heartbeat hết hạn hoặc free VRAM nhỏ hơn `peak_vram_mb` của persona requirement.
+
+### 15.5. Restart và re-register
+
+Sau first enrollment, Worker lưu management token trong volume `avatar_worker_identity` với
+permission `0600`. Khi restart:
+
+1. Worker đọc stable identity từ volume.
+2. Gọi `/internal/workers/reregister` bằng management token.
+3. Gửi hardware capabilities mới crawl được.
+4. Control rotate management token/Redis ACL credential và revoke boot credential cũ.
+
+Không cấp bootstrap token mới khi chỉ restart container. Chỉ cấp token mới khi identity đã bị
+revoke, GPU/host identity thay đổi, hoặc volume identity bị xóa có chủ đích.
+
+### 15.6. Luồng fake CompositeSpeechPipeline để demo
+
+```text
+Agent text
+  -> avatar.speech.synthesize
+  -> ScriptedToneTtsRuntime
+  -> PcmS16MonoCanonicalizer
+  -> BoundedAudioTimeline
+       -> audio cursor -> QueuedMediaPublisher -> LiveKit audio track
+       -> lip-sync cursor -> RecordedClipLipSyncRuntime -> LiveKit video track
+  -> acknowledge final audio and video
+  -> avatar.speech.completed
+  -> Core chuyển avatar về idle
+```
+
+`TTS_AUDIO_BUFFER_MAX_MS` giới hạn PCM buffer và tạo backpressure.
+`SCRIPTED_TTS_MS_PER_CHARACTER` điều chỉnh thời gian tone giả. Khi tích hợp model thật chỉ thay
+`TtsSessionRuntimePort` và `LipSyncSessionRuntimePort`; Control/Core protocol không đổi.

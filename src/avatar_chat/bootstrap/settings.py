@@ -63,6 +63,12 @@ class Settings:
     redis_url: str
     realtime_event_bus: str
     render_worker_id: str
+    control_plane_url: str | None
+    control_core_token: str
+    persona_peak_vram_mb: int
+    persona_gpu_duty_cycle: float
+    persona_resolution: str
+    persona_fps: float
     characters_root: Path
     avatar_clips: dict[AvatarState, Path]
 
@@ -152,6 +158,20 @@ class Settings:
             redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
             realtime_event_bus=os.getenv("REALTIME_EVENT_BUS", "auto").lower(),
             render_worker_id=os.getenv("RENDER_WORKER_ID", "avatar-worker-1"),
+            control_plane_url=os.getenv("CONTROL_PLANE_URL") or None,
+            control_core_token=os.getenv(
+                "CONTROL_CORE_TOKEN",
+                "development-core-control-token-change-me",
+            ),
+            persona_peak_vram_mb=int(os.getenv("PERSONA_PEAK_VRAM_MB", "0")),
+            persona_gpu_duty_cycle=float(
+                os.getenv("PERSONA_GPU_DUTY_CYCLE", "0.1")
+            ),
+            persona_resolution=(
+                f"{os.getenv('WORKER_VIDEO_WIDTH', '640')}x"
+                f"{os.getenv('WORKER_VIDEO_HEIGHT', '360')}"
+            ),
+            persona_fps=float(os.getenv("WORKER_VIDEO_FPS", "25")),
             characters_root=Path(
                 os.getenv("AVATAR_CHARACTERS_ROOT", root / "assets" / "characters")
             ),

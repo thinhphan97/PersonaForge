@@ -1,9 +1,9 @@
 # Persona Render Worker Core Architecture
 
-> Trạng thái: thiết kế mục tiêu cho giai đoạn tích hợp TTS và lip-sync model thật. Source hiện
-> tại đã có Redis Render Worker, recorded frame source, audio silence/beep, shared media clock và
-> LiveKit publisher; các runtime interface cùng composite orchestration dưới đây chưa được triển
-> khai đầy đủ.
+> Trạng thái: Worker Core DTO/ports, bounded multi-reader audio timeline, composite slot manager,
+> deterministic TTS/lip-sync adapters, queued LiveKit publisher và speech command đã được triển
+> khai end-to-end. Worker cũng report GPU snapshot từ `nvidia-smi`; model GPU thật, per-session
+> CUDA profiler và execution coordinator vẫn là target tiếp theo.
 
 ## 1. Mục tiêu và phạm vi
 
@@ -160,7 +160,6 @@ class NativeAudioChunk:
     sample_rate: int
     channels: int
     sample_format: AudioSampleFormat
-    phonemes: tuple[TimedPhoneme, ...] = ()
     end_of_utterance: bool = False
 ```
 
@@ -207,7 +206,6 @@ class LipSyncRenderRequest:
     audio_end_sample: int
     audio_samples: bytes
     sample_rate: int
-    phonemes: tuple[TimedPhoneme, ...] = ()
 ```
 
 Worker Core chọn audio window, look-back/look-ahead và target PTS. Lip-sync adapter không dùng
@@ -225,7 +223,7 @@ class TimedVideoFrame:
     width: int
     height: int
     pixel_format: PixelFormat
-    data: memoryview
+    data: bytes
 ```
 
 `data` là buffer trung lập. Media adapter chịu trách nhiệm chuyển nó sang SDK frame cụ thể.
@@ -263,20 +261,21 @@ Implementation có thể load full model, shared base cộng adapter hoặc spea
 class AudioCanonicalizerPort(Protocol):
     def convert(
         self,
+        segment: SpeechSegment,
         chunk: NativeAudioChunk,
-        target: AudioFormat,
     ) -> Iterable[CanonicalAudioChunk]: ...
 ```
 
-Resample/rechunk là adapter DSP. Worker Core quyết định target format và sample timeline.
+Resample/rechunk là adapter DSP. Composition root cấu hình canonical format; Worker Core cấp
+sample timeline liên tục khi append chunk.
 
 ### 5.3. AudioTimeline
 
 ```python
 class AudioTimelinePort(Protocol):
-    async def append(self, chunk: CanonicalAudioChunk) -> None: ...
-    def reader(self, consumer: TimelineConsumer) -> "AudioTimelineReader": ...
-    async def close_utterance(self, utterance_id: str, final_sample: int) -> None: ...
+    async def append(self, chunk: CanonicalAudioChunk) -> CanonicalAudioChunk: ...
+    def reader(self, consumer: str) -> "AudioTimelineReader": ...
+    async def close(self) -> None: ...
 ```
 
 Timeline là single-writer/multi-reader ring buffer. LiveKit và lip-sync có cursor riêng; không
@@ -504,21 +503,29 @@ E2E test với model thật chỉ dùng cho integration/performance, không thay
 
 - `RedisRenderWorker` làm inbound command consumer.
 - Session manager quản lý render task theo session.
-- `LiveKitRenderSession` giữ stable publisher và audio master clock.
-- Recorded frame source và silent/beep audio cho deterministic demo.
+- `LiveKitRenderSession` giữ stable publisher và clocked media loop.
+- Recorded frame source cho idle/thinking; silence/beep chỉ là fallback/debug.
+
+Đã bổ sung trong feature Control/Composite Worker:
+
+- Domain-neutral TTS/lip-sync DTO và application ports.
+- Multi-reader bounded AudioTimeline với backpressure.
+- Composite slot manager có lease token và generation fencing.
+- Scripted TTS và deterministic recorded-clip lip-sync chạy qua `CompositeSpeechPipeline`.
+- Queued media publisher chỉ hoàn tất frame sau LiveKit loop acknowledge.
+- Speech command đi từ Core qua Control/Redis đến LiveKit Worker.
+- `nvidia-smi`/configured GPU probe và Redis heartbeat cho Control inventory/scheduler.
 
 Chưa có:
 
-- Domain-neutral TTS/lip-sync DTO đầy đủ.
-- `TtsRuntimeFactoryPort` và `LipSyncRuntimeFactoryPort` thật.
-- Multi-reader AudioTimeline cho TTS PCM.
+- `TtsRuntimeFactoryPort` và `LipSyncRuntimeFactoryPort` cho model thật.
 - Composite GPU execution coordinator.
-- GPU model adapters và composite resource tracker.
+- GPU model adapters và per-session composite resource tracker; hardware-level snapshot đã có.
 
 Lộ trình an toàn:
 
-1. Tách DTO và ports mà vẫn bọc recorded/silent source hiện tại.
-2. Thêm deterministic AudioTimeline tests.
-3. Thêm Scripted TTS và fake lip-sync adapters.
-4. Thêm model runtime từng loại sau khi contract test ổn định.
-5. Benchmark composite VRAM, TTS RTF, render FPS và A/V drift trước GPU admission thật.
+1. Implement model runtime adapters qua các port hiện tại.
+2. Nối local `CompositeSlotManager` vào Redis Worker runtime.
+3. Thêm native resampler và GPU execution coordinator.
+4. Instrument VRAM/RTF/FPS/A-V drift theo session.
+5. Benchmark composite profile trước khi bật GPU admission thật.

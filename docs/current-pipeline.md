@@ -338,9 +338,10 @@ sequenceDiagram
         H->>P: assistant_chunk(full snapshot, revision)
     end
     H->>DB: CAS update status=complete
+    H->>P: assistant_complete(message_id, revision)
+    H->>R: avatar.speech.synthesize và chờ playback completed
     H->>R: avatar.state.set(idle)
     H->>P: avatar_state=idle
-    H->>P: assistant_complete(message_id, revision)
     P-->>B: events từ mọi API replica
 ```
 
@@ -348,6 +349,8 @@ sequenceDiagram
 là decorator áp dụng cho mọi reply provider, giúp kéo dài trạng thái speaking trong demo.
 Mỗi chunk là snapshot đầy đủ của message, không phải delta. Browser chỉ áp dụng revision mới
 hơn nên Redis delivery trùng hoặc event WebSocket đến sai thứ tự không làm nhân đôi text.
+Cursor text kết thúc tại `assistant_complete`; avatar vẫn có thể `speaking` cho đến khi audio và
+video playback hoàn tất.
 Nếu WebSocket đứt, browser tự reconnect theo exponential backoff tối đa 10 giây rồi gọi
 history theo từng page với cursor cuối để lấy mọi message/revision đã lưu.
 
@@ -1056,6 +1059,13 @@ LIVEKIT_RTC_UDP_PORT=17882
 REDIS_URL=redis://redis:6379/0
 REALTIME_EVENT_BUS=auto
 RENDER_WORKER_ID=avatar-worker-1
+CONTROL_PLANE_URL=http://personaforge-control:8090
+AVATAR_REGISTRATION_URL=http://personaforge-control:8090
+AVATAR_HOST_ID=demo-host
+AVATAR_WORKER_BOOTSTRAP_TOKEN=
+CONTROL_OPERATOR_TOKEN=<operator-secret>
+CONTROL_CORE_TOKEN=<different-core-secret>
+CONTROL_ENROLLMENT_JWT_SECRET=<random-secret-at-least-32-bytes>
 POSTGRES_DB=avatar
 POSTGRES_USER=avatar
 POSTGRES_PASSWORD=avatar
@@ -1086,15 +1096,61 @@ LIVEKIT_NODE_IP=192.168.20.166
 Không đổi `LIVEKIT_WORKER_URL=ws://livekit:7880`, vì worker dùng Docker DNS và cổng HTTP
 nội bộ của LiveKit.
 
-### 16.2. Start
+### 16.2. Start lần đầu và đăng ký Worker
+
+Không start `avatar-worker` trước khi có bootstrap token. Khởi động dependency, Control Plane
+và Agent Runtime trước:
 
 ```bash
-docker compose --profile livekit up --build -d
+docker compose --profile livekit --profile agent up -d --build \
+  postgres redis livekit personaforge-control personaforge-agent
+curl -fsS http://127.0.0.1:8090/health/live
 ```
 
-Compose start `postgres` trước, đợi `pg_isready`, sau đó container API tự chạy
-`alembic upgrade head` rồi mới chạy Uvicorn. Không cần chạy migration thủ công cho luồng start
-thông thường.
+Control chỉ cấp token cho operator đã xác thực. Giá trị `host_id` trong request phải trùng
+`AVATAR_HOST_ID` của Worker:
+
+```bash
+export CONTROL_OPERATOR_TOKEN='<same-operator-secret-as-env>'
+curl -fsS http://127.0.0.1:8090/internal/worker-enrollment-tokens \
+  -H "Authorization: Bearer ${CONTROL_OPERATOR_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "worker_type":"persona-render",
+    "cluster_id":"development",
+    "host_id":"demo-host",
+    "max_gpu_count":1,
+    "ttl_seconds":600
+  }'
+```
+
+Copy `bootstrap_token` từ response vào `.env`:
+
+```env
+AVATAR_WORKER_BOOTSTRAP_TOKEN=<returned-bootstrap-token>
+```
+
+Sau đó mới start Core và Worker:
+
+```bash
+docker compose --profile livekit --profile agent up -d --build \
+  avatar-chat avatar-worker
+```
+
+GPU host dùng lệnh tương ứng:
+
+```bash
+docker compose -f compose.yaml -f compose.gpu.yaml \
+  --profile livekit --profile agent up -d --build avatar-chat avatar-worker
+```
+
+Trong lần đầu, Worker dùng bootstrap JWT một lần để gọi `/internal/workers/register`, nhận
+management token cùng Redis ACL credential động, rồi ghi identity vào volume
+`avatar_worker_identity`. Có thể xóa bootstrap token khỏi `.env` sau khi registration thành
+công. Các lần restart gọi `/internal/workers/reregister` bằng management token trong volume.
+
+Compose start `postgres` trước, đợi `pg_isready`; container API chạy `alembic upgrade head`
+trước Uvicorn. Không cần migration thủ công cho luồng start thông thường.
 
 ### 16.3. Kiểm tra service
 
@@ -1103,13 +1159,22 @@ docker compose --profile livekit ps
 curl http://localhost:18000/api/health
 ```
 
-Mong đợi năm service running:
+Mong đợi các service sau running:
 
 - `avatar-chat`
 - `postgres` — healthy
 - `avatar-worker`
 - `redis` — healthy
 - `livekit`
+- `personaforge-control` — healthy
+- `personaforge-agent` — healthy khi dùng `AGENT_RUNTIME_PROVIDER=grpc`
+
+Kiểm tra inventory và hardware heartbeat:
+
+```bash
+curl -fsS http://127.0.0.1:8090/internal/workers \
+  -H "Authorization: Bearer ${CONTROL_OPERATOR_TOKEN}"
+```
 
 ### 16.4. Mở browser
 
@@ -1419,6 +1484,9 @@ multi-reader audio master timeline và release lifecycle nằm tại
 DTO, application ports, dependency direction, source structure và test strategy của Worker
 Application Core được mô tả riêng tại
 [`persona-worker-core-architecture.md`](persona-worker-core-architecture.md).
+
+Trạng thái implementation, data ownership, internal API và Docker enrollment runbook nằm tại
+[`control-plane-implementation.md`](control-plane-implementation.md).
 
 Quyết định cho giai đoạn model/TTS đầu tiên là worker auto-register qua Registration Service,
 nhận Redis ACL username/password động và giao tiếp Redis trực tiếp qua TLS. Scheduler replica,
