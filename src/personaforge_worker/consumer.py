@@ -1,167 +1,23 @@
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
 from typing import Any
 
 from redis.asyncio import Redis
 from redis.exceptions import ResponseError
 
-from personaforge_chat.domain.models import AvatarState
 from personaforge_worker.adapters.outbound.gpu_probe import build_gpu_probe
-from personaforge_worker.domain.hardware import GpuHardwareSnapshot
+from personaforge_worker.domain.hardware import GpuHardwareSnapshot, WorkerResourceSnapshot
 from personaforge_worker.identity import WorkerIdentityClient
-from personaforge_worker.livekit_session import LiveKitRenderSession
+from personaforge_worker.master.child_server import (
+    ChildConnection,
+    ChildControlServer,
+    ChildControlService,
+)
+from personaforge_worker.master.supervisor import ChildSupervisor
 from personaforge_worker.settings import WorkerSettings
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(slots=True)
-class _ManagedRenderSession:
-    session: LiveKitRenderSession
-    task: asyncio.Task[None]
-    generation: int
-    lease_token: str
-    slot_id: str
-    reserved_vram_mb: int
-    reserved_gpu_duty_cycle: float
-
-
-class RenderSessionManager:
-    def __init__(self, settings: WorkerSettings) -> None:
-        self._settings = settings
-        self._sessions: dict[str, _ManagedRenderSession] = {}
-        self._highest_generation: dict[str, int] = {}
-
-    async def start(self, command: dict[str, Any]) -> None:
-        session_id = _required_string(command, "session_id")
-        payload = _required_mapping(command, "payload")
-        generation = _optional_int(command, "generation", 0)
-        lease_token = _optional_string(command, "lease_token", "legacy")
-        slot_id = _optional_string(command, "slot_id", "legacy-slot")
-        current = self._sessions.get(session_id)
-        if (
-            current is not None
-            and current.generation == generation
-            and current.lease_token == lease_token
-            and current.slot_id == slot_id
-        ):
-            await current.session.wait_ready()
-            return
-        if generation < self._highest_generation.get(session_id, -1):
-            raise RuntimeError(f"Stale render generation for session: {session_id}")
-        if current is not None:
-            await self._stop_current(session_id, current)
-        session = LiveKitRenderSession(
-            session_id=session_id,
-            character_id=_required_string(payload, "character_id"),
-            livekit_url=_required_string(payload, "livekit_url"),
-            publisher_token=_required_string(payload, "publisher_token"),
-            settings=self._settings,
-        )
-        task = asyncio.create_task(session.run(), name=f"render-{session_id}")
-        managed = _ManagedRenderSession(
-            session,
-            task,
-            generation,
-            lease_token,
-            slot_id,
-            _optional_int(command, "reserved_vram_mb", 0),
-            _optional_float(command, "reserved_gpu_duty_cycle", 0),
-        )
-        self._sessions[session_id] = managed
-        self._highest_generation[session_id] = generation
-
-        def on_done(completed: asyncio.Task[None]) -> None:
-            self._session_done(session_id, completed)
-
-        task.add_done_callback(on_done)
-        try:
-            await session.wait_ready()
-        except BaseException:
-            await self.stop(session_id)
-            raise
-
-    async def set_state(self, command: dict[str, Any]) -> None:
-        session_id = _required_string(command, "session_id")
-        payload = _required_mapping(command, "payload")
-        context = self._sessions.get(session_id)
-        if context is None:
-            raise RuntimeError(f"Render session not found: {session_id}")
-        _require_command_owner(command, context)
-        context.session.set_state(
-            AvatarState(_required_string(payload, "state")),
-            _required_int(payload, "state_version"),
-        )
-
-    async def speak(self, command: dict[str, Any]) -> None:
-        session_id = _required_string(command, "session_id")
-        context = self._sessions.get(session_id)
-        if context is None:
-            raise RuntimeError(f"Render session not found: {session_id}")
-        _require_command_owner(command, context)
-        payload = _required_mapping(command, "payload")
-        await context.session.speak(
-            turn_id=_required_string(payload, "turn_id"),
-            utterance_id=_required_string(payload, "utterance_id"),
-            text=_required_string(payload, "text"),
-            sequence=_required_int(payload, "sequence"),
-            is_final=_required_bool(payload, "is_final"),
-        )
-
-    async def stop(self, session_id: str) -> None:
-        context = self._sessions.pop(session_id, None)
-        if context is None:
-            return
-        await self._stop_current(session_id, context)
-
-    async def stop_command(self, command: dict[str, Any]) -> None:
-        session_id = _required_string(command, "session_id")
-        context = self._sessions.get(session_id)
-        if context is None:
-            return
-        _require_command_owner(command, context)
-        self._sessions.pop(session_id, None)
-        await self._stop_current(session_id, context)
-
-    async def _stop_current(
-        self,
-        session_id: str,
-        context: _ManagedRenderSession,
-    ) -> None:
-        await context.session.stop()
-        try:
-            await asyncio.wait_for(context.task, timeout=5)
-        except TimeoutError:
-            context.task.cancel()
-            await asyncio.gather(context.task, return_exceptions=True)
-
-    async def shutdown(self) -> None:
-        await asyncio.gather(*(self.stop(session_id) for session_id in tuple(self._sessions)))
-
-    @property
-    def active_sessions(self) -> int:
-        return len(self._sessions)
-
-    @property
-    def reserved_vram_mb(self) -> int:
-        return sum(item.reserved_vram_mb for item in self._sessions.values())
-
-    @property
-    def reserved_compute(self) -> float:
-        return sum(item.reserved_gpu_duty_cycle for item in self._sessions.values())
-
-    def _session_done(self, session_id: str, task: asyncio.Task[None]) -> None:
-        current = self._sessions.get(session_id)
-        if current is not None and current.task is task:
-            self._sessions.pop(session_id, None)
-        if not task.cancelled() and task.exception() is not None:
-            logger.error(
-                "Render session crashed session=%s",
-                session_id,
-                exc_info=task.exception(),
-            )
 
 
 class RedisRenderWorker:
@@ -173,7 +29,9 @@ class RedisRenderWorker:
         self._identity_generation = 0
         self._stream = f"avatar:commands:{self._worker_id}"
         self._group = "avatar-render-workers"
-        self._manager = RenderSessionManager(settings)
+        self._supervisor: ChildSupervisor | None = None
+        self._child_service: ChildControlService | None = None
+        self._child_server: ChildControlServer | None = None
         self._identity_client: WorkerIdentityClient | None = None
         self._hardware_probe = build_gpu_probe(
             settings.gpu_probe_provider,
@@ -189,6 +47,7 @@ class RedisRenderWorker:
         heartbeat: asyncio.Task[None] | None = None
         try:
             await self._connect()
+            await self._start_child_runtime()
             await self._ensure_group()
             heartbeat = asyncio.create_task(self._heartbeat(), name="worker-heartbeat")
             while True:
@@ -210,7 +69,10 @@ class RedisRenderWorker:
             if heartbeat is not None:
                 heartbeat.cancel()
                 await asyncio.gather(heartbeat, return_exceptions=True)
-            await self._manager.shutdown()
+            if self._supervisor is not None:
+                await self._supervisor.shutdown()
+            if self._child_server is not None:
+                await self._child_server.stop()
             if self._redis is not None:
                 await self._redis.aclose()
             if self._identity_client is not None:
@@ -263,16 +125,13 @@ class RedisRenderWorker:
     async def _dispatch(self, command: dict[str, Any]) -> None:
         command_type = _required_string(command, "type")
         if command_type == "avatar.session.start":
-            await self._manager.start(command)
-            await self._publish_event(command, "avatar.session.ready")
+            await self._require_supervisor().start(command)
         elif command_type == "avatar.state.set":
-            await self._manager.set_state(command)
+            await self._require_supervisor().dispatch(command)
         elif command_type == "avatar.speech.synthesize":
-            await self._manager.speak(command)
-            await self._publish_event(command, "avatar.speech.completed")
+            await self._require_supervisor().dispatch(command)
         elif command_type == "avatar.session.stop":
-            await self._manager.stop_command(command)
-            await self._publish_event(command, "avatar.session.stopped")
+            await self._require_supervisor().stop(command)
         else:
             raise ValueError(f"Unsupported render command: {command_type}")
 
@@ -281,6 +140,7 @@ class RedisRenderWorker:
         command: dict[str, Any],
         event_type: str,
         detail: str | None = None,
+        utterance_id: str | None = None,
     ) -> None:
         session_id = _required_string(command, "session_id")
         event = {
@@ -294,7 +154,9 @@ class RedisRenderWorker:
         if detail is not None:
             event["detail"] = detail
         payload = command.get("payload")
-        if isinstance(payload, dict) and isinstance(payload.get("utterance_id"), str):
+        if utterance_id is not None:
+            event["utterance_id"] = utterance_id
+        elif isinstance(payload, dict) and isinstance(payload.get("utterance_id"), str):
             event["utterance_id"] = payload["utterance_id"]
         await self._require_redis().xadd(
             f"avatar:events:{self._worker_id}:{session_id}",
@@ -320,8 +182,16 @@ class RedisRenderWorker:
         while True:
             if self._identity_client is not None:
                 await self._identity_client.renew()
-            self._hardware = await self._hardware_probe.sample()
-            hardware = self._hardware
+            children = self._require_supervisor().children
+            resources = await self._hardware_probe.sample_resources(
+                tuple(
+                    child.process.pid
+                    for child in children
+                    if child.process is not None and child.process.pid is not None
+                )
+            )
+            hardware = _select_gpu(resources, self._settings.gpu_uuid)
+            self._hardware = hardware
             schedulable_limit = (
                 self._settings.schedulable_vram_mb
                 if self._settings.schedulable_vram_mb > 0
@@ -337,10 +207,10 @@ class RedisRenderWorker:
                     "identity_generation": self._identity_generation,
                     "status": "ready",
                     "draining": False,
-                    "active_slots": self._manager.active_sessions,
-                    "reserved_slots": self._manager.active_sessions,
-                    "reserved_vram_mb": self._manager.reserved_vram_mb,
-                    "reserved_compute": self._manager.reserved_compute,
+                    "active_slots": self._require_supervisor().active_sessions,
+                    "reserved_slots": self._require_supervisor().active_sessions,
+                    "reserved_vram_mb": self._require_supervisor().reserved_vram_mb,
+                    "reserved_compute": self._require_supervisor().reserved_compute,
                     "free_vram_mb": min(hardware.free_vram_mb, schedulable_limit),
                     "queue_depth": 0,
                     "observed_fps": self._settings.video_fps,
@@ -352,6 +222,9 @@ class RedisRenderWorker:
                     "hardware_source": hardware.source,
                     "hardware_sampled_at": hardware.sampled_at.timestamp(),
                     "hardware_probe_error": hardware.probe_error,
+                    "host_resources": _host_resource_payload(resources),
+                    "gpu_resources": _gpu_resource_payload(resources),
+                    "child_resources": _child_resource_payload(resources, children),
                 }
             )
             await self._require_redis().set(
@@ -389,6 +262,39 @@ class RedisRenderWorker:
             raise RuntimeError("Render worker Redis connection is not initialized")
         return self._redis
 
+    async def _start_child_runtime(self) -> None:
+        service = ChildControlService(self._on_child_event)
+        server = ChildControlServer(self._settings.master_socket, service)
+        supervisor = ChildSupervisor(
+            self._settings,
+            self._worker_id,
+            self._require_hardware().uuid,
+            service,
+            self._publish_event,
+        )
+        self._child_service = service
+        self._child_server = server
+        self._supervisor = supervisor
+        await server.start()
+        await supervisor.start_monitoring()
+
+    async def _on_child_event(
+        self,
+        child: ChildConnection,
+        event: Any,
+    ) -> None:
+        await self._require_supervisor().on_child_event(child, event)
+
+    def _require_supervisor(self) -> ChildSupervisor:
+        if self._supervisor is None:
+            raise RuntimeError("Worker Master child supervisor is not initialized")
+        return self._supervisor
+
+    def _require_hardware(self) -> GpuHardwareSnapshot:
+        if self._hardware is None:
+            raise RuntimeError("Worker Master hardware probe is not initialized")
+        return self._hardware
+
 
 def _required_string(data: dict[str, Any], key: str) -> str:
     value = data.get(key)
@@ -397,53 +303,90 @@ def _required_string(data: dict[str, Any], key: str) -> str:
     return value
 
 
-def _required_mapping(data: dict[str, Any], key: str) -> dict[str, Any]:
-    value = data.get(key)
-    if not isinstance(value, dict):
-        raise ValueError(f"Missing or invalid '{key}'")
-    return value
+def _select_gpu(resources: WorkerResourceSnapshot, selected_uuid: str) -> GpuHardwareSnapshot:
+    selected = next((gpu for gpu in resources.gpus if gpu.uuid == selected_uuid), None)
+    if selected is not None:
+        return selected
+    if resources.gpus:
+        return resources.gpus[0]
+    raise RuntimeError("Resource probe returned no GPU snapshot")
 
 
-def _required_int(data: dict[str, Any], key: str) -> int:
-    value = data.get(key)
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise ValueError(f"Missing or invalid '{key}'")
-    return value
+def _host_resource_payload(resources: WorkerResourceSnapshot) -> dict[str, object] | None:
+    host = resources.host
+    if host is None:
+        return None
+    return {
+        "cpu_utilization": host.cpu_utilization,
+        "cpu_count_logical": host.cpu_count_logical,
+        "load_average_1m": host.load_average_1m,
+        "ram_total_bytes": host.ram_total_bytes,
+        "ram_used_bytes": host.ram_used_bytes,
+        "ram_available_bytes": host.ram_available_bytes,
+        "swap_used_bytes": host.swap_used_bytes,
+    }
 
 
-def _required_bool(data: dict[str, Any], key: str) -> bool:
-    value = data.get(key)
-    if not isinstance(value, bool):
-        raise ValueError(f"Missing or invalid '{key}'")
-    return value
+def _gpu_resource_payload(resources: WorkerResourceSnapshot) -> list[dict[str, object]]:
+    return [
+        {
+            "gpu_uuid": gpu.uuid,
+            "gpu_name": gpu.name,
+            "compute_capability": gpu.compute_capability,
+            "total_vram_mb": gpu.total_vram_mb,
+            "free_vram_mb": gpu.free_vram_mb,
+            "used_vram_mb": gpu.used_vram_mb,
+            "gpu_utilization": gpu.gpu_utilization,
+            "memory_utilization": gpu.memory_utilization,
+            "encoder_utilization": gpu.encoder_utilization,
+            "decoder_utilization": gpu.decoder_utilization,
+            "temperature_c": gpu.temperature_c,
+            "power_watts": gpu.power_watts,
+            "fan_speed_percent": gpu.fan_speed_percent,
+            "sm_clock_mhz": gpu.sm_clock_mhz,
+            "memory_clock_mhz": gpu.memory_clock_mhz,
+            "pcie_tx_bytes_per_second": gpu.pcie_tx_bytes_per_second,
+            "pcie_rx_bytes_per_second": gpu.pcie_rx_bytes_per_second,
+        }
+        for gpu in resources.gpus
+    ]
 
 
-def _optional_int(data: dict[str, Any], key: str, default: int) -> int:
-    value = data.get(key, default)
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise ValueError(f"Missing or invalid '{key}'")
-    return value
-
-
-def _optional_string(data: dict[str, Any], key: str, default: str) -> str:
-    value = data.get(key, default)
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"Missing or invalid '{key}'")
-    return value
-
-
-def _optional_float(data: dict[str, Any], key: str, default: float) -> float:
-    value = data.get(key, default)
-    if not isinstance(value, int | float) or isinstance(value, bool):
-        raise ValueError(f"Missing or invalid '{key}'")
-    return float(value)
-
-
-def _require_command_owner(
-    command: dict[str, Any],
-    context: _ManagedRenderSession,
-) -> None:
-    generation = _optional_int(command, "generation", 0)
-    lease_token = _optional_string(command, "lease_token", "legacy")
-    if generation != context.generation or lease_token != context.lease_token:
-        raise RuntimeError("Render command does not own the active composite session")
+def _child_resource_payload(
+    resources: WorkerResourceSnapshot,
+    children: tuple[ChildConnection, ...],
+) -> list[dict[str, object]]:
+    ownership = {
+        child.process.pid: child
+        for child in children
+        if child.process is not None and child.process.pid is not None
+    }
+    payload: list[dict[str, object]] = []
+    for process in resources.processes:
+        child = ownership.get(process.pid)
+        if child is None:
+            continue
+        payload.append(
+            {
+                "child_id": child.child_id,
+                "session_id": child.session_id,
+                "pid": process.pid,
+                "process_create_time": process.process_create_time,
+                "process_identity_matches": (
+                    process.process_create_time is not None
+                    and abs(process.process_create_time - child.process_create_time) < 1
+                ),
+                "status": process.status,
+                "cpu_utilization": process.cpu_utilization,
+                "host_rss_bytes": process.host_rss_bytes,
+                "host_memory_percent": process.host_memory_percent,
+                "gpu_uuid": process.gpu_uuid,
+                "gpu_memory_bytes": process.gpu_memory_bytes,
+                "gpu_memory_percent": process.gpu_memory_percent,
+                "gpu_sm_utilization": process.gpu_sm_utilization,
+                "gpu_memory_utilization": process.gpu_memory_utilization,
+                "gpu_encoder_utilization": process.gpu_encoder_utilization,
+                "gpu_decoder_utilization": process.gpu_decoder_utilization,
+            }
+        )
+    return payload

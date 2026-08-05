@@ -1714,7 +1714,8 @@ provider không cho ứng dụng gọi `ACL SETUSER` trực tiếp mà yêu cầ
 - Dynamic Redis ACL credential create/revoke và worker-scoped command/event namespace.
 - Auto-generated `host:gpu:instance` worker ID khi `AVATAR_WORKER_ID` rỗng.
 - Registration/heartbeat TTL, GPU hardware snapshot và Control inventory API.
-- `nvidia-smi` probe cho VRAM, utilization, temperature và power; `auto` fallback về config.
+- `nvitop` public-API adapter cho host CPU/RAM, GPU inventory/metrics và resource theo managed
+  Child PID; `auto` fallback về config trong demo/CI không có NVML.
 - Redis scheduler, dynamic worker selection, atomic slot/VRAM/compute reservation, renewable
   lease, assignment persistence và generation fencing.
 - Core `ControlPlaneAvatarStreamAdapter` cho provision/state/speech/release.
@@ -1726,19 +1727,21 @@ provider không cho ứng dụng gọi `ACL SETUSER` trực tiếp mà yêu cầ
   avatar chỉ về `idle` sau `PlaybackCompleted`. Cursor text và trạng thái phát media vì vậy có
   lifecycle độc lập, tránh giữ cursor giả trong lúc avatar vẫn đang đọc.
 
-Đã có application core và test nhưng local `CompositeSlotManager` chưa thay hoàn toàn
-`RenderSessionManager` trong Redis Worker runtime:
+Đã có application core và test:
 
 - Local composite capacity guard và session runtime factory ports.
 - Neutral TTS/lip-sync/media DTO và interface để thay fake adapter bằng model thật.
+- Worker Master là process duy nhất đọc Redis và quản lý nhiều Composite Child subprocess.
+- Mỗi Child có gRPC channel/bidirectional stream riêng qua UDS listener chung, queue riêng,
+  one-time handshake token, sequence và generation fencing.
+- Child sở hữu `CompositeSpeechPipeline` và stable LiveKit publisher; Master không chuyển raw
+  PCM/video frame.
 
 Vẫn chưa triển khai:
 
 - TTS/Avatar GPU runtime factories thật và GPU execution coordinator.
 - Artifact registry, signed download, checksum và local NVMe cache.
-- `nvitop` public-API adapter cho host/GPU/managed PID, CUDA per-session measurement và observed
-  resource profile store. Adapter subprocess `nvidia-smi` hiện tại sẽ bị thay thế, không giữ làm
-  production probe.
+- CUDA per-session measurement và observed resource profile store.
 - Progress state đầy đủ `downloading/model-loading/connecting` và asynchronous `202` UI flow.
 - Redis/Scheduler HA, subprocess-per-slot/MIG và production telemetry pipeline.
 
@@ -1775,11 +1778,10 @@ trước khi triển khai security/model runtime thật.
 
 ## 15. Runbook đăng ký Persona Render Worker hiện tại
 
-### 15.1. Chọn Resource Probe target
+### 15.1. Chọn Resource Probe
 
-> Target đã chốt dùng `nvitop` public API. Source hiện tại vẫn còn adapter subprocess
-> `nvidia-smi`; các biến `PERSONA_RESOURCE_*` dưới đây có hiệu lực sau khi triển khai migration
-> adapter và không được mô tả như tính năng runtime đã hoàn thành.
+Worker Master hiện dùng `nvitop` public API cho host/GPU/managed Child PID. Chế độ `auto` dùng
+configured fallback khi NVML không khả dụng; adapter legacy chỉ được giữ để tương thích tạm thời.
 
 ```env
 # auto: dùng nvitop khi NVML khả dụng; nếu không thì configured fallback có đánh dấu degraded.

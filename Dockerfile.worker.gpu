@@ -27,12 +27,13 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 COPY src/personaforge_chat ./src/personaforge_chat
 COPY src/personaforge_worker ./src/personaforge_worker
+COPY src/personaforge ./src/personaforge
 COPY scripts/generate_demo_videos.sh ./scripts/generate_demo_videos.sh
 RUN bash scripts/generate_demo_videos.sh \
     && useradd --create-home --uid 10001 personaforge \
-    && mkdir -p /var/lib/personaforge/avatar-worker \
+    && mkdir -p /var/lib/personaforge/avatar-worker /run/personaforge/worker-master \
     && chown -R personaforge:personaforge \
-        /app /opt/personaforge-venv /var/lib/personaforge
+        /app /opt/personaforge-venv /var/lib/personaforge /run/personaforge
 
 USER personaforge
 

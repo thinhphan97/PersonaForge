@@ -1,11 +1,15 @@
+import json
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import pytest
 
+from personaforge_control.adapters.outbound.redis_control import RedisControlPlane
 from personaforge_control.application.scheduler import CompositeScheduler
 from personaforge_control.domain.errors import NoWorkerCapacity
 from personaforge_control.domain.models import (
     CompositeRequirement,
+    CompositeSlotLease,
     WorkerCapabilities,
     WorkerHeartbeat,
     WorkerRegistration,
@@ -39,6 +43,22 @@ class DeterministicSecrets:
 
     def hash(self, value: str) -> str:
         return value
+
+
+class RecoveryRedis:
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+        self.commands: list[tuple[str, dict[str, str]]] = []
+
+    async def get(self, key: str) -> str | None:
+        return self.values.get(key)
+
+    async def set(self, key: str, value: str, **kwargs: Any) -> None:
+        del kwargs
+        self.values[key] = value
+
+    async def xadd(self, stream: str, fields: dict[str, str]) -> None:
+        self.commands.append((stream, fields))
 
 
 def requirement(session_id: str = "session-1") -> CompositeRequirement:
@@ -132,7 +152,7 @@ async def scheduler_fixture() -> tuple[
 
 
 @pytest.mark.asyncio
-async def test_scheduler_provisions_idempotently_and_releases_owner_lease() -> None:
+async def test_scheduler_reuses_lease_and_reissues_start_as_repair_signal() -> None:
     scheduler, _registry, assignments, _allocator, commands, _clock = (
         await scheduler_fixture()
     )
@@ -143,7 +163,9 @@ async def test_scheduler_provisions_idempotently_and_releases_owner_lease() -> N
     assert repeated == first
     assert first.worker_id == "worker-1"
     assert first.generation == 1
-    assert len(commands.starts) == 1
+    assert len(commands.starts) == 2
+    assert commands.starts[1][0] == first
+    assert commands.starts[1][2] == {"room_name": "ignored"}
     assert await scheduler.release(first.session_id)
     assert await assignments.get(first.session_id) is None
     assert commands.stops == [first]
@@ -175,3 +197,44 @@ async def test_scheduler_rolls_back_assignment_when_command_delivery_fails() -> 
     recovered = await scheduler.provision(requirement(), {})
     assert recovered.generation == 2
     assert await allocator.release(recovered)
+
+
+@pytest.mark.asyncio
+async def test_control_reissues_start_once_for_a_new_worker_boot() -> None:
+    session_id = "session-recovery"
+    worker_id = "worker-1"
+    lease = CompositeSlotLease(
+        session_id=session_id,
+        worker_id=worker_id,
+        slot_id="slot-1",
+        lease_token="lease-token",
+        generation=3,
+        reserved_vram_mb=4_000,
+        reserved_gpu_duty_cycle=0.3,
+        expires_at=datetime.now(timezone.utc) + timedelta(seconds=30),
+    )
+    redis = RecoveryRedis()
+    redis.values[f"personaforge:control:recovery-start:{session_id}"] = json.dumps(
+        {
+            "character_id": "luna",
+            "room_name": "avatar-session-recovery",
+            "publisher_token": "publisher-token",
+        }
+    )
+    redis.values[f"personaforge:control:recovery-boot:{session_id}"] = "boot-old"
+    control = RedisControlPlane("redis://unused")
+    control._redis = redis  # type: ignore[assignment]
+    heartbeat = json.dumps({"worker_id": worker_id, "boot_id": "boot-new"})
+
+    await control._recover_for_worker_boot(lease, heartbeat)
+    await control._recover_for_worker_boot(lease, heartbeat)
+
+    assert len(redis.commands) == 1
+    stream, fields = redis.commands[0]
+    assert stream == f"avatar:commands:{worker_id}"
+    command = json.loads(fields["data"])
+    assert command["type"] == "avatar.session.start"
+    assert command["generation"] == 3
+    assert command["lease_token"] == "lease-token"
+    assert command["payload"]["room_name"] == "avatar-session-recovery"
+    assert redis.values[f"personaforge:control:recovery-boot:{session_id}"] == "boot-new"

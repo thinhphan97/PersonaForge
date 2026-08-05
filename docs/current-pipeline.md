@@ -196,7 +196,8 @@ stateDiagram-v2
 Các invariant chính:
 
 - Playback chỉ được đổi khi lifecycle là `READY`.
-- Provision idempotent: session đã `READY` chỉ cấp client token mới, không restart worker.
+- Provision idempotent giữ nguyên lease/generation nhưng phát lại fenced start như một repair
+  signal. Child đang chạy xử lý no-op; Worker vừa restart dùng lệnh này để dựng lại publisher.
 - `MEDIA_STARTING` từ request khác trả conflict thay vì tạo hai publisher.
 - Repository dùng `version` làm optimistic concurrency control; stale update trả conflict.
 - `close()` idempotent: gọi nhiều lần vẫn giữ `CLOSED`.
@@ -1359,8 +1360,9 @@ docker compose exec redis redis-cli XPENDING \
 | Redis command lỗi | Retry 3 lần, không ACK | Chưa DLQ/reclaim/alert |
 | Render start lỗi | Phát correlated failed event, Core đặt `FAILED` và cleanup | Chưa tự reschedule |
 | Stop treo | Chờ 5 giây rồi cancel | Chưa force cleanup GPU resource cụ thể |
-| Worker chết | Heartbeat hết hạn sau tối đa 15 giây | API chưa reschedule session |
-| LiveKit room close | Client/worker SDK reconnect tùy trạng thái | Chưa session recovery orchestration |
+| Worker restart cùng identity/GPU | Control phát hiện `boot_id` mới, phát lại persisted start; Master dựng Child và publisher | Publisher token hiện có TTL 1 giờ; cần token refresh cho session dài hơn |
+| Worker chết hoặc không quay lại | Heartbeat/lease hết hạn và release reservation | Chưa tự reschedule sang Worker khác |
+| LiveKit publisher mất do Worker restart | Child mới reconnect cùng room, browser nhận lại track | Cần UI recovery timeout rõ ràng khi SFU không hồi phục |
 | API restart + memory repo | Mất session/history | Dùng PostgreSQL; vẫn cần ownership design |
 
 ## 21. Security hiện tại và yêu cầu production

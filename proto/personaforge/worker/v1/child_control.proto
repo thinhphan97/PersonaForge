@@ -1,0 +1,107 @@
+syntax = "proto3";
+
+package personaforge.worker.v1;
+
+service CompositeChildControl {
+  rpc Connect(stream ChildToMaster) returns (stream MasterToChild);
+}
+
+message MessageMeta {
+  uint32 schema_version = 1;
+  string message_id = 2;
+  string worker_id = 3;
+  string child_id = 4;
+  string session_id = 5;
+  string gpu_uuid = 6;
+  string lease_token = 7;
+  int64 generation = 8;
+  int64 sequence = 9;
+  int64 sent_at_unix_ms = 10;
+}
+
+message StartComposite {
+  string command_json = 1;
+}
+
+message ChangeAvatarState {
+  string command_json = 1;
+}
+
+message SpeechChunk {
+  string command_json = 1;
+}
+
+message CancelUtterance {
+  string command_json = 1;
+}
+
+message DrainComposite {
+  string command_json = 1;
+}
+
+message StopComposite {
+  string command_json = 1;
+}
+
+message MasterToChild {
+  MessageMeta meta = 1;
+  oneof payload {
+    StartComposite start = 20;
+    SpeechChunk speech = 21;
+    ChangeAvatarState change_state = 22;
+    CancelUtterance cancel = 23;
+    DrainComposite drain = 24;
+    StopComposite stop = 25;
+  }
+}
+
+message ChildHello {
+  int64 pid = 1;
+  double process_create_time = 2;
+  string protocol_version = 3;
+  string bootstrap_token = 4;
+}
+
+message CommandAccepted {
+  string command_id = 1;
+}
+
+message ChildHeartbeat {
+  string state = 1;
+  int64 pid = 2;
+  int64 last_command_sequence = 3;
+  bool livekit_connected = 4;
+  double fps = 5;
+  double av_drift_ms = 6;
+}
+
+message CompositeReady {
+  string command_id = 1;
+}
+
+message PlaybackCompleted {
+  string command_id = 1;
+  string utterance_id = 2;
+}
+
+message CompositeFailed {
+  string command_id = 1;
+  string detail = 2;
+}
+
+message CompositeStopped {
+  string command_id = 1;
+}
+
+message ChildToMaster {
+  MessageMeta meta = 1;
+  oneof payload {
+    ChildHello hello = 20;
+    CommandAccepted accepted = 21;
+    ChildHeartbeat heartbeat = 22;
+    CompositeReady ready = 23;
+    PlaybackCompleted playback_completed = 24;
+    CompositeFailed failed = 25;
+    CompositeStopped stopped = 26;
+  }
+}

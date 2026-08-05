@@ -1,3 +1,4 @@
+import asyncio
 from typing import Protocol
 
 from av import VideoFrame
@@ -14,7 +15,7 @@ class RecordedFrameSource(Protocol):
     def next_frame(
         self,
         state: AvatarState,
-        frame_number: int,
+        frame_number: int | None,
         sync_flash: bool,
     ) -> VideoFrame: ...
 
@@ -36,9 +37,15 @@ class RecordedClipLipSyncRuntime:
     async def render(self, request: LipSyncRenderRequest) -> TimedVideoFrame:
         if self._closed:
             raise RuntimeError("Recorded lip-sync runtime is closed")
+        # Opening/decoding/reformatting a high-resolution clip is blocking work. Keep it away
+        # from the Child asyncio loop so the stable idle publisher can maintain cadence while
+        # the first speaking frame is prepared.
+        return await asyncio.to_thread(self._render_sync, request)
+
+    def _render_sync(self, request: LipSyncRenderRequest) -> TimedVideoFrame:
         frame = self._source.next_frame(
             AvatarState.SPEAKING,
-            request.frame_index + 1,
+            None,
             False,
         ).reformat(format="rgba")
         data = _packed_rgba(frame)

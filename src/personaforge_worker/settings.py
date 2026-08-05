@@ -17,6 +17,14 @@ def _project_root() -> Path:
 
 @dataclass(frozen=True, slots=True)
 class WorkerSettings:
+    role: str
+    master_socket: Path
+    master_max_children: int
+    child_handshake_timeout_seconds: float
+    child_heartbeat_interval_seconds: float
+    child_heartbeat_timeout_seconds: float
+    child_stop_grace_seconds: float
+    child_command_queue_size: int
     worker_id: str
     redis_url: str
     registration_url: str | None
@@ -56,6 +64,29 @@ class WorkerSettings:
         root = _project_root()
         default_assets = root / "assets" / "characters" / "default"
         return cls(
+            role=os.getenv("PERSONA_WORKER_ROLE", "master").lower(),
+            master_socket=Path(
+                os.getenv(
+                    "PERSONA_MASTER_SOCKET",
+                    "/run/personaforge/worker-master/control.sock",
+                )
+            ),
+            master_max_children=int(os.getenv("PERSONA_MASTER_MAX_CHILDREN", "32")),
+            child_handshake_timeout_seconds=float(
+                os.getenv("PERSONA_CHILD_HANDSHAKE_TIMEOUT_SECONDS", "10")
+            ),
+            child_heartbeat_interval_seconds=float(
+                os.getenv("PERSONA_CHILD_HEARTBEAT_INTERVAL_SECONDS", "1")
+            ),
+            child_heartbeat_timeout_seconds=float(
+                os.getenv("PERSONA_CHILD_HEARTBEAT_TIMEOUT_SECONDS", "5")
+            ),
+            child_stop_grace_seconds=float(
+                os.getenv("PERSONA_CHILD_STOP_GRACE_SECONDS", "10")
+            ),
+            child_command_queue_size=int(
+                os.getenv("PERSONA_CHILD_COMMAND_QUEUE_SIZE", "100")
+            ),
             worker_id=os.getenv("AVATAR_WORKER_ID", os.getenv("WORKER_ID", "")),
             redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
             registration_url=os.getenv("AVATAR_REGISTRATION_URL") or None,
@@ -88,10 +119,14 @@ class WorkerSettings:
                 os.getenv("AVATAR_WORKER_HEARTBEAT_INTERVAL_SECONDS", "5")
             ),
             gpu_probe_provider=os.getenv(
-                "AVATAR_GPU_PROBE_PROVIDER", "auto"
+                "PERSONA_RESOURCE_PROBE_PROVIDER",
+                os.getenv("AVATAR_GPU_PROBE_PROVIDER", "auto"),
             ).lower(),
             gpu_probe_timeout_seconds=float(
-                os.getenv("AVATAR_GPU_PROBE_TIMEOUT_SECONDS", "3")
+                os.getenv(
+                    "PERSONA_RESOURCE_PROBE_TIMEOUT_SECONDS",
+                    os.getenv("AVATAR_GPU_PROBE_TIMEOUT_SECONDS", "3"),
+                )
             ),
             gpu_reserve_vram_mb=int(
                 os.getenv("AVATAR_GPU_RESERVE_VRAM_MB", "512")

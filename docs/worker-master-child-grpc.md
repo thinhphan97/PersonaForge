@@ -1,8 +1,9 @@
 # Thiết kế Worker Master–Child qua gRPC Unix Domain Socket
 
-> Trạng thái: kiến trúc target đã chốt cho giai đoạn refactor tiếp theo. Runtime hiện tại vẫn
-> đọc Redis và chạy composite trong cùng một process. Tài liệu này mô tả đích triển khai, không
-> tuyên bố các thành phần Master–Child đã có trong source.
+> Trạng thái: MVP Master–Child đã được triển khai. Master là process duy nhất đọc Redis, mỗi
+> persona session chạy trong một Composite Child riêng, và Master/Child giao tiếp bằng một gRPC
+> bidirectional stream riêng trên Unix Domain Socket. Các mục được đánh dấu target/production
+> hardening ở cuối tài liệu vẫn chưa hoàn thành.
 
 ## 1. Quyết định kiến trúc
 
@@ -143,6 +144,28 @@ unix:///run/personaforge/worker-master/control.sock
 
 Thư mục dùng mode `0700`; socket chỉ service UID truy cập. Child connect ngay sau `spawn/exec`
 và giữ stream tới terminal state.
+
+`control.sock` là **một listening endpoint dùng chung**, không phải một connection hay một
+message stream dùng chung. Mỗi Child là một process riêng, tự tạo một `grpc.aio.Channel`; khi
+connect, Master nhận một UDS connection và một invocation `Connect()` độc lập cho Child đó:
+
+```text
+control.sock (Master listen socket)
+  |-- accepted connection A -- Connect invocation A -- outbound queue A -- Child A
+  |-- accepted connection B -- Connect invocation B -- outbound queue B -- Child B
+  `-- accepted connection C -- Connect invocation C -- outbound queue C -- Child C
+```
+
+Master tạo trước `ChildConnection` theo assignment, gồm `child_id`, `session_id`, `gpu_uuid`,
+lease/generation, one-time token và outbound queue riêng. Message đầu tiên trên từng stream phải
+là `ChildHello`. Sau khi xác thực toàn bộ metadata và token, handler `Connect()` bind invocation
+đó với đúng `ChildConnection`; từ thời điểm này command chỉ được lấy từ queue của connection đó.
+Vì vậy Child A và Child B có thể dùng cùng filesystem path nhưng không thể đọc message của nhau.
+
+Việc tạo một file socket riêng cho từng Child là khả thi nhưng không cần thiết và làm tăng việc
+quản lý path, permission và cleanup socket rác. Mô hình hiện tại tương tự một server TCP/Nginx:
+một địa chỉ listen, nhiều accepted connection độc lập. Metadata `child_id/session_id`, sequence,
+lease token và generation fencing vẫn được kiểm tra trên mọi message để phòng lỗi route và replay.
 
 ```protobuf
 service CompositeChildControl {
@@ -771,7 +794,7 @@ Socket còn mở không có nghĩa model vẫn xử lý được.
 
 ### 13.1. Resource collector dùng `nvitop`
 
-Target implementation không spawn command `nvidia-smi`. Outbound
+Implementation mặc định không spawn command `nvidia-smi`. Outbound
 `NvitopResourceProbeAdapter` dùng public API của `nvitop`, trong khi domain và Scheduler chỉ nhận
 DTO trung lập. `nvitop` sử dụng NVML cho GPU và cung cấp host/process API tương thích psutil:
 
@@ -940,6 +963,13 @@ Restart Child phải bounded theo generation, ví dụ tối đa một lần. Kh
 close, lease mất hoặc OOM chưa thay resource profile. Linux nên dùng parent-death signal/process
 group để Child không sống vô chủ sau khi Master chết.
 
+MVP hiện lưu start specification theo session trong Redis và ghi `boot_id` Worker đã nhận start.
+Khi cùng Worker identity reregister với `boot_id` mới trong lúc lease còn hiệu lực, Control
+reconciler phát lại `avatar.session.start` với nguyên lease token/generation. Master mới dựng lại
+Child và Child publish vào cùng LiveKit room. Provision lặp lại cũng là repair signal an toàn;
+Supervisor xử lý no-op nếu Child tương ứng đã tồn tại. Recovery này không reschedule sang host
+khác và phụ thuộc publisher token chưa hết TTL.
+
 ## 15. Security
 
 - UDS directory `0700` và socket chỉ service UID truy cập.
@@ -1039,6 +1069,8 @@ src/personaforge_worker/
 - Per-session bounded queue; Master không await playback.
 - Redis inflight, `XAUTOCLAIM`, idempotency và DLQ.
 - Priority cancel/stop và Master restart reconciliation.
+- Đã triển khai recovery cùng Worker identity dựa trên persisted start specification và boot
+  fencing; `XAUTOCLAIM`, DLQ và cross-worker reschedule vẫn là target.
 
 ### Giai đoạn 3 — Multi-GPU scheduling
 

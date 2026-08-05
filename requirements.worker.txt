@@ -2,4 +2,7 @@ aiortc>=1.13,<2
 av>=14,<16
 httpx>=0.28,<1
 livekit>=1.0,<2
+nvitop>=1.5,<2
+grpcio>=1.81.1,<2
+protobuf>=6.33.5,<7
 redis>=5.2,<7

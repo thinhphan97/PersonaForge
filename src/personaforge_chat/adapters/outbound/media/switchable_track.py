@@ -256,6 +256,65 @@ def draw_sync_flash(frame: VideoFrame) -> VideoFrame:
     return output
 
 
+def draw_debug_overlays_rgba(
+    data: bytes,
+    width: int,
+    height: int,
+    frame_number: int,
+    sync_flash: bool,
+) -> bytes:
+    """Stamp the stable output counter directly on packed RGBA without color conversion."""
+    expected = width * height * 4
+    if len(data) != expected:
+        raise ValueError("Packed RGBA data does not match frame dimensions")
+    pixels = bytearray(data)
+    label = f"{frame_number:06d}"
+    glyph_width = 5 * FRAME_NUMBER_SCALE
+    glyph_height = 7 * FRAME_NUMBER_SCALE
+    spacing = FRAME_NUMBER_SCALE
+    box_width = len(label) * (glyph_width + spacing) + spacing
+    box_height = glyph_height + spacing * 2
+    _fill_rgba_rect(
+        pixels,
+        width,
+        height,
+        FRAME_NUMBER_X,
+        FRAME_NUMBER_Y,
+        box_width,
+        box_height,
+        16,
+    )
+    cursor_x = FRAME_NUMBER_X + spacing
+    cursor_y = FRAME_NUMBER_Y + spacing
+    for character in label:
+        for row_index, row in enumerate(DIGIT_BITMAPS[character]):
+            for column_index, enabled in enumerate(row):
+                if enabled == "1":
+                    _fill_rgba_rect(
+                        pixels,
+                        width,
+                        height,
+                        cursor_x + column_index * FRAME_NUMBER_SCALE,
+                        cursor_y + row_index * FRAME_NUMBER_SCALE,
+                        FRAME_NUMBER_SCALE,
+                        FRAME_NUMBER_SCALE,
+                        235,
+                    )
+        cursor_x += glyph_width + spacing
+    if sync_flash:
+        _fill_rgba_rect(
+            pixels,
+            width,
+            height,
+            width - SYNC_FLASH_SIZE - SYNC_FLASH_MARGIN,
+            SYNC_FLASH_MARGIN,
+            SYNC_FLASH_SIZE,
+            SYNC_FLASH_SIZE,
+            235,
+        )
+    return bytes(pixels)
+
+
 def _fill_luma_rect(
     pixels: bytearray,
     stride: int,
@@ -276,4 +335,27 @@ def _fill_luma_rect(
     row_value = bytes([value]) * (right - left)
     for row in range(top, bottom):
         start = row * stride + left
+        pixels[start : start + len(row_value)] = row_value
+
+
+def _fill_rgba_rect(
+    pixels: bytearray,
+    frame_width: int,
+    frame_height: int,
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    value: int,
+) -> None:
+    left = max(0, x)
+    top = max(0, y)
+    right = min(frame_width, x + width)
+    bottom = min(frame_height, y + height)
+    if left >= right or top >= bottom:
+        return
+    row_value = bytes((value, value, value, 255)) * (right - left)
+    stride = frame_width * 4
+    for row in range(top, bottom):
+        start = row * stride + left * 4
         pixels[start : start + len(row_value)] = row_value

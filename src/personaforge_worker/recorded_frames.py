@@ -26,7 +26,7 @@ class LoopingRecordedFrameSource:
     def next_frame(
         self,
         state: AvatarState,
-        frame_number: int,
+        frame_number: int | None,
         sync_flash: bool,
     ) -> VideoFrame:
         if state is not self._state or self._frames is None:
@@ -40,7 +40,8 @@ class LoopingRecordedFrameSource:
             frame = next(self._frames)
 
         output = frame.reformat(width=self._width, height=self._height, format="yuv420p")
-        output = draw_frame_number(output, frame_number)
+        if frame_number is not None:
+            output = draw_frame_number(output, frame_number)
         if sync_flash:
             output = draw_sync_flash(output)
         return output

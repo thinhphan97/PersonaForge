@@ -19,6 +19,7 @@ dependencies = [
     "httpx>=0.28,<1",
     "livekit>=1.0,<2",
     "livekit-api>=1.0,<2",
+    "nvitop>=1.5,<2",
     "pydantic>=2.10,<3",
     "protobuf>=6.33.5,<7",
     "pwdlib[argon2]>=0.3,<1",
@@ -50,7 +51,10 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-extend-exclude = ["src/personaforge/agent/v1/*_pb2*.py"]
+extend-exclude = [
+    "src/personaforge/agent/v1/*_pb2*.py",
+    "src/personaforge/worker/v1/*_pb2*.py",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
@@ -65,7 +69,11 @@ module = ["grpc", "grpc.*", "grpc_health", "grpc_health.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["personaforge.agent.v1.*"]
+module = ["nvitop", "nvitop.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["personaforge.agent.v1.*", "personaforge.worker.v1.*"]
 ignore_errors = true
 
 [[tool.mypy.overrides]]
@@ -73,5 +81,9 @@ module = [
     "personaforge_chat.adapters.outbound.agent_runtime",
     "personaforge_agent.adapters.inbound.grpc_service",
     "personaforge_agent.main",
+    "personaforge_worker.ipc.messages",
+    "personaforge_worker.master.child_server",
+    "personaforge_worker.master.supervisor",
+    "personaforge_worker.child.runtime",
 ]
 ignore_errors = true

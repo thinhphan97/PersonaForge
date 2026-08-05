@@ -8,6 +8,11 @@ from av import VideoFrame as AvVideoFrame
 from livekit import rtc
 
 from personaforge_chat.adapters.outbound.media.recorded_source import RecordedCharacterCatalog
+from personaforge_chat.adapters.outbound.media.switchable_track import (
+    draw_debug_overlays_rgba,
+    draw_frame_number,
+    draw_sync_flash,
+)
 from personaforge_chat.domain.models import AvatarState
 from personaforge_worker.adapters.outbound.queued_media import (
     QueuedMediaPublisher,
@@ -198,13 +203,19 @@ class LiveKitRenderSession:
             await self._speech_pipeline.start()
             self._pipeline_started = True
             await self._speech_pipeline.wait_ready()
+            first_frame = await asyncio.to_thread(
+                recorded.next_frame,
+                AvatarState.IDLE,
+                None,
+                self._is_sync_pulse(0),
+            )
             self._ready.set()
             logger.info(
                 "LiveKit media ready session=%s character=%s",
                 self.session_id,
                 self.character_id,
             )
-            await self._publish_timeline(synchronizer, recorded)
+            await self._publish_timeline(synchronizer, recorded, first_frame)
         except Exception as exc:
             self._startup_error = exc
             raise
@@ -228,6 +239,7 @@ class LiveKitRenderSession:
         self,
         synchronizer: rtc.AVSynchronizer,
         recorded: LoopingRecordedFrameSource,
+        first_frame: AvVideoFrame,
     ) -> None:
         settings = self._settings
         samples_per_audio_frame = round(
@@ -245,17 +257,30 @@ class LiveKitRenderSession:
             while next_video_time <= audio_start + 1e-9:
                 video_delivery = self._media_publisher.pop_video()
                 try:
-                    video_frame = (
-                        _to_livekit_timed_video_frame(video_delivery.frame)
-                        if video_delivery is not None
-                        else _to_livekit_video_frame(
-                            recorded.next_frame(
-                                self._state,
-                                video_frame_number + 1,
-                                self._is_sync_pulse(next_video_time),
-                            )
+                    sync_pulse = self._is_sync_pulse(next_video_time)
+                    if video_delivery is not None:
+                        video_frame = _to_livekit_timed_video_frame(
+                            video_delivery.frame,
+                            video_frame_number + 1,
+                            sync_pulse,
                         )
-                    )
+                    elif video_frame_number == 0:
+                        output = first_frame
+                        output = draw_frame_number(output, video_frame_number + 1)
+                        if sync_pulse:
+                            output = draw_sync_flash(output)
+                        video_frame = _to_livekit_video_frame(output)
+                    else:
+                        output = await asyncio.to_thread(
+                            recorded.next_frame,
+                            self._state,
+                            None,
+                            False,
+                        )
+                        output = draw_frame_number(output, video_frame_number + 1)
+                        if sync_pulse:
+                            output = draw_sync_flash(output)
+                        video_frame = _to_livekit_video_frame(output)
                     await synchronizer.push(video_frame, timestamp=next_video_time)
                 except BaseException as exc:
                     if video_delivery is not None:
@@ -333,15 +358,26 @@ def _to_livekit_video_frame(frame: AvVideoFrame) -> rtc.VideoFrame:
     )
 
 
-def _to_livekit_timed_video_frame(frame: TimedVideoFrame) -> rtc.VideoFrame:
+def _to_livekit_timed_video_frame(
+    frame: TimedVideoFrame,
+    frame_number: int,
+    sync_flash: bool,
+) -> rtc.VideoFrame:
     expected = frame.width * frame.height * 4
     if len(frame.data) != expected:
         raise ValueError("Lip-sync RGBA frame does not match its declared resolution")
+    decorated = draw_debug_overlays_rgba(
+        frame.data,
+        frame.width,
+        frame.height,
+        frame_number,
+        sync_flash,
+    )
     return rtc.VideoFrame(
         frame.width,
         frame.height,
         rtc.VideoBufferType.RGBA,
-        frame.data,
+        decorated,
     )
 
 

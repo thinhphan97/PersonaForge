@@ -2,15 +2,15 @@
 
 > Trạng thái: Worker Core DTO/ports, bounded multi-reader audio timeline, composite slot manager,
 > deterministic TTS/lip-sync adapters, queued LiveKit publisher và speech command đã được triển
-> khai end-to-end. Worker cũng report GPU snapshot từ `nvidia-smi`; model GPU thật, per-session
-> CUDA profiler và execution coordinator vẫn là target tiếp theo.
+> khai end-to-end. Worker Master–Child và `nvitop` resource adapter đã được triển khai; model GPU
+> thật, per-session CUDA profiler và execution coordinator vẫn là target tiếp theo.
 
-Resource monitoring target đã chốt dùng public API của `nvitop` để thay subprocess
-`nvidia-smi`, bao gồm host CPU/RAM, device metric và process metric theo Child PID. Thay đổi này
-nằm trong outbound adapter; Worker Core không phụ thuộc `nvitop`.
+Resource monitoring dùng public API của `nvitop` thay subprocess `nvidia-smi`, bao gồm host
+CPU/RAM, device metric và process metric theo Child PID. Thay đổi này nằm trong outbound adapter;
+Worker Core không phụ thuộc `nvitop`.
 
-Target process topology đã chốt dùng Worker Master đọc Redis và Composite Child giao tiếp bằng
-gRPC bidirectional stream qua Unix Domain Socket. Xem
+Process topology dùng Worker Master đọc Redis và Composite Child giao tiếp bằng gRPC
+bidirectional stream qua Unix Domain Socket. Xem
 [`worker-master-child-grpc.md`](worker-master-child-grpc.md). Các domain DTO/ports trong tài liệu
 này tiếp tục được dùng bên trong Child và không phụ thuộc transport gRPC.
 
@@ -510,9 +510,9 @@ E2E test với model thật chỉ dùng cho integration/performance, không thay
 
 Đã có:
 
-- `RedisRenderWorker` làm inbound command consumer.
-- Session manager quản lý render task theo session.
-- `LiveKitRenderSession` giữ stable publisher và clocked media loop.
+- `RedisRenderWorker` chạy vai trò Master và là inbound command consumer duy nhất.
+- Master supervisor quản lý một Composite Child subprocess cho mỗi session.
+- Mỗi Child sở hữu `LiveKitRenderSession`, stable publisher và clocked media loop.
 - Recorded frame source cho idle/thinking; silence/beep chỉ là fallback/debug.
 
 Đã bổ sung trong feature Control/Composite Worker:
@@ -522,11 +522,9 @@ E2E test với model thật chỉ dùng cho integration/performance, không thay
 - Composite slot manager có lease token và generation fencing.
 - Scripted TTS và deterministic recorded-clip lip-sync chạy qua `CompositeSpeechPipeline`.
 - Queued media publisher chỉ hoàn tất frame sau LiveKit loop acknowledge.
-- Speech command đi từ Core qua Control/Redis đến LiveKit Worker.
-- `nvidia-smi`/configured GPU probe và Redis heartbeat cho Control inventory/scheduler.
-
-Target tiếp theo thay probe trên bằng `NvitopResourceProbeAdapter`; giữ nguyên
-`GpuHardwareProbePort`/resource DTO để không ảnh hưởng application core.
+- Speech command đi từ Core qua Control/Redis, Master và gRPC UDS tới Composite Child.
+- `NvitopResourceProbe`/configured fallback và Redis heartbeat cho Control inventory/scheduler.
+- Host/GPU/process telemetry theo các managed Child PID.
 
 Chưa có:
 
@@ -537,7 +535,7 @@ Chưa có:
 Lộ trình an toàn:
 
 1. Implement model runtime adapters qua các port hiện tại.
-2. Nối local `CompositeSlotManager` vào Redis Worker runtime.
+2. Thay local admission guard bằng reservation ledger bền vững và reconcile với Control.
 3. Thêm native resampler và GPU execution coordinator.
 4. Instrument VRAM/RTF/FPS/A-V drift theo session.
 5. Benchmark composite profile trước khi bật GPU admission thật.

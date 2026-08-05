@@ -266,6 +266,8 @@ class RedisControlPlane:
             ex=ttl,
         )
         pipeline.sadd("personaforge:control:assignments", lease.session_id)
+        pipeline.expire(_recovery_start_key(lease.session_id), ttl * 2)
+        pipeline.expire(_recovery_boot_key(lease.session_id), ttl * 2)
         await pipeline.execute()
 
     async def delete(self, session_id: str, lease_token: str, generation: int) -> bool:
@@ -279,6 +281,10 @@ class RedisControlPlane:
         )
         if result:
             await _srem(self._redis, "personaforge:control:assignments", session_id)
+            await self._redis.delete(
+                _recovery_start_key(session_id),
+                _recovery_boot_key(session_id),
+            )
         return bool(result)
 
     async def start(
@@ -287,19 +293,34 @@ class RedisControlPlane:
         requirement: CompositeRequirement,
         payload: dict[str, object],
     ) -> None:
+        start_payload = {
+            **payload,
+            "character_id": requirement.character_id,
+            "avatar_model_id": requirement.avatar_model_id,
+            "tts_model_id": requirement.tts_model_id,
+            "runtime": requirement.runtime,
+            "resolution": requirement.resolution,
+            "fps": requirement.fps,
+        }
+        ttl = max(1, round(self._slot_lease_ttl.total_seconds() * 2))
+        await self._redis.set(
+            _recovery_start_key(lease.session_id),
+            json.dumps(start_payload),
+            ex=ttl,
+        )
         await self._command(
             lease,
             "avatar.session.start",
-            {
-                **payload,
-                "character_id": requirement.character_id,
-                "avatar_model_id": requirement.avatar_model_id,
-                "tts_model_id": requirement.tts_model_id,
-                "runtime": requirement.runtime,
-                "resolution": requirement.resolution,
-                "fps": requirement.fps,
-            },
+            start_payload,
         )
+        heartbeat_raw = await self._redis.get(_heartbeat_key(lease.worker_id))
+        boot_id = _boot_id_from_heartbeat(heartbeat_raw)
+        if boot_id is not None:
+            await self._redis.set(
+                _recovery_boot_key(lease.session_id),
+                boot_id,
+                ex=ttl,
+            )
 
     async def stop(self, lease: CompositeSlotLease) -> None:
         await self._command(lease, "avatar.session.stop", {})
@@ -377,7 +398,10 @@ class RedisControlPlane:
                             session_id,
                         )
                         continue
-                    if await _exists(self._redis, _heartbeat_key(lease.worker_id)):
+                    heartbeat_raw = await self._redis.get(
+                        _heartbeat_key(lease.worker_id)
+                    )
+                    if heartbeat_raw is not None:
                         renewed = await self.renew(
                             lease,
                             _utc_now(),
@@ -385,6 +409,7 @@ class RedisControlPlane:
                         )
                         if renewed is not None:
                             await self.save(renewed)
+                            await self._recover_for_worker_boot(renewed, heartbeat_raw)
                             continue
                     await self.release(lease)
                     await self.delete(
@@ -397,6 +422,42 @@ class RedisControlPlane:
             except Exception:
                 logger.exception("Composite slot reconciliation failed")
             await asyncio.sleep(interval)
+
+    async def _recover_for_worker_boot(
+        self,
+        lease: CompositeSlotLease,
+        heartbeat_raw: str,
+    ) -> None:
+        boot_id = _boot_id_from_heartbeat(heartbeat_raw)
+        if boot_id is None:
+            return
+        recovery_boot = await self._redis.get(_recovery_boot_key(lease.session_id))
+        if recovery_boot == boot_id:
+            return
+        start_raw = await self._redis.get(_recovery_start_key(lease.session_id))
+        if start_raw is None:
+            logger.warning(
+                "Cannot recover session without start specification session=%s worker=%s",
+                lease.session_id,
+                lease.worker_id,
+            )
+            return
+        start_payload = json.loads(start_raw)
+        if not isinstance(start_payload, dict):
+            raise ValueError("Composite recovery start payload must be an object")
+        await self._command(lease, "avatar.session.start", start_payload)
+        ttl = max(1, round(self._slot_lease_ttl.total_seconds() * 2))
+        await self._redis.set(
+            _recovery_boot_key(lease.session_id),
+            boot_id,
+            ex=ttl,
+        )
+        logger.info(
+            "Reissued composite start after worker restart session=%s worker=%s boot=%s",
+            lease.session_id,
+            lease.worker_id,
+            boot_id,
+        )
 
 
 def _utc_now() -> datetime:
@@ -453,6 +514,22 @@ def _generation_key(session_id: str) -> str:
 
 def _assignment_key(session_id: str) -> str:
     return f"personaforge:control:assignment:{session_id}"
+
+
+def _recovery_start_key(session_id: str) -> str:
+    return f"personaforge:control:recovery-start:{session_id}"
+
+
+def _recovery_boot_key(session_id: str) -> str:
+    return f"personaforge:control:recovery-boot:{session_id}"
+
+
+def _boot_id_from_heartbeat(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    data = json.loads(raw)
+    boot_id = data.get("boot_id") if isinstance(data, dict) else None
+    return boot_id if isinstance(boot_id, str) and boot_id else None
 
 
 def _compute_capability(value: str) -> tuple[int, int]:

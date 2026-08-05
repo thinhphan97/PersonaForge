@@ -9,13 +9,13 @@ from personaforge_worker.domain.media import LipSyncRenderRequest, PixelFormat
 
 class FakeRecordedSource:
     def __init__(self) -> None:
-        self.calls: list[tuple[AvatarState, int, bool]] = []
+        self.calls: list[tuple[AvatarState, int | None, bool]] = []
         self.closed = False
 
     def next_frame(
         self,
         state: AvatarState,
-        frame_number: int,
+        frame_number: int | None,
         sync_flash: bool,
     ) -> VideoFrame:
         self.calls.append((state, frame_number, sync_flash))
@@ -44,7 +44,9 @@ async def test_recorded_lipsync_uses_speaking_clip_pixels() -> None:
         )
     )
 
-    assert source.calls == [(AvatarState.SPEAKING, 5, False)]
+    # The stable LiveKit output owns the monotonic debug counter. A clip/lip-sync source must
+    # not stamp its own per-utterance counter, otherwise speaking appears to restart at zero.
+    assert source.calls == [(AvatarState.SPEAKING, None, False)]
     assert output.pixel_format is PixelFormat.RGBA
     assert output.width == 8
     assert output.height == 4

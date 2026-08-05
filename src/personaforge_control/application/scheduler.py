@@ -36,6 +36,10 @@ class CompositeScheduler:
         current = await self._assignments.get(requirement.session_id)
         now = self._clock.now()
         if current is not None and current.expires_at > now:
+            # Provision is also a repair signal. Re-emitting the fenced start command is safe:
+            # an existing Child treats the same lease/generation as idempotent, while a freshly
+            # restarted Worker can recreate the missing Child and LiveKit publisher.
+            await self._commands.start(current, requirement, media_payload)
             return current
 
         candidates = await self._registry.candidates(requirement, now)
