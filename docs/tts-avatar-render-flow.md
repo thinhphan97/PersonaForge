@@ -537,7 +537,7 @@ Sau đó worker dùng credential vừa nhận để giao tiếp trực tiếp v�
 sequenceDiagram
     autonumber
     participant W as Persona Render Worker
-    participant N as NVML
+    participant N as nvitop Device API
     participant F as Local state
     participant E as Registration Service
     participant R as Redis
@@ -565,7 +565,7 @@ Thứ tự resolve ID:
 
 1. Nếu có `AVATAR_WORKER_ID`, worker đề xuất chính ID đã cấu hình.
 2. Nếu không có, đọc `AVATAR_HOST_ID`; nếu thiếu thì tạo host fingerprint ổn định.
-3. Lấy GPU UUID từ NVML, không dùng GPU index làm định danh toàn cục.
+3. Lấy GPU UUID từ `nvitop.Device.uuid()`, không dùng GPU index làm định danh toàn cục.
 4. Đọc instance UUID theo GPU từ persistent state; nếu chưa có thì sinh và ghi lại.
 5. Ghép thành `{host_id}:{gpu_uuid}:{worker_instance_id}`.
 6. Registration Service chuẩn hóa, kiểm tra collision và trả canonical worker ID.
@@ -949,7 +949,10 @@ namespace được giữ để có thể thay transport sau này.
 
 ### 11.4. Heartbeat và tải động
 
-Worker đọc GPU telemetry qua NVML binding, ví dụ `pynvml`, rồi heartbeat mỗi vài giây:
+Target Worker Master đọc telemetry bằng public API của `nvitop`, không spawn command
+`nvidia-smi`. Adapter lấy host CPU/RAM qua `nvitop.host`, GPU inventory/VRAM/utilization/nhiệt
+độ/power qua `Device`, và tài nguyên từng Composite Child qua `Device.processes()`, `GpuProcess`
+cùng `HostProcess(pid)`. Domain/Scheduler chỉ nhận DTO trung lập. Worker heartbeat mỗi vài giây:
 
 ```json
 {
@@ -960,6 +963,9 @@ Worker đọc GPU telemetry qua NVML binding, ví dụ `pynvml`, rồi heartbeat
   "reserved_slots": 1,
   "active_speaking_slots": 1,
   "reserved_gpu_duty_cycle": 0.72,
+  "host_cpu_utilization_percent": 37.2,
+  "host_ram_used_mb": 65536,
+  "host_ram_available_mb": 61440,
   "gpu_utilization_percent": 67,
   "gpu_memory_used_mb": 14120,
   "gpu_memory_free_mb": 8914,
@@ -1132,14 +1138,16 @@ Mục tiêu tracking là trả lời được bốn câu hỏi:
 
 | Lớp | Nguồn | Độ chính xác và mục đích |
 |---|---|---|
-| GPU/worker | NVML | VRAM tổng, utilization, power, temperature, clocks, encoder load |
-| Process | NVML process accounting | VRAM theo PID; chính xác khi một slot chạy một subprocess |
+| Host | `nvitop.host` | CPU, load average, RAM/swap tổng/used/available |
+| GPU/worker | `nvitop.Device` | VRAM, utilization, power, temperature, clocks, encoder/decoder và PCIe |
+| Process | `GpuProcess` + `HostProcess(pid)` | GPU memory/SM và host RSS/CPU theo managed Child PID |
 | Composite session | TTS/Avatar instrumentation và CUDA events | Load delta, peak, GPU time, TTS RTF, FPS, buffer và queue delay |
 
-NVML thường chỉ quy thuộc VRAM chắc chắn tới process, không biết tensor nào thuộc session nào.
+`nvitop` dùng thông tin NVML để quy thuộc GPU memory/utilization tới process, nhưng vẫn không biết
+tensor nào thuộc session nào.
 Nếu nhiều composite session nằm trong cùng một Python process, `process_used_vram` không thể
-chia chính xác cho từng session chỉ bằng NVML. Worker phải instrument tại boundary load/render hoặc
-chạy subprocess-per-slot khi yêu cầu billing/isolation chính xác.
+chia chính xác cho từng session chỉ bằng process accounting. Worker phải instrument tại boundary
+load/render hoặc chạy subprocess-per-slot khi yêu cầu billing/isolation chính xác.
 
 ### 12.2. Instrument một composite session
 
@@ -1363,7 +1371,8 @@ composite_resource_samples
   oom
 ```
 
-Với subprocess-per-composite, NVML map PID sang VRAM nên attribution tương đối rõ:
+Với subprocess-per-composite, `nvitop.Device.processes()` map PID sang `GpuProcess` nên
+attribution tương đối rõ:
 
 ```text
 attributed_vram = process_vram - process_baseline_before_model_load
@@ -1450,7 +1459,7 @@ model/runtime revision tạo profile key mới, không ghi đè profile của re
 
 ```mermaid
 flowchart LR
-    NVML[NVML sampler]
+    Nvitop[nvitop resource adapter]
     Runtime[TTS and Avatar instrumentation]
     Tracker[Persona resource tracker]
     Master[Worker Master]
@@ -1463,7 +1472,7 @@ flowchart LR
     Profiles[(PostgreSQL resource profiles)]
     Scheduler[GPU scheduler]
 
-    NVML --> Tracker
+    Nvitop --> Tracker
     Runtime --> Tracker
     Tracker --> Master
     Master --> Ingest
@@ -1516,7 +1525,8 @@ backpressure lên media loop.
 ### 12.9. Khi nào cần subprocess hoặc MIG
 
 - Một process/GPU, nhiều session context: ít overhead nhất nhưng VRAM theo session là estimate.
-- Một subprocess/slot: NVML map PID sang VRAM rõ hơn và giải phóng CUDA context chắc chắn hơn,
+- Một subprocess/slot: `nvitop` map PID sang GPU/host resource rõ hơn và giải phóng CUDA context
+  chắc chắn hơn,
   đổi lại tốn thêm CUDA context memory và IPC.
 - Một MIG instance/worker: isolation VRAM/compute mạnh nhất nhưng capacity cố định và chỉ dùng
   được trên GPU hỗ trợ MIG.
@@ -1543,7 +1553,8 @@ Khi tích hợp model, giữ nguyên Core port và command boundary, sau đó tr
 3. Thêm resampler native và GPU execution coordinator; multi-reader timeline đã có.
 4. Nối local `CompositeSlotManager` vào Redis Worker runtime thay `RenderSessionManager` cũ.
 5. Bổ sung provision bất đồng bộ và progress event khi download/load/connect.
-6. Thêm NVML/DCGM per-session tracker và observed resource profile cho scheduler.
+6. Thêm `nvitop` host/GPU/PID tracker, CUDA per-session instrumentation và observed resource
+   profile cho scheduler.
 
 ## 14. Review kiến trúc và ranh giới triển khai
 
@@ -1586,7 +1597,7 @@ flowchart LR
     Worker --> LiveKit
 ```
 
-Core domain/application không import Redis ACL, NVML, CUDA hoặc LiveKit SDK. Enrollment,
+Core domain/application không import Redis ACL, `nvitop`, NVML, CUDA hoặc LiveKit SDK. Enrollment,
 credential issuance, GPU probing và Redis communication là outbound/inbound adapter quanh các
 application port. Thay Redis OSS bằng managed Redis API hoặc thay recorded renderer bằng model
 GPU không làm đổi chat/session business rules.
@@ -1684,7 +1695,7 @@ RedisOssAclCredentialIssuer
 ManagedRedisCredentialIssuer
 RedisWorkerRegistry
 RedisCompositeSlotAllocator
-NvmlGpuProbe
+NvitopResourceProbeAdapter
 LocalGpuTtsRuntimeFactory
 RecordedAvatarModelFactory
 GpuAvatarModelFactory
@@ -1725,7 +1736,9 @@ Vẫn chưa triển khai:
 
 - TTS/Avatar GPU runtime factories thật và GPU execution coordinator.
 - Artifact registry, signed download, checksum và local NVMe cache.
-- NVML/DCGM native adapter, CUDA per-session measurement và observed resource profile store.
+- `nvitop` public-API adapter cho host/GPU/managed PID, CUDA per-session measurement và observed
+  resource profile store. Adapter subprocess `nvidia-smi` hiện tại sẽ bị thay thế, không giữ làm
+  production probe.
 - Progress state đầy đủ `downloading/model-loading/connecting` và asynchronous `202` UI flow.
 - Redis/Scheduler HA, subprocess-per-slot/MIG và production telemetry pipeline.
 
@@ -1762,14 +1775,20 @@ trước khi triển khai security/model runtime thật.
 
 ## 15. Runbook đăng ký Persona Render Worker hiện tại
 
-### 15.1. Chọn chế độ GPU probe
+### 15.1. Chọn Resource Probe target
+
+> Target đã chốt dùng `nvitop` public API. Source hiện tại vẫn còn adapter subprocess
+> `nvidia-smi`; các biến `PERSONA_RESOURCE_*` dưới đây có hiệu lực sau khi triển khai migration
+> adapter và không được mô tả như tính năng runtime đã hoàn thành.
 
 ```env
-# auto: gọi nvidia-smi; nếu container không thấy GPU thì dùng giá trị config và báo probe_error.
-# nvidia-smi: worker fail-fast nếu không crawl được GPU.
-# configured: không chạy command hệ thống, phù hợp demo CPU/CI.
-AVATAR_GPU_PROBE_PROVIDER=auto
-AVATAR_GPU_PROBE_TIMEOUT_SECONDS=3
+# auto: dùng nvitop khi NVML khả dụng; nếu không thì configured fallback có đánh dấu degraded.
+# nvitop: production GPU mode, fail readiness nếu không đọc được inventory.
+# configured: demo CPU/CI, không tạo observed metric giả.
+PERSONA_RESOURCE_PROBE_PROVIDER=auto
+PERSONA_RESOURCE_PROBE_TIMEOUT_SECONDS=3
+PERSONA_RESOURCE_SAMPLE_INTERVAL_SECONDS=5
+PERSONA_CHILD_RESOURCE_SAMPLE_INTERVAL_SECONDS=2
 AVATAR_GPU_RESERVE_VRAM_MB=512
 
 # Để rỗng thì worker ID được sinh ổn định từ host_id + GPU UUID + instance ID.
@@ -1779,11 +1798,11 @@ AVATAR_HOST_ID=gpu-host-a
 
 Repo cung cấp hai image Worker độc lập:
 
-- `Dockerfile.worker`: `python:3.10-slim`, dùng cho fake pipeline CPU, local và CI. Image này có
-  thể gọi `nvidia-smi` khi NVIDIA Container Toolkit inject utility/driver vào container, nhưng
-  không có CUDA/cuDNN để chạy model.
+- `Dockerfile.worker`: `python:3.10-slim`, dùng cho fake pipeline CPU, local và CI. Python image
+  có thể cài `nvitop`, nhưng chỉ đọc được GPU khi NVIDIA Container Toolkit inject driver/NVML;
+  image không có CUDA/cuDNN để chạy model.
 - `Dockerfile.worker.gpu`: CUDA + cuDNN runtime cho NVIDIA GPU. `compose.gpu.yaml` tự override
-  image Worker CPU và cấp GPU device cho container.
+  image Worker CPU, cấp GPU device và cung cấp NVML cho `nvitop`.
 
 Host GPU cần cài NVIDIA driver và NVIDIA Container Toolkit. Kiểm tra trước khi start:
 
@@ -1797,7 +1816,7 @@ CUDA base image có thể đổi để khớp framework/model:
 WORKER_CUDA_IMAGE=nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 NVIDIA_VISIBLE_DEVICES=all
 NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
-GPU_AVATAR_GPU_PROBE_PROVIDER=nvidia-smi
+PERSONA_RESOURCE_PROBE_PROVIDER=nvitop
 ```
 
 File `compose.gpu.yaml` đã có trong repo và có cấu hình tương đương:
@@ -1884,10 +1903,11 @@ Các trường cần kiểm tra:
 
 - registration `status=ready` và có `heartbeat`;
 - `capabilities.gpu_uuid`, compute capability và schedulable VRAM đúng GPU;
-- `heartbeat.hardware_source=nvidia-smi` trên GPU host;
-- `free_vram_mb`, `gpu_used_vram_mb`, `gpu_utilization`, temperature và power thay đổi theo tải;
-- nếu `hardware_source=configured-fallback`, đọc `hardware_probe_error` và kiểm tra GPU device,
-  NVIDIA Container Toolkit cùng quyền thực thi `nvidia-smi`.
+- `heartbeat.hardware_source=nvitop` trên GPU host;
+- host CPU/RAM và GPU VRAM/utilization/temperature/power thay đổi theo tải;
+- mỗi Child PID có host RSS/CPU và GPU memory/SM utilization khi driver hỗ trợ;
+- nếu `hardware_source=configured`, đọc `probe_errors`, kiểm tra GPU device, PID namespace và
+  NVIDIA Container Toolkit/NVML availability.
 
 Heartbeat được lưu Redis với TTL, không nằm trong RAM Control Service. Scheduler loại worker khi
 heartbeat hết hạn hoặc free VRAM nhỏ hơn `peak_vram_mb` của persona requirement.

@@ -5,6 +5,10 @@
 > khai end-to-end. Worker cũng report GPU snapshot từ `nvidia-smi`; model GPU thật, per-session
 > CUDA profiler và execution coordinator vẫn là target tiếp theo.
 
+Resource monitoring target đã chốt dùng public API của `nvitop` để thay subprocess
+`nvidia-smi`, bao gồm host CPU/RAM, device metric và process metric theo Child PID. Thay đổi này
+nằm trong outbound adapter; Worker Core không phụ thuộc `nvitop`.
+
 Target process topology đã chốt dùng Worker Master đọc Redis và Composite Child giao tiếp bằng
 gRPC bidirectional stream qua Unix Domain Socket. Xem
 [`worker-master-child-grpc.md`](worker-master-child-grpc.md). Các domain DTO/ports trong tài liệu
@@ -54,7 +58,7 @@ flowchart LR
         LipImpl[Torch ONNX TensorRT lip-sync]
         LiveKit[LiveKit publisher]
         Storage[Object storage and disk cache]
-        Telemetry[NVML and telemetry]
+        Telemetry[nvitop and runtime telemetry]
     end
 
     Redis --> Session
@@ -377,7 +381,7 @@ tương đương; lifecycle semantics không đổi.
 | Canonicalizer adapter | Resample, normalize và rechunk đúng format | Tự thay timeline offset |
 | LiveKit adapter | Convert DTO sang SDK frame, publish track, report transport error | Chọn model hoặc sửa business state |
 | Redis inbound adapter | Parse/validate schema và gọi use case | Chạy model hoặc đưa PCM vào Redis |
-| Resource adapter | Đo NVML/runtime và export telemetry | Tạo backpressure lên inference/media |
+| Resource adapter | Đo host/GPU/PID bằng `nvitop`, nhận runtime metric và export telemetry | Tạo backpressure lên inference/media |
 
 Worker Core sở hữu policy; adapter sở hữu framework-specific mechanism.
 
@@ -520,6 +524,9 @@ E2E test với model thật chỉ dùng cho integration/performance, không thay
 - Queued media publisher chỉ hoàn tất frame sau LiveKit loop acknowledge.
 - Speech command đi từ Core qua Control/Redis đến LiveKit Worker.
 - `nvidia-smi`/configured GPU probe và Redis heartbeat cho Control inventory/scheduler.
+
+Target tiếp theo thay probe trên bằng `NvitopResourceProbeAdapter`; giữ nguyên
+`GpuHardwareProbePort`/resource DTO để không ảnh hưởng application core.
 
 Chưa có:
 

@@ -118,6 +118,11 @@ Control Plane và lấy assignment durable từ Redis.
 - Worker crawl GPU bằng `nvidia-smi` mỗi heartbeat và report live VRAM/utilization/temperature/
   power; `auto` fallback về configured snapshot khi demo không có GPU.
 
+Target monitoring đã chốt thay subprocess `nvidia-smi` bằng public API của `nvitop`: Worker
+Master thu host CPU/RAM, GPU VRAM/utilization/temperature/power và host/GPU resource theo từng
+managed Child PID. Đây là migration target, chưa phải trạng thái source hiện tại; chi tiết xem
+[`worker-master-child-grpc.md`](worker-master-child-grpc.md#131-resource-collector-dùng-nvitop).
+
 Model TTS/lip-sync thật chỉ cần implement application ports; không đổi chat/session business.
 
 ## 6. Chạy enrollment mode bằng Docker Compose

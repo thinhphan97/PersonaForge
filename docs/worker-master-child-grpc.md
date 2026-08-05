@@ -74,7 +74,7 @@ Master là host agent, không chạy model inference và không tạo CUDA conte
 - giữ Redis ACL username/password của worker;
 - đọc `avatar:commands:{worker_id}` bằng một consumer group;
 - reclaim pending message, retry và quản lý DLQ;
-- crawl GPU inventory bằng NVML hoặc `nvidia-smi`;
+- crawl host/GPU/process inventory bằng public API của `nvitop`;
 - gửi heartbeat tổng hợp theo GPU và child;
 - validate worker, GPU, lease token và generation;
 - local admission trước khi spawn child;
@@ -230,8 +230,8 @@ AssignmentReconciler
 RedisEventPublisher
 ```
 
-Không task nào được chạy inference, blocking `waitpid` hoặc blocking NVML call trên event loop.
-Dùng async subprocess và adapter/executor riêng cho blocking hardware probe.
+Không task nào được chạy inference, blocking `waitpid` hoặc blocking `nvitop`/NVML call trên
+event loop. Dùng async process API và bounded executor riêng cho hardware probe.
 
 ## 6. Ordering và backpressure
 
@@ -400,8 +400,8 @@ cold_peak = max(manifest_cold_peak, observed_p99_cold_peak) + cold_start_margin
 warm_incremental = max(manifest_warm_incremental, observed_p99_warm_incremental)
 ```
 
-Không lấy trực tiếp `nvidia-smi free memory` làm requirement vì giá trị đó không mô tả peak của
-composite sắp được load. Chi tiết lưu heartbeat, attribution và fallback profile nằm tại
+Không lấy trực tiếp `Device.memory_free()` làm requirement vì giá trị tức thời đó không mô tả
+peak của composite sắp được load. Chi tiết lưu heartbeat, attribution và fallback profile nằm tại
 [`tts-avatar-render-flow.md`, mục 12](tts-avatar-render-flow.md#12-tracking-vram-và-gpu-utilization-theo-composite-session).
 
 Với mode subprocess-per-composite ban đầu, Scheduler luôn dùng cold VRAM profile vì CUDA model
@@ -488,7 +488,7 @@ score = 0.25 * model_cache_affinity
 Quy tắc scoring:
 
 - cache affinity chỉ có điểm khi đúng model revision, precision và runtime;
-- VRAM/compute headroom tính từ reservation ledger, không từ một NVML sample;
+- VRAM/compute headroom tính từ reservation ledger, không từ một `nvitop` device sample;
 - runtime load headroom dùng utilization EWMA/p95 để tránh dao động do sample tức thời;
 - GPU vượt soft utilization threshold vẫn có thể là candidate nhưng bị giảm điểm;
 - recent OOM đưa GPU/resource profile vào cooldown, không retry ngay cùng cấu hình;
@@ -766,8 +766,161 @@ Child gửi heartbeat qua gRPC mỗi 1–2 giây:
 ```
 
 Master gửi heartbeat tổng hợp 3–5 giây một lần. Master kết hợp gRPC stream health, application
-heartbeat, PID/process health, NVML per-process memory, GPU health và LiveKit frame progress.
+heartbeat, PID/process health, `nvitop` per-process metrics, GPU health và LiveKit frame progress.
 Socket còn mở không có nghĩa model vẫn xử lý được.
+
+### 13.1. Resource collector dùng `nvitop`
+
+Target implementation không spawn command `nvidia-smi`. Outbound
+`NvitopResourceProbeAdapter` dùng public API của `nvitop`, trong khi domain và Scheduler chỉ nhận
+DTO trung lập. `nvitop` sử dụng NVML cho GPU và cung cấp host/process API tương thích psutil:
+
+```text
+Master
+  -> NvitopResourceProbeAdapter
+       -> nvitop.Device                 GPU inventory and device metrics
+       -> Device.processes()            PID to GpuProcess mapping
+       -> nvitop.GpuProcess             per-PID GPU metrics
+       -> nvitop.HostProcess            per-PID CPU and host RAM metrics
+       -> nvitop.host                   host CPU, RAM, load and boot data
+  -> neutral HostResourceSnapshot
+  -> heartbeat and telemetry stream
+```
+
+API được chọn:
+
+```python
+from nvitop import Device, GpuProcess, HostProcess, host
+
+devices = Device.all()
+device_snapshot = device.as_snapshot()
+gpu_processes = device.processes()
+child_gpu_process = gpu_processes.get(child_pid)
+child_host_process = HostProcess(child_pid)
+host_cpu = host.cpu_percent(interval=None)
+host_memory = host.virtual_memory()
+```
+
+Tham chiếu API chính thức:
+
+- [`Device` và `Device.processes()`](https://nvitop.readthedocs.io/en/stable/api/device.html);
+- [`GpuProcess` và `HostProcess`](https://nvitop.readthedocs.io/en/stable/api/process.html);
+- [`nvitop.host`](https://nvitop.readthedocs.io/en/stable/api/host.html).
+
+Không import `nvitop` vào application/domain core. Adapter map `nvitop.NA`, process đã thoát,
+`AccessDenied`, driver chưa load hoặc metric không được GPU hỗ trợ thành field `null` kèm
+`probe_errors`; tuyệt đối không đổi thành `0`, vì `0% utilization` và `không đo được` mang nghĩa
+khác nhau.
+
+### 13.2. Metric cấp host, GPU và Child PID
+
+Host snapshot:
+
+```json
+{
+  "cpu_utilization_percent": 37.2,
+  "cpu_count_logical": 32,
+  "load_average_1m": 5.8,
+  "ram_total_bytes": 137438953472,
+  "ram_used_bytes": 68719476736,
+  "ram_available_bytes": 64424509440,
+  "swap_used_bytes": 0
+}
+```
+
+Mỗi GPU snapshot:
+
+```json
+{
+  "gpu_uuid": "GPU-abc123",
+  "gpu_name": "NVIDIA L40S",
+  "gpu_index": 0,
+  "vram_total_bytes": 51527024640,
+  "vram_used_bytes": 19327352832,
+  "vram_free_bytes": 32199671808,
+  "gpu_utilization_percent": 63,
+  "memory_utilization_percent": 41,
+  "encoder_utilization_percent": 24,
+  "decoder_utilization_percent": 0,
+  "temperature_celsius": 68,
+  "power_usage_milliwatts": 188000,
+  "fan_speed_percent": 48,
+  "sm_clock_mhz": 1980,
+  "memory_clock_mhz": 9001,
+  "pcie_tx_bytes_per_second": 25165824,
+  "pcie_rx_bytes_per_second": 41943040
+}
+```
+
+Mỗi managed Child PID snapshot:
+
+```json
+{
+  "child_id": "child-01",
+  "session_id": "session-123",
+  "pid": 31240,
+  "gpu_uuid": "GPU-abc123",
+  "process_status": "running",
+  "cpu_utilization_percent": 82.4,
+  "host_rss_bytes": 4294967296,
+  "host_memory_percent": 3.1,
+  "gpu_memory_bytes": 6480199680,
+  "gpu_memory_percent": 12.6,
+  "gpu_sm_utilization_percent": 38,
+  "gpu_memory_utilization_percent": 22,
+  "gpu_encoder_utilization_percent": 17,
+  "gpu_decoder_utilization_percent": 0,
+  "running_time_seconds": 842.7
+}
+```
+
+Master chỉ crawl PID mà `ChildProcessSupervisor` sở hữu. Không gửi username, command line,
+environment hoặc file/socket list vào heartbeat vì có thể lộ secret/token. Mapping bắt buộc kiểm
+tra cả `pid + process_create_time + child_id`; PID đơn lẻ có thể được OS tái sử dụng sau khi Child
+thoát.
+
+### 13.3. Sampling và hiệu năng
+
+- Một `GpuInventoryCollector` duy nhất tạo snapshot cho tất cả GPU và PID trong một tick; không
+  cho mỗi Child tự query GPU driver qua `nvitop` song song.
+- Chạy blocking API trong bounded thread executor; timeout tick không được block gRPC, Redis hoặc
+  media loop.
+- Warm-up CPU counters trước khi sử dụng; lần đầu gọi non-blocking `cpu_percent()` có thể chưa có
+  khoảng thời gian để tính rate.
+- Device/HostProcess object có thể cache trong adapter, nhưng kết quả snapshot phải immutable và
+  gắn `sampled_at`.
+- Host/GPU sample 2–5 giây; Child process sample có thể 1–2 giây khi loading/speaking và chậm hơn
+  khi idle.
+- Dùng `GpuProcess.failsafe()`/exception mapping cho process vừa thoát; một PID lỗi không làm hỏng
+  toàn bộ heartbeat.
+- Không dùng instantaneous utilization làm hard capacity. Reservation ledger vẫn là authority;
+  utilization, nhiệt độ và power chỉ phục vụ health/scoring/cooldown.
+
+Container Master và Child giai đoạn đầu chạy cùng PID namespace, nên Master đọc được Child PID.
+Nếu sau này Child chuyển sang container/pod riêng, phải truyền host PID/cgroup identity hoặc dùng
+node-level collector; container PID và host PID không được giả định giống nhau.
+
+Snapshot phải ghi `resource_scope=host|container|cgroup`. `Device.all()` chỉ thấy GPU được
+NVIDIA Container Runtime expose. `nvitop.host` cung cấp OS metric nhưng không thay thế cgroup-v2
+quota/limit reader; khi container bị giới hạn CPU/RAM, adapter phải bổ sung effective CPU quota và
+memory limit/current từ cgroup để Scheduler dùng đúng capacity được cấp, không dùng toàn bộ tài
+nguyên vật lý của host.
+
+### 13.4. Provider và fallback
+
+```env
+# auto: dùng nvitop nếu NVIDIA driver/NVML khả dụng; nếu không thì configured fallback.
+# nvitop: production GPU mode, fail readiness khi không đọc được GPU inventory.
+# configured: CPU demo/CI, không gọi nvitop và không khai báo observed GPU metrics giả.
+PERSONA_RESOURCE_PROBE_PROVIDER=auto
+PERSONA_RESOURCE_SAMPLE_INTERVAL_SECONDS=5
+PERSONA_CHILD_RESOURCE_SAMPLE_INTERVAL_SECONDS=2
+PERSONA_RESOURCE_PROBE_TIMEOUT_SECONDS=3
+```
+
+`configured` chỉ cung cấp capacity bootstrap do operator khai báo. Các field observed không đo
+được phải là `null`, `hardware_source=configured` và có `probe_degraded=true`; Scheduler không
+được coi đây là telemetry production.
 
 ## 14. Failure policy
 
@@ -775,7 +928,7 @@ Socket còn mở không có nghĩa model vẫn xử lý được.
 |---|---|---|
 | Child không handshake | Terminate process, cleanup socket | Release hoặc reschedule |
 | Child heartbeat timeout | Probe PID và terminate process treo | Mark failed, release fenced lease |
-| Child crash | Thu exit code, stderr tail và NVML usage | Release/reschedule theo policy |
+| Child crash | Thu exit code, stderr tail và `nvitop` process snapshot cuối | Release/reschedule theo policy |
 | Child OOM | Không retry mù cùng profile | Cập nhật observed peak, chọn GPU khác |
 | gRPC stream mất | Drain hoặc terminate Child | Giữ generation fencing |
 | Master mất Redis | Chuyển draining, từ chối session mới | Lease hết hạn, loại worker |
@@ -867,7 +1020,7 @@ src/personaforge_worker/
     └── outbound/
         ├── subprocess_child.py
         ├── redis_events.py
-        ├── nvml_inventory.py
+        ├── nvitop_resources.py
         └── livekit.py
 ```
 
