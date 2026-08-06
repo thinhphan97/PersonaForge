@@ -21,6 +21,8 @@ Tài liệu kiến trúc:
   [docs/persona-worker-core-architecture.md](docs/persona-worker-core-architecture.md).
 - Worker Master–Child, gRPC bidirectional stream qua Unix Domain Socket và multi-GPU:
   [docs/worker-master-child-grpc.md](docs/worker-master-child-grpc.md).
+- Kế hoạch tích hợp VieNeu-TTS theo session, system voices và design gate cho custom voice/ACL:
+  [docs/vieneu-tts-integration-plan.md](docs/vieneu-tts-integration-plan.md).
 - Control Plane đã triển khai, data ownership, enrollment và Docker runbook:
   [docs/control-plane-implementation.md](docs/control-plane-implementation.md).
 
