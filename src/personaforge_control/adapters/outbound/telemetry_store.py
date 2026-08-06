@@ -378,9 +378,11 @@ class PostgresTelemetryStore:
                         text(
                             "SELECT "
                             "(SELECT count(*) FROM gpu_heartbeat_samples) AS gpu_samples, "
-                            "(SELECT count(*) FROM composite_resource_samples) AS composite_samples, "
+                            "(SELECT count(*) FROM composite_resource_samples) "
+                            "AS composite_samples, "
                             "(SELECT count(*) FROM resource_profiles) AS profiles, "
-                            "(SELECT max(received_at) FROM gpu_heartbeat_samples) AS last_received_at"
+                            "(SELECT max(received_at) FROM gpu_heartbeat_samples) "
+                            "AS last_received_at"
                         )
                     )
                 )

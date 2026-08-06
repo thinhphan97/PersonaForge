@@ -45,6 +45,41 @@ Provider `local` vẫn được giữ để demo không cần thêm service.
 
 ## Chạy local
 
+### Makefile for development and demo operations
+
+The repository provides a Makefile as the consistent entry point for common development and
+operations workflows. List all targets and supported overrides with:
+
+```bash
+make help
+make doctor
+make env-check
+```
+
+Main startup workflows:
+
+```bash
+make up            # aiortc + PostgreSQL + Redis
+make up-agent      # add the gRPC Agent Runtime
+make up-control    # first boot: start Control/LiveKit before Worker
+make enroll-worker # issue a one-time token and update .env without logging it
+make up-livekit    # full pipeline with a CPU Worker
+make up-gpu        # full pipeline with an NVIDIA Worker
+```
+
+`make restart-worker` does not reload `.env`. After changing Worker configuration, use
+`make recreate-worker` or `make recreate-worker-gpu`. The `worker-status`, `capacity`, and
+`telemetry` targets summarize heartbeat data without exposing credentials. `make reset-demo`
+deletes PostgreSQL, Redis, and Worker identity volumes, so it requires `CONFIRM=YES`.
+
+Local and CI quality gates:
+
+```bash
+make check
+make unit PYTEST_ARGS="-x -vv"
+make e2e
+```
+
 Yêu cầu Python 3.10+ và FFmpeg:
 
 ```bash

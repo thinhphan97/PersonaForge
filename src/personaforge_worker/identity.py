@@ -41,10 +41,33 @@ class WorkerIdentityClient:
     ) -> WorkerRedisIdentity:
         persisted = _read_identity_state(self._settings.state_dir)
         if persisted is not None:
-            identity = await self._reregister(persisted, hardware, resources)
+            try:
+                identity = await self._reregister(persisted, hardware, resources)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 401 or not self._has_bootstrap_token():
+                    raise
+                worker_id = persisted.get("worker_id")
+                if not isinstance(worker_id, str) or not worker_id:
+                    raise RuntimeError("Persistent worker identity has no worker ID") from exc
+                identity = await self._register(
+                    hardware,
+                    resources,
+                    proposed_worker_id=worker_id,
+                )
             _write_identity_state(self._settings.state_dir, identity)
             self._identity = identity
             return identity
+        identity = await self._register(hardware, resources)
+        _write_identity_state(self._settings.state_dir, identity)
+        self._identity = identity
+        return identity
+
+    async def _register(
+        self,
+        hardware: GpuHardwareSnapshot | None,
+        resources: WorkerResourceSnapshot | None,
+        proposed_worker_id: str | None = None,
+    ) -> WorkerRedisIdentity:
         token = self._read_bootstrap_token()
         host_id = self._settings.host_id or _stable_host_id()
         gpu_uuid = hardware.uuid if hardware is not None else self._settings.gpu_uuid
@@ -52,8 +75,10 @@ class WorkerIdentityClient:
             self._settings.state_dir,
             gpu_uuid,
         )
-        proposed_worker_id = self._settings.worker_id or (
-            f"{host_id}:{gpu_uuid}:{instance_id[:12]}"
+        proposed_worker_id = (
+            proposed_worker_id
+            or self._settings.worker_id
+            or (f"{host_id}:{gpu_uuid}:{instance_id[:12]}")
         )
         boot_id = uuid4().hex
         request_id = uuid4().hex
@@ -68,10 +93,7 @@ class WorkerIdentityClient:
             },
         )
         response.raise_for_status()
-        identity = _identity_from_response(response.json())
-        _write_identity_state(self._settings.state_dir, identity)
-        self._identity = identity
-        return identity
+        return _identity_from_response(response.json())
 
     async def _reregister(
         self,
@@ -132,6 +154,14 @@ class WorkerIdentityClient:
             "AVATAR_WORKER_BOOTSTRAP_TOKEN or AVATAR_WORKER_BOOTSTRAP_TOKEN_FILE is required"
         )
 
+    def _has_bootstrap_token(self) -> bool:
+        if self._settings.bootstrap_token:
+            return True
+        token_file = self._settings.bootstrap_token_file
+        return (
+            token_file is not None and token_file.is_file() and bool(token_file.read_text().strip())
+        )
+
     def _require_identity(self) -> WorkerRedisIdentity:
         if self._identity is None:
             raise RuntimeError("Worker has not enrolled")
@@ -151,9 +181,7 @@ class WorkerIdentityClient:
             else self._settings.gpu_compute_capability
         )
         total_vram_mb = (
-            hardware.total_vram_mb
-            if hardware is not None
-            else self._settings.total_vram_mb
+            hardware.total_vram_mb if hardware is not None else self._settings.total_vram_mb
         )
         configured_capacity = self._settings.schedulable_vram_mb
         schedulable_vram_mb = (
