@@ -1,3 +1,4 @@
+import logging
 from datetime import timedelta
 
 from personaforge_control.application.ports import (
@@ -16,6 +17,8 @@ from personaforge_control.domain.models import (
     ResourceProfileState,
     ResourceResolution,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class CompositeScheduler:
@@ -49,6 +52,16 @@ class CompositeScheduler:
             # an existing Child treats the same lease/generation as idempotent, while a freshly
             # restarted Worker can recreate the missing Child and LiveKit publisher.
             await self._commands.start(current, requirement, media_payload)
+            logger.info(
+                "Existing composite assignment was reprovisioned",
+                extra={
+                    "event": "control.assignment.reprovisioned",
+                    "session_id": requirement.session_id,
+                    "worker_id": current.worker_id,
+                    "gpu_uuid": current.gpu_uuid,
+                    "outcome": "success",
+                },
+            )
             return current
 
         candidates = await self._registry.candidates(requirement, now)
@@ -106,7 +119,26 @@ class CompositeScheduler:
                 )
                 await self._allocator.release(lease)
                 raise
+            logger.info(
+                "Composite assignment allocated",
+                extra={
+                    "event": "control.assignment.allocated",
+                    "session_id": requirement.session_id,
+                    "worker_id": lease.worker_id,
+                    "gpu_uuid": lease.gpu_uuid,
+                    "outcome": "success",
+                },
+            )
             return lease
+        logger.warning(
+            "No worker has enough capacity for the composite session",
+            extra={
+                "event": "control.assignment.rejected",
+                "session_id": requirement.session_id,
+                "reason": "no_worker_capacity",
+                "outcome": "rejected",
+            },
+        )
         raise NoWorkerCapacity("No healthy worker can reserve the composite requirement")
 
     async def _resolve_resources(

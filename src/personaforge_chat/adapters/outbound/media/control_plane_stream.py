@@ -8,6 +8,7 @@ from redis.asyncio import Redis
 from personaforge_chat.application.dto import WebRtcAnswer, WebRtcOffer
 from personaforge_chat.domain.errors import MediaCapacityUnavailable
 from personaforge_chat.domain.models import AvatarState
+from personaforge_observability import http_headers
 
 
 class ControlPlaneAvatarStreamAdapter:
@@ -43,7 +44,7 @@ class ControlPlaneAvatarStreamAdapter:
     ) -> None:
         response = await self._http.post(
             f"{self._base_url}/internal/render-sessions/{session_id}/provision",
-            headers=self._headers,
+            headers=http_headers(self._headers),
             json={
                 "character_id": character_id,
                 "avatar_model_id": f"recorded-{character_id}",
@@ -91,7 +92,7 @@ class ControlPlaneAvatarStreamAdapter:
     ) -> None:
         response = await self._http.post(
             f"{self._base_url}/internal/render-sessions/{session_id}/state",
-            headers=self._headers,
+            headers=http_headers(self._headers),
             json={"state": state.value, "state_version": state_version},
         )
         response.raise_for_status()
@@ -105,7 +106,7 @@ class ControlPlaneAvatarStreamAdapter:
     ) -> None:
         response = await self._http.post(
             f"{self._base_url}/internal/render-sessions/{session_id}/speech",
-            headers=self._headers,
+            headers=http_headers(self._headers),
             json={"turn_id": turn_id, "utterance_id": utterance_id, "text": text},
         )
         response.raise_for_status()
@@ -122,7 +123,7 @@ class ControlPlaneAvatarStreamAdapter:
     async def close(self, session_id: str) -> None:
         response = await self._http.delete(
             f"{self._base_url}/internal/render-sessions/{session_id}",
-            headers=self._headers,
+            headers=http_headers(self._headers),
         )
         response.raise_for_status()
 

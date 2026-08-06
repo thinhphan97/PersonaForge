@@ -340,6 +340,17 @@ class HandleMessage:
                         updated_at=now,
                     )
                     await self.agent_turns.save(agent_turn)
+                    logger.info(
+                        "Agent turn started",
+                        extra={
+                            "event": "chat.agent_turn.started",
+                            "session_id": session_id,
+                            "turn_id": agent_turn.turn_id,
+                            "user_id": actor_user_id,
+                            "input_chars": len(normalized),
+                            "history_count": len(history),
+                        },
+                    )
                     authorization = (
                         await self.authorization.resolve(
                             actor_user_id,
@@ -454,6 +465,17 @@ class HandleMessage:
                         completed_at=completed_at,
                     )
                     await self.agent_turns.save(agent_turn)
+                    logger.info(
+                        "Agent turn completed",
+                        extra={
+                            "event": "chat.agent_turn.completed",
+                            "session_id": session_id,
+                            "turn_id": agent_turn.turn_id,
+                            "user_id": actor_user_id,
+                            "output_chars": len(full_reply),
+                            "outcome": "success",
+                        },
+                    )
 
                     # Text streaming is complete when the Agent finishes. Do not keep the UI
                     # cursor alive while the independent media pipeline drains playback.

@@ -1,4 +1,5 @@
 import hmac
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -24,6 +25,9 @@ from personaforge_control.domain.models import (
     GpuCapability,
     WorkerCapabilities,
 )
+from personaforge_observability.http import install_http_observability
+
+logger = logging.getLogger(__name__)
 
 
 class EnrollmentTokenRequest(BaseModel):
@@ -204,12 +208,21 @@ def create_control_app(container: ControlContainer) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await container.startup()
+        logger.info(
+            "Control plane started",
+            extra={"event": "control.service.started"},
+        )
         try:
             yield
         finally:
+            logger.info(
+                "Control plane is stopping",
+                extra={"event": "control.service.stopping"},
+            )
             await container.shutdown()
 
     app = FastAPI(title="PersonaForge Control Plane", lifespan=lifespan)
+    install_http_observability(app)
 
     def require_operator(authorization: Annotated[str | None, Header()] = None) -> str:
         expected = f"Bearer {container.operator_token}"

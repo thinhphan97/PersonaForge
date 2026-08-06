@@ -1,17 +1,14 @@
 import asyncio
-import logging
 
+from personaforge_observability import configure_logging
 from personaforge_worker.child.runtime import CompositeChildRuntime
 from personaforge_worker.consumer import RedisRenderWorker
 from personaforge_worker.settings import WorkerSettings
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
     settings = WorkerSettings.from_env()
+    configure_logging("personaforge-worker", process_role=settings.role)
     runtime: RedisRenderWorker | CompositeChildRuntime
     if settings.role == "master":
         runtime = RedisRenderWorker(settings)

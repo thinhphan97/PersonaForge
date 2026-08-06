@@ -5,6 +5,7 @@ import httpx
 
 from personaforge_chat.application.dto import ReplyChunk
 from personaforge_chat.domain.models import ChatMessage
+from personaforge_observability import http_headers
 
 
 class HttpStreamingReplyAdapter:
@@ -27,6 +28,7 @@ class HttpStreamingReplyAdapter:
         headers = {"Accept": "text/event-stream"}
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
+        headers = http_headers(headers)
         payload = {
             "session_id": session_id,
             "messages": [
@@ -50,4 +52,3 @@ class HttpStreamingReplyAdapter:
                     text = event.get("text")
                     if isinstance(text, str) and text:
                         yield ReplyChunk(text)
-

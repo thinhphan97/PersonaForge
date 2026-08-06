@@ -21,6 +21,7 @@ from personaforge_control.domain.models import (
     WorkerRegistration,
     WorkerStatus,
 )
+from personaforge_observability import current_context
 
 _ACQUIRE_SCRIPT = """
 if redis.call('EXISTS', KEYS[2]) == 1 or redis.call('EXISTS', KEYS[4]) == 1 then
@@ -452,6 +453,7 @@ class RedisControlPlane:
         command_type: str,
         payload: dict[str, object],
     ) -> None:
+        logging_context = current_context()
         command = {
             "schema_version": 2,
             "type": command_type,
@@ -469,9 +471,32 @@ class RedisControlPlane:
             "created_at": _utc_now().isoformat(),
             "payload": payload,
         }
+        for key in (
+            "request_id",
+            "trace_id",
+            "span_id",
+            "trace_flags",
+            "turn_id",
+            "utterance_id",
+        ):
+            value = logging_context.get(key)
+            if isinstance(value, str):
+                command[key] = value
         await self._redis.xadd(
             f"avatar:commands:{lease.worker_id}",
             {"data": json.dumps(command)},
+        )
+        logger.info(
+            "Render command published",
+            extra={
+                "event": "control.command.published",
+                "session_id": lease.session_id,
+                "worker_id": lease.worker_id,
+                "gpu_uuid": lease.gpu_uuid,
+                "command_id": command["command_id"],
+                "command_type": command_type,
+                "outcome": "success",
+            },
         )
 
     async def _reconcile_assignments(self) -> None:

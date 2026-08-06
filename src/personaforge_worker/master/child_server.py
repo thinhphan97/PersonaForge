@@ -210,7 +210,10 @@ class ChildControlServer:
         if bound == 0:
             raise RuntimeError(f"Could not bind child control socket: {self._socket_path}")
         await self._server.start()
-        logger.info("Child control server listening socket=%s", self._socket_path)
+        logger.info(
+            "Child control server is listening",
+            extra={"event": "worker.child_control.started"},
+        )
 
     async def stop(self, grace_seconds: float = 3) -> None:
         await self._server.stop(grace_seconds)

@@ -7,6 +7,8 @@ from typing import Any
 from redis.asyncio import Redis
 from redis.exceptions import ResponseError
 
+from personaforge_observability import bind_context
+from personaforge_observability.context import context_from_mapping
 from personaforge_worker.adapters.outbound.gpu_probe import build_gpu_probe
 from personaforge_worker.domain.hardware import GpuHardwareSnapshot, WorkerResourceSnapshot
 from personaforge_worker.identity import WorkerIdentityClient
@@ -98,23 +100,59 @@ class RedisRenderWorker:
                 if not isinstance(command, dict):
                     raise ValueError("Redis command data must be an object")
                 command_id = _required_string(command, "command_id")
-                processed_key = (
-                    f"avatar:worker:{self._worker_id}:command-processed:{command_id}"
-                )
-                redis = self._require_redis()
-                if await redis.exists(processed_key):
+                context_fields = context_from_mapping(command)
+                context_fields["stream_message_id"] = message_id
+                context_fields.setdefault("worker_id", self._worker_id)
+                with bind_context(**context_fields):
+                    processed_key = (
+                        f"avatar:worker:{self._worker_id}:command-processed:{command_id}"
+                    )
+                    redis = self._require_redis()
+                    if await redis.exists(processed_key):
+                        logger.info(
+                            "Duplicate render command acknowledged",
+                            extra={
+                                "event": "worker.command.duplicate",
+                                "command_type": command.get("type"),
+                                "outcome": "duplicate",
+                            },
+                        )
+                        await redis.xack(self._stream, self._group, message_id)
+                        return
+                    logger.info(
+                        "Render command received",
+                        extra={
+                            "event": "worker.command.received",
+                            "command_type": command.get("type"),
+                            "attempt": attempt,
+                        },
+                    )
+                    await self._dispatch(command)
+                    await redis.set(processed_key, "1", ex=86_400)
                     await redis.xack(self._stream, self._group, message_id)
+                    logger.info(
+                        "Render command completed",
+                        extra={
+                            "event": "worker.command.completed",
+                            "command_type": command.get("type"),
+                            "outcome": "success",
+                        },
+                    )
                     return
-                await self._dispatch(command)
-                await redis.set(processed_key, "1", ex=86_400)
-                await redis.xack(self._stream, self._group, message_id)
-                return
             except Exception:
-                logger.exception(
-                    "Command failed id=%s attempt=%s",
-                    message_id,
-                    attempt,
-                )
+                failure_context = context_from_mapping(command or {})
+                failure_context["stream_message_id"] = message_id
+                failure_context.setdefault("worker_id", self._worker_id)
+                with bind_context(**failure_context):
+                    logger.exception(
+                        "Render command failed",
+                        extra={
+                            "event": "worker.command.failed",
+                            "command_type": (command or {}).get("type"),
+                            "attempt": attempt,
+                            "outcome": "failure",
+                        },
+                    )
                 if attempt < 3:
                     await asyncio.sleep(0.25 * 2 ** (attempt - 1))
         if command is not None:
@@ -153,6 +191,10 @@ class RedisRenderWorker:
             "worker_id": self._worker_id,
             "generation": command.get("generation", 0),
         }
+        for key in ("request_id", "trace_id", "span_id", "trace_flags", "turn_id"):
+            value = command.get(key)
+            if isinstance(value, str):
+                event[key] = value
         if detail is not None:
             event["detail"] = detail
         payload = command.get("payload")

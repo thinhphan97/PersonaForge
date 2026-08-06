@@ -8,6 +8,7 @@ from redis.asyncio import Redis
 
 from personaforge_chat.application.dto import WebRtcAnswer, WebRtcOffer
 from personaforge_chat.domain.models import AvatarState
+from personaforge_observability import current_context
 
 
 class RedisAvatarStreamAdapter:
@@ -118,6 +119,18 @@ class RedisAvatarStreamAdapter:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "payload": payload,
         }
+        logging_context = current_context()
+        for key in (
+            "request_id",
+            "trace_id",
+            "span_id",
+            "trace_flags",
+            "turn_id",
+            "utterance_id",
+        ):
+            value = logging_context.get(key)
+            if isinstance(value, str):
+                command[key] = value
         await self._redis.xadd(self._stream, {"data": json.dumps(command)})
         return command_id
 

@@ -28,6 +28,7 @@ RUN pip install --no-cache-dir --upgrade pip \
 COPY src/personaforge_chat ./src/personaforge_chat
 COPY src/personaforge_worker ./src/personaforge_worker
 COPY src/personaforge ./src/personaforge
+COPY src/personaforge_observability ./src/personaforge_observability
 COPY scripts/generate_demo_videos.sh ./scripts/generate_demo_videos.sh
 RUN bash scripts/generate_demo_videos.sh \
     && useradd --create-home --uid 10001 personaforge \

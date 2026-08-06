@@ -51,6 +51,12 @@ from personaforge_chat.domain.models import (
     SessionVisibility,
     SharePermission,
 )
+from personaforge_observability import (
+    bind_context,
+    new_id,
+    parse_traceparent,
+)
+from personaforge_observability.http import install_http_observability
 
 logger = logging.getLogger(__name__)
 
@@ -313,6 +319,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.container = build_container(resolved)
         await app.state.container.startup()
+        logger.info(
+            "Chat service started",
+            extra={"event": "chat.service.started"},
+        )
         try:
             await app.state.container.realtime_events.subscribe(
                 lambda session_id, event: chat_hub.broadcast(
@@ -324,9 +334,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await app.state.container.outbox_dispatcher.startup()
             yield
         finally:
+            logger.info(
+                "Chat service is stopping",
+                extra={"event": "chat.service.stopping"},
+            )
             await app.state.container.shutdown()
 
     app = FastAPI(title="Avatar Chat WebRTC", version="0.2.0", lifespan=lifespan)
+    install_http_observability(app)
     router = APIRouter(prefix="/api")
     login_limiter = LoginRateLimiter()
     chat_hub = ChatConnectionHub()
@@ -743,6 +758,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.websocket("/api/sessions/{session_id}/chat")
     async def chat(websocket: WebSocket, session_id: str) -> None:
+        connection_id = new_id()
+        request_id = websocket.headers.get("x-request-id") or new_id()
+        trace_id, span_id, trace_flags = parse_traceparent(
+            websocket.headers.get("traceparent")
+        )
+        with bind_context(
+            connection_id=connection_id,
+            request_id=request_id,
+            trace_id=trace_id,
+            span_id=span_id,
+            trace_flags=trace_flags,
+            session_id=session_id,
+        ):
+            await _serve_chat_websocket(websocket, session_id, chat_hub)
+
+    async def _serve_chat_websocket(
+        websocket: WebSocket,
+        session_id: str,
+        chat_hub: ChatConnectionHub,
+    ) -> None:
         container: Container = websocket.app.state.container
         if not _origin_allowed(websocket, container):
             await websocket.close(code=1008, reason="Origin is not allowed")
@@ -764,22 +799,53 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await websocket.accept(subprotocol="avatar-chat")
         assert raw_token is not None
         chat_hub.add(session_id, websocket, raw_token)
+        logger.info(
+            "Chat WebSocket connected",
+            extra={"event": "chat.websocket.connected"},
+        )
         try:
             while True:
                 request = ChatRequest.model_validate(await websocket.receive_json())
-                auth = await container.authenticate_token.execute(raw_token)
-                async for event in container.handle_message.execute(
-                    auth.user.user_id,
-                    session_id,
-                    request.content,
+                message_request_id = new_id()
+                message_trace_id, message_span_id, message_flags = parse_traceparent(None)
+                with bind_context(
+                    request_id=message_request_id,
+                    trace_id=message_trace_id,
+                    span_id=message_span_id,
+                    trace_flags=message_flags,
                 ):
-                    await container.realtime_events.publish(session_id, event)
+                    auth = await container.authenticate_token.execute(raw_token)
+                    logger.info(
+                        "Chat message received",
+                        extra={
+                            "event": "chat.message.received",
+                            "user_id": auth.user.user_id,
+                            "input_chars": len(request.content),
+                        },
+                    )
+                    async for event in container.handle_message.execute(
+                        auth.user.user_id,
+                        session_id,
+                        request.content,
+                    ):
+                        await container.realtime_events.publish(session_id, event)
         except WebSocketDisconnect:
-            pass
+            logger.info(
+                "Chat WebSocket disconnected",
+                extra={"event": "chat.websocket.disconnected", "outcome": "client_closed"},
+            )
         except DomainError as exc:
+            logger.warning(
+                "Chat WebSocket request was rejected",
+                extra={"event": "chat.websocket.rejected", "reason": type(exc).__name__},
+            )
             await websocket.send_json({"type": "error", "detail": str(exc)})
             await websocket.close(code=1008)
         except Exception:
+            logger.exception(
+                "Chat WebSocket failed",
+                extra={"event": "chat.websocket.failed", "outcome": "failure"},
+            )
             await websocket.close()
         finally:
             chat_hub.remove(session_id, websocket)

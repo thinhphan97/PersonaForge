@@ -229,11 +229,15 @@ class ChildSupervisor:
         )
         self._process_monitors[child.child_id] = monitor
         logger.info(
-            "Spawned composite child child=%s session=%s pid=%s gpu=%s",
-            child.child_id,
-            child.session_id,
-            process.pid,
-            child.gpu_uuid,
+            "Composite child spawned",
+            extra={
+                "event": "worker.child.spawned",
+                "worker_id": child.worker_id,
+                "child_id": child.child_id,
+                "session_id": child.session_id,
+                "gpu_uuid": child.gpu_uuid,
+                "outcome": "success",
+            },
         )
 
     async def _send_and_wait_accepted(
@@ -282,7 +286,17 @@ class ChildSupervisor:
                     timeout=self._settings.child_stop_grace_seconds,
                 )
             except (TimeoutError, RuntimeError):
-                logger.warning("Child did not stop gracefully child=%s", child.child_id)
+                logger.warning(
+                    "Composite child did not stop gracefully",
+                    extra={
+                        "event": "worker.child.stop_timeout",
+                        "worker_id": child.worker_id,
+                        "child_id": child.child_id,
+                        "session_id": child.session_id,
+                        "gpu_uuid": child.gpu_uuid,
+                        "outcome": "timeout",
+                    },
+                )
         await self._remove_and_terminate(child)
 
     async def _remove_and_terminate(self, child: ChildConnection) -> None:
@@ -334,7 +348,17 @@ class ChildSupervisor:
                 > self._settings.child_heartbeat_timeout_seconds
             ]
             for child in timed_out:
-                logger.error("Composite Child heartbeat timed out child=%s", child.child_id)
+                logger.error(
+                    "Composite child heartbeat timed out",
+                    extra={
+                        "event": "worker.child.heartbeat_timeout",
+                        "worker_id": child.worker_id,
+                        "child_id": child.child_id,
+                        "session_id": child.session_id,
+                        "gpu_uuid": child.gpu_uuid,
+                        "outcome": "timeout",
+                    },
+                )
                 command = _latest_command(child)
                 await self._remove_and_terminate(child)
                 if command is not None:

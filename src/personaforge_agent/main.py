@@ -22,8 +22,9 @@ from personaforge_agent.adapters.outbound.turn_registry import (
 from personaforge_agent.application.admission import TurnAdmissionController
 from personaforge_agent.application.execute_turn import ExecuteAgentTurn
 from personaforge_agent.bootstrap.settings import AgentSettings
+from personaforge_observability import configure_logging
 
-logging.basicConfig(level=logging.INFO)
+configure_logging("personaforge-agent")
 logger = logging.getLogger(__name__)
 
 
@@ -138,9 +139,15 @@ async def serve(settings: AgentSettings | None = None) -> None:
         loop.add_signal_handler(sig, stopped.set)
     try:
         await server.start()
-        logger.info("PersonaForge Agent Runtime listening on %s", address)
+        logger.info(
+            "Agent runtime is listening",
+            extra={"event": "agent.service.started", "listen_address": address},
+        )
         await stopped.wait()
-        logger.info("PersonaForge Agent Runtime is draining")
+        logger.info(
+            "Agent runtime is draining",
+            extra={"event": "agent.service.draining"},
+        )
         await admission.start_draining()
         await server.stop(grace=resolved.graceful_shutdown_seconds)
     finally:

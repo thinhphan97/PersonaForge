@@ -6,6 +6,11 @@ services:
     ports:
       - "${APP_HTTP_PORT:-8000}:8000"
     environment:
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_THIRD_PARTY_LEVEL: ${LOG_THIRD_PARTY_LEVEL:-WARNING}
+      LOG_ENVIRONMENT: ${LOG_ENVIRONMENT:-development}
+      LOG_SERVICE_VERSION: ${LOG_SERVICE_VERSION:-0.1.0}
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://avatar:avatar@postgres:5432/avatar}
       AUTO_CREATE_SCHEMA: ${AUTO_CREATE_SCHEMA:-false}
       REFRESH_COOKIE_NAME: ${REFRESH_COOKIE_NAME:-avatar_refresh}
@@ -68,6 +73,11 @@ services:
     command: ["python", "-m", "personaforge_agent.main"]
     profiles: ["agent"]
     environment:
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_THIRD_PARTY_LEVEL: ${LOG_THIRD_PARTY_LEVEL:-WARNING}
+      LOG_ENVIRONMENT: ${LOG_ENVIRONMENT:-development}
+      LOG_SERVICE_VERSION: ${LOG_SERVICE_VERSION:-0.1.0}
       AGENT_GRPC_HOST: ${AGENT_GRPC_HOST:-0.0.0.0}
       AGENT_GRPC_PORT: ${AGENT_GRPC_PORT:-50051}
       AGENT_GRPC_TLS_CERT_FILE: ${AGENT_GRPC_TLS_CERT_FILE:-}
@@ -125,6 +135,11 @@ services:
     ports:
       - "127.0.0.1:${CONTROL_HTTP_PORT:-8090}:8090"
     environment:
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_THIRD_PARTY_LEVEL: ${LOG_THIRD_PARTY_LEVEL:-WARNING}
+      LOG_ENVIRONMENT: ${LOG_ENVIRONMENT:-development}
+      LOG_SERVICE_VERSION: ${LOG_SERVICE_VERSION:-0.1.0}
       CONTROL_HOST: ${CONTROL_HOST:-0.0.0.0}
       CONTROL_PORT: ${CONTROL_PORT:-8090}
       CONTROL_REDIS_ADMIN_URL: ${CONTROL_REDIS_ADMIN_URL:-redis://redis:6379/0}
@@ -192,6 +207,11 @@ services:
     command: ["python", "-m", "personaforge_worker.main"]
     profiles: ["livekit"]
     environment:
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_THIRD_PARTY_LEVEL: ${LOG_THIRD_PARTY_LEVEL:-WARNING}
+      LOG_ENVIRONMENT: ${LOG_ENVIRONMENT:-development}
+      LOG_SERVICE_VERSION: ${LOG_SERVICE_VERSION:-0.1.0}
       PERSONA_WORKER_ROLE: master
       PERSONA_MASTER_SOCKET: ${PERSONA_MASTER_SOCKET:-/run/personaforge/worker-master/control.sock}
       PERSONA_MASTER_MAX_CHILDREN: ${PERSONA_MASTER_MAX_CHILDREN:-32}

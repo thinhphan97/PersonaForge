@@ -114,8 +114,8 @@ recreate-worker: ## Recreate the CPU Worker and reload the env file
 	$(FULL_COMPOSE) up -d --force-recreate --no-deps avatar-worker
 	@$(DEVOPS) wait-ready --worker-only
 
-recreate-worker-gpu: ## Recreate the GPU Worker and reload the env file
-	$(GPU_COMPOSE) up -d --force-recreate --no-deps avatar-worker
+recreate-worker-gpu: ## Rebuild and recreate the GPU Worker, then reload the env file
+	$(GPU_COMPOSE) up -d --build --force-recreate --no-deps avatar-worker
 	@$(DEVOPS) wait-ready --worker-only
 
 recover-worker-gpu: enroll-worker ## Re-enroll a GPU Worker whose persisted identity is stale

@@ -14,6 +14,7 @@ from personaforge_chat.application.dto import (
     AgentTurnRequest,
 )
 from personaforge_chat.application.ports import ReplyGeneratorPort
+from personaforge_observability import grpc_metadata
 
 
 class AgentDelegationJwtAdapter:
@@ -123,7 +124,7 @@ class GrpcAgentRuntimeAdapter:
                 tool_permissions=request.tool_permissions,
                 knowledge_base_ids=request.knowledge_base_ids,
             ),
-            metadata=(("authorization", f"Bearer {delegation_token}"),),
+            metadata=grpc_metadata((("authorization", f"Bearer {delegation_token}"),)),
             timeout=self._turn_timeout_seconds,
         )
         iterator = call.__aiter__()

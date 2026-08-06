@@ -10,6 +10,8 @@ import grpc
 
 from personaforge.worker.v1 import child_control_pb2, child_control_pb2_grpc
 from personaforge_chat.domain.models import AvatarState
+from personaforge_observability import bind_context
+from personaforge_observability.context import context_from_mapping
 from personaforge_worker.ipc.messages import (
     PROTOCOL_VERSION,
     decode_command,
@@ -51,6 +53,19 @@ class CompositeChildRuntime:
         self._event_sequence = 0
 
     async def run(self) -> None:
+        with bind_context(
+            worker_id=self._worker_id,
+            child_id=self._child_id,
+            session_id=self._session_id,
+            gpu_uuid=self._gpu_uuid,
+        ):
+            logger.info(
+                "Composite child started",
+                extra={"event": "worker.child.started"},
+            )
+            await self._run()
+
+    async def _run(self) -> None:
         channel = grpc.aio.insecure_channel(f"unix:{self._settings.master_socket}")
         stub = child_control_pb2_grpc.CompositeChildControlStub(channel)
         actor = asyncio.create_task(self._actor(), name="composite-child-actor")
@@ -80,17 +95,39 @@ class CompositeChildRuntime:
             _priority, _sequence, message = await self._commands.get()
             command = decode_command(message)
             self._last_command_sequence = message.meta.sequence
-            try:
-                await self._execute(message, command)
-            except Exception as exc:
-                logger.exception(
-                    "Composite Child command failed child=%s command=%s",
-                    self._child_id,
-                    message.meta.message_id,
+            context_fields = context_from_mapping(command)
+            context_fields.update(
+                {
+                    "worker_id": self._worker_id,
+                    "child_id": self._child_id,
+                    "session_id": self._session_id,
+                    "gpu_uuid": self._gpu_uuid,
+                    "command_id": message.meta.message_id,
+                }
+            )
+            with bind_context(**context_fields):
+                try:
+                    await self._execute(message, command)
+                except Exception as exc:
+                    logger.exception(
+                        "Composite child command failed",
+                        extra={
+                            "event": "worker.child.command.failed",
+                            "command_type": command.get("type"),
+                            "outcome": "failure",
+                        },
+                    )
+                    await self._failed(message.meta.message_id, str(exc))
+                    self._finished.set()
+                    return
+                logger.info(
+                    "Composite child command completed",
+                    extra={
+                        "event": "worker.child.command.completed",
+                        "command_type": command.get("type"),
+                        "outcome": "success",
+                    },
                 )
-                await self._failed(message.meta.message_id, str(exc))
-                self._finished.set()
-                return
 
     async def _execute(
         self,
