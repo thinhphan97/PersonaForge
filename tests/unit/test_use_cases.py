@@ -1,16 +1,17 @@
+import asyncio
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 
 import pytest
 
-from avatar_chat.adapters.outbound.agent_runtime import LegacyReplyAgentAdapter
-from avatar_chat.adapters.outbound.memory import (
+from personaforge_chat.adapters.outbound.agent_runtime import LegacyReplyAgentAdapter
+from personaforge_chat.adapters.outbound.memory import (
     InMemoryAgentTurnRepository,
     InMemoryConversationRepository,
     InMemorySessionRepository,
     InMemorySessionShareRepository,
 )
-from avatar_chat.application.dto import (
+from personaforge_chat.application.dto import (
     CharacterSummary,
     ChatEventType,
     MediaAccess,
@@ -19,8 +20,8 @@ from avatar_chat.application.dto import (
     WebRtcAnswer,
     WebRtcOffer,
 )
-from avatar_chat.application.session_access import SessionAccessPolicy
-from avatar_chat.application.use_cases import (
+from personaforge_chat.application.session_access import SessionAccessPolicy
+from personaforge_chat.application.use_cases import (
     CloseSession,
     CreateSession,
     GetConversation,
@@ -30,13 +31,13 @@ from avatar_chat.application.use_cases import (
     ProvisionMedia,
     ProvisionPublicMedia,
 )
-from avatar_chat.domain.errors import (
+from personaforge_chat.domain.errors import (
     CharacterNotFound,
     SessionBusy,
     SessionClosed,
     SessionNotFound,
 )
-from avatar_chat.domain.models import (
+from personaforge_chat.domain.models import (
     AgentTurnStatus,
     AvatarState,
     ChatMessage,
@@ -120,11 +121,38 @@ class FakeAvatarStream:
             raise RuntimeError(f"failed to render {state.value}")
         self.states.append(state)
 
+    async def speak(
+        self,
+        session_id: str,
+        turn_id: str,
+        utterance_id: str,
+        text: str,
+    ) -> None:
+        assert session_id and turn_id and utterance_id and text
+
     async def close(self, session_id: str) -> None:
         self.closed.append(session_id)
 
     async def shutdown(self) -> None:
         return None
+
+
+class BlockingPlaybackAvatar(FakeAvatarStream):
+    def __init__(self) -> None:
+        super().__init__()
+        self.playback_started = asyncio.Event()
+        self.release_playback = asyncio.Event()
+
+    async def speak(
+        self,
+        session_id: str,
+        turn_id: str,
+        utterance_id: str,
+        text: str,
+    ) -> None:
+        await super().speak(session_id, turn_id, utterance_id, text)
+        self.playback_started.set()
+        await self.release_playback.wait()
 
 
 class FakeReplies:
@@ -309,11 +337,11 @@ async def test_message_flow_changes_avatar_and_persists_history() -> None:
         ChatEventType.AVATAR_STATE,
         ChatEventType.ASSISTANT_CHUNK,
         ChatEventType.ASSISTANT_CHUNK,
-        ChatEventType.AVATAR_STATE,
         ChatEventType.ASSISTANT_COMPLETE,
+        ChatEventType.AVATAR_STATE,
     ]
-    assert events[-2].avatar_state is AvatarState.IDLE
-    assert events[-1].content == "Xin chào"
+    assert events[-2].content == "Xin chào"
+    assert events[-1].avatar_state is AvatarState.IDLE
     assistant_events = [
         event
         for event in events
@@ -339,6 +367,49 @@ async def test_message_flow_changes_avatar_and_persists_history() -> None:
     assert session is not None
     assert session.status is SessionStatus.READY
     assert session.avatar_state is AvatarState.IDLE
+
+
+@pytest.mark.asyncio
+async def test_assistant_cursor_completes_before_media_playback_drains() -> None:
+    sessions = InMemorySessionRepository()
+    conversations = InMemoryConversationRepository()
+    ids = SequentialIds()
+    clock = FixedClock()
+    avatar = BlockingPlaybackAvatar()
+    created = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
+        USER_ID, "default"
+    )
+    access = access_policy()
+    await NegotiateStream(sessions, avatar, clock, access).execute(
+        USER_ID,
+        created.session_id,
+        WebRtcOffer("offer", "offer"),
+    )
+    stream = HandleMessage(
+        sessions,
+        conversations,
+        avatar,
+        *agent_dependencies(FakeReplies()),
+        ids,
+        clock,
+        access,
+    ).execute(USER_ID, created.session_id, "Hello")
+
+    while True:
+        event = await anext(stream)
+        if event.type is ChatEventType.ASSISTANT_COMPLETE:
+            break
+
+    history = await conversations.list_recent(created.session_id, 10)
+    assert history[-1].status is ChatMessageStatus.COMPLETE
+    playback = asyncio.create_task(anext(stream))
+    await asyncio.wait_for(avatar.playback_started.wait(), timeout=1)
+    assert not playback.done()
+
+    avatar.release_playback.set()
+    idle = await asyncio.wait_for(playback, timeout=1)
+    assert idle.type is ChatEventType.AVATAR_STATE
+    assert idle.avatar_state is AvatarState.IDLE
 
 
 @pytest.mark.asyncio

@@ -5,8 +5,8 @@ from uuid import uuid4
 import pytest
 from redis.asyncio import Redis
 
-from avatar_chat.adapters.outbound.session_turn_locks import RedisSessionTurnLock
 from personaforge_agent.adapters.outbound.turn_registry import RedisTurnRegistry
+from personaforge_chat.adapters.outbound.session_turn_locks import RedisSessionTurnLock
 
 
 def redis_url() -> str:

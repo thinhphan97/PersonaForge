@@ -213,14 +213,19 @@ sequenceDiagram
     end
 
     H->>DB: CAS status=complete, revision + 1
+    H->>P: assistant_complete
+    H->>H: chờ audio và video playback completed
     H->>DB: session speaking -> idle
-    H->>P: avatar_state=idle + assistant_complete
+    H->>P: avatar_state=idle
 ```
 
 Chunk là toàn bộ content hiện tại, không phải delta. Browser reconcile theo `message_id` và
 chỉ nhận revision không cũ hơn; vì thế event trùng hoặc đến lệch thứ tự không nhân đôi text.
 Sequence quyết định thứ tự bubble. Một lock theo session chặn message đồng thời trong cùng
 process; repository version/revision phát hiện stale write.
+
+`assistant_complete` kết thúc cursor text ngay khi Agent sinh xong nội dung. Avatar có thể tiếp
+tục `speaking` trong lúc audio còn phát và chỉ về `idle` sau playback completion.
 
 Nếu provider lỗi sau khi draft được tạo, core lưu `status=failed`, khôi phục renderer/domain
 về `idle`, rồi phát `avatar_state=idle` và `assistant_failed`.

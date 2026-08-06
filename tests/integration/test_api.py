@@ -1,8 +1,8 @@
 import httpx
 import pytest
 
-from avatar_chat.adapters.inbound.fastapi_app import create_app
-from avatar_chat.application.dto import ChatEventType, ChatOutputEvent
+from personaforge_chat.adapters.inbound.fastapi_app import create_app
+from personaforge_chat.application.dto import ChatEventType, ChatOutputEvent
 
 
 @pytest.mark.asyncio

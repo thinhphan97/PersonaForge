@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
@@ -13,6 +15,9 @@ from personaforge_agent.application.admission import (
 from personaforge_agent.application.execute_turn import ExecuteAgentTurn
 from personaforge_agent.application.ports import DelegationVerifierPort, TurnRegistryPort
 from personaforge_agent.domain.models import AgentEventType, AgentMessage, AgentTurn
+from personaforge_observability import bind_context, new_id, parse_traceparent
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +48,60 @@ class AgentRuntimeGrpcService(agent_pb2_grpc.AgentRuntimeServicer):
         self._lock = asyncio.Lock()
 
     async def ExecuteTurn(
+        self,
+        request: agent_pb2.AgentTurnRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> AsyncIterator[agent_pb2.AgentEvent]:
+        request_id = _metadata_value(context, "x-request-id") or new_id()
+        trace_id, span_id, trace_flags = parse_traceparent(
+            _metadata_value(context, "traceparent")
+        )
+        started = time.monotonic()
+        event_count = 0
+        with bind_context(
+            request_id=request_id,
+            trace_id=trace_id,
+            span_id=span_id,
+            trace_flags=trace_flags,
+            session_id=request.session_id,
+            turn_id=request.turn_id,
+            user_id=request.user_id,
+        ):
+            logger.info(
+                "Agent turn received",
+                extra={
+                    "event": "agent.turn.received",
+                    "input_chars": len(request.user_message),
+                    "history_count": len(request.history),
+                },
+            )
+            try:
+                async for event in self._execute_turn_request(request, context):
+                    event_count += 1
+                    yield event
+            except BaseException:
+                logger.exception(
+                    "Agent turn failed",
+                    extra={
+                        "event": "agent.turn.failed",
+                        "duration_ms": round((time.monotonic() - started) * 1000, 2),
+                        "event_count": event_count,
+                        "outcome": "failure",
+                    },
+                )
+                raise
+            else:
+                logger.info(
+                    "Agent turn completed",
+                    extra={
+                        "event": "agent.turn.completed",
+                        "duration_ms": round((time.monotonic() - started) * 1000, 2),
+                        "event_count": event_count,
+                        "outcome": "success",
+                    },
+                )
+
+    async def _execute_turn_request(
         self,
         request: agent_pb2.AgentTurnRequest,
         context: grpc.aio.ServicerContext,

@@ -1,0 +1,1 @@
+"""Outbound persona worker adapters."""

@@ -5,14 +5,6 @@ from datetime import datetime, timezone
 import grpc
 import pytest
 
-from avatar_chat.adapters.outbound.agent_runtime import (
-    AgentDelegationJwtAdapter,
-    GrpcAgentRuntimeAdapter,
-)
-from avatar_chat.application.dto import (
-    AgentRuntimeEventType,
-    AgentTurnRequest,
-)
 from personaforge.agent.v1 import agent_pb2, agent_pb2_grpc
 from personaforge_agent.adapters.inbound.grpc_service import AgentRuntimeGrpcService
 from personaforge_agent.adapters.outbound.delegation_tokens import JwtDelegationVerifier
@@ -21,6 +13,14 @@ from personaforge_agent.adapters.outbound.turn_registry import InMemoryTurnRegis
 from personaforge_agent.application.admission import TurnAdmissionController
 from personaforge_agent.application.execute_turn import ExecuteAgentTurn
 from personaforge_agent.domain.models import AgentTurn
+from personaforge_chat.adapters.outbound.agent_runtime import (
+    AgentDelegationJwtAdapter,
+    GrpcAgentRuntimeAdapter,
+)
+from personaforge_chat.application.dto import (
+    AgentRuntimeEventType,
+    AgentTurnRequest,
+)
 
 
 def admission() -> TurnAdmissionController:

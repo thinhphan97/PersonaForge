@@ -3,12 +3,12 @@ from datetime import datetime, timezone
 
 import pytest
 
-from avatar_chat.adapters.outbound.memory import (
+from personaforge_chat.adapters.outbound.memory import (
     InMemoryConversationRepository,
     InMemorySessionRepository,
 )
-from avatar_chat.domain.errors import ConcurrentMessageUpdate, ConcurrentSessionUpdate
-from avatar_chat.domain.models import (
+from personaforge_chat.domain.errors import ConcurrentMessageUpdate, ConcurrentSessionUpdate
+from personaforge_chat.domain.models import (
     AvatarSession,
     AvatarState,
     ChatMessage,

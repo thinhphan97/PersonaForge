@@ -1,7 +1,7 @@
 import pytest
 
-from avatar_chat.adapters.outbound.media.media_clock import MediaClock
-from avatar_chat.adapters.outbound.media.silent_audio_track import (
+from personaforge_chat.adapters.outbound.media.media_clock import MediaClock
+from personaforge_chat.adapters.outbound.media.silent_audio_track import (
     AUDIO_SAMPLE_RATE,
     AUDIO_SAMPLES_PER_FRAME,
     SilentAudioTrack,

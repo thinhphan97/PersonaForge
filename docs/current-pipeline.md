@@ -26,6 +26,9 @@ Pipeline hiện giải quyết được các yêu cầu sau:
   - `livekit`: Render Worker publish media vào LiveKit SFU, API chỉ điều phối.
 - Core không import FastAPI, aiortc, AV, HTTPX hoặc SQLAlchemy.
 - Chat provider, database, media runtime và renderer có thể thay qua port/adapter.
+- Worker Master quản lý nhiều Composite Child và pin mỗi Child vào GPU do Scheduler cấp.
+- Heartbeat host/GPU/PID được buffer bằng Redis Stream và lưu PostgreSQL để tạo profile.
+- Scheduler chọn cặp `worker_id + gpu_uuid` từ DB config, observed profile và tải realtime.
 
 ## 2. Kiến trúc tổng thể
 
@@ -35,11 +38,13 @@ Pipeline hiện giải quyết được các yêu cầu sau:
 flowchart LR
     U[Browser]
     API[avatar-chat\nFastAPI + application core]
-    R[(Redis Streams\nmedia commands)]
+    R[(Redis Streams\ncommands + telemetry)]
     P[(Redis Pub/Sub\nchat events)]
-    W[avatar-worker\nrender + A/V publisher]
+    C[PersonaForge Control\nidentity + GPU scheduler]
+    W[Worker Master\nresource + child supervisor]
+    CH[Composite Child\nTTS + lip-sync + publisher]
     SFU[LiveKit SFU]
-    DB[(Memory / SQL database)]
+    DB[(PostgreSQL\nbusiness + telemetry + profiles)]
     LLM[Scripted / HTTP model service]
 
     U -->|REST: session/media access| API
@@ -48,9 +53,14 @@ flowchart LR
     API -->|stream prompt/history| LLM
     LLM -->|reply chunks| API
     API <-->|cross-replica chat events| P
-    API -->|start/state/stop commands| R
-    R -->|consumer group| W
-    W -->|WebRTC publish audio + video| SFU
+    API -->|provision/state/speech/release| C
+    C -->|fenced per-GPU commands| R
+    R -->|one consumer per Master| W
+    W <-->|gRPC stream over UDS| CH
+    CH -->|WebRTC publish audio + video| SFU
+    W -->|latest heartbeat + telemetry stream| R
+    R -->|at-least-once ingest| C
+    C -->|raw samples + resource profiles| DB
     SFU -->|WebRTC subscribe audio + video| U
 ```
 
@@ -61,8 +71,9 @@ flowchart LR
 | Control plane | Browser, FastAPI, Redis, model adapter | Session, chat, state, token, command |
 | Media plane | Render Worker, LiveKit SFU, browser | Decode/render, pacing, encode, RTP/WebRTC |
 
-Model/render nặng chạy trong `avatar-worker`, vì vậy không block event loop xử lý REST và
-WebSocket của Core API. Có thể scale worker theo GPU trong tương lai mà không thay domain.
+Model/render nặng chạy trong Composite Child, vì vậy không block event loop REST/WebSocket hoặc
+Worker Master. Control flatten mỗi Worker thành candidate per-GPU, atomically reserve ledger và
+đưa `gpu_uuid` vào lease; Master không được tự đổi GPU.
 
 ### 2.2. Chế độ aiortc — đơn giản cho local/MVP
 
@@ -110,7 +121,7 @@ adapter implement `Protocol`, sau đó wire adapter trong `bootstrap/container.p
 
 ```text
 src/
-├── avatar_chat/
+├── personaforge_chat/
 │   ├── domain/
 │   │   ├── models.py                 # Entity, enum, state transition
 │   │   └── errors.py                 # Domain errors
@@ -142,7 +153,7 @@ src/
 │   │   ├── settings.py               # Env → typed settings
 │   │   └── container.py              # Composition root
 │   └── main.py                       # ASGI entrypoint
-└── avatar_worker/
+└── personaforge_worker/
     ├── main.py                       # Worker entrypoint
     ├── settings.py                   # Worker env settings
     ├── consumer.py                   # Redis consumer + session manager
@@ -196,7 +207,8 @@ stateDiagram-v2
 Các invariant chính:
 
 - Playback chỉ được đổi khi lifecycle là `READY`.
-- Provision idempotent: session đã `READY` chỉ cấp client token mới, không restart worker.
+- Provision idempotent giữ nguyên lease/generation nhưng phát lại fenced start như một repair
+  signal. Child đang chạy xử lý no-op; Worker vừa restart dùng lệnh này để dựng lại publisher.
 - `MEDIA_STARTING` từ request khác trả conflict thay vì tạo hai publisher.
 - Repository dùng `version` làm optimistic concurrency control; stale update trả conflict.
 - `close()` idempotent: gọi nhiều lần vẫn giữ `CLOSED`.
@@ -338,9 +350,10 @@ sequenceDiagram
         H->>P: assistant_chunk(full snapshot, revision)
     end
     H->>DB: CAS update status=complete
+    H->>P: assistant_complete(message_id, revision)
+    H->>R: avatar.speech.synthesize và chờ playback completed
     H->>R: avatar.state.set(idle)
     H->>P: avatar_state=idle
-    H->>P: assistant_complete(message_id, revision)
     P-->>B: events từ mọi API replica
 ```
 
@@ -348,6 +361,8 @@ sequenceDiagram
 là decorator áp dụng cho mọi reply provider, giúp kéo dài trạng thái speaking trong demo.
 Mỗi chunk là snapshot đầy đủ của message, không phải delta. Browser chỉ áp dụng revision mới
 hơn nên Redis delivery trùng hoặc event WebSocket đến sai thứ tự không làm nhân đôi text.
+Cursor text kết thúc tại `assistant_complete`; avatar vẫn có thể `speaking` cho đến khi audio và
+video playback hoàn tất.
 Nếu WebSocket đứt, browser tự reconnect theo exponential backoff tối đa 10 giây rồi gọi
 history theo từng page với cursor cuối để lấy mọi message/revision đã lưu.
 
@@ -1056,6 +1071,13 @@ LIVEKIT_RTC_UDP_PORT=17882
 REDIS_URL=redis://redis:6379/0
 REALTIME_EVENT_BUS=auto
 RENDER_WORKER_ID=avatar-worker-1
+CONTROL_PLANE_URL=http://personaforge-control:8090
+AVATAR_REGISTRATION_URL=http://personaforge-control:8090
+AVATAR_HOST_ID=demo-host
+AVATAR_WORKER_BOOTSTRAP_TOKEN=
+CONTROL_OPERATOR_TOKEN=<operator-secret>
+CONTROL_CORE_TOKEN=<different-core-secret>
+CONTROL_ENROLLMENT_JWT_SECRET=<random-secret-at-least-32-bytes>
 POSTGRES_DB=avatar
 POSTGRES_USER=avatar
 POSTGRES_PASSWORD=avatar
@@ -1086,15 +1108,61 @@ LIVEKIT_NODE_IP=192.168.20.166
 Không đổi `LIVEKIT_WORKER_URL=ws://livekit:7880`, vì worker dùng Docker DNS và cổng HTTP
 nội bộ của LiveKit.
 
-### 16.2. Start
+### 16.2. Start lần đầu và đăng ký Worker
+
+Không start `avatar-worker` trước khi có bootstrap token. Khởi động dependency, Control Plane
+và Agent Runtime trước:
 
 ```bash
-docker compose --profile livekit up --build -d
+docker compose --profile livekit --profile agent up -d --build \
+  postgres redis livekit personaforge-control personaforge-agent
+curl -fsS http://127.0.0.1:8090/health/live
 ```
 
-Compose start `postgres` trước, đợi `pg_isready`, sau đó container API tự chạy
-`alembic upgrade head` rồi mới chạy Uvicorn. Không cần chạy migration thủ công cho luồng start
-thông thường.
+Control chỉ cấp token cho operator đã xác thực. Giá trị `host_id` trong request phải trùng
+`AVATAR_HOST_ID` của Worker:
+
+```bash
+export CONTROL_OPERATOR_TOKEN='<same-operator-secret-as-env>'
+curl -fsS http://127.0.0.1:8090/internal/worker-enrollment-tokens \
+  -H "Authorization: Bearer ${CONTROL_OPERATOR_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "worker_type":"persona-render",
+    "cluster_id":"development",
+    "host_id":"demo-host",
+    "max_gpu_count":1,
+    "ttl_seconds":600
+  }'
+```
+
+Copy `bootstrap_token` từ response vào `.env`:
+
+```env
+AVATAR_WORKER_BOOTSTRAP_TOKEN=<returned-bootstrap-token>
+```
+
+Sau đó mới start Core và Worker:
+
+```bash
+docker compose --profile livekit --profile agent up -d --build \
+  avatar-chat avatar-worker
+```
+
+GPU host dùng lệnh tương ứng:
+
+```bash
+docker compose -f compose.yaml -f compose.gpu.yaml \
+  --profile livekit --profile agent up -d --build avatar-chat avatar-worker
+```
+
+Trong lần đầu, Worker dùng bootstrap JWT một lần để gọi `/internal/workers/register`, nhận
+management token cùng Redis ACL credential động, rồi ghi identity vào volume
+`avatar_worker_identity`. Có thể xóa bootstrap token khỏi `.env` sau khi registration thành
+công. Các lần restart gọi `/internal/workers/reregister` bằng management token trong volume.
+
+Compose start `postgres` trước, đợi `pg_isready`; container API chạy `alembic upgrade head`
+trước Uvicorn. Không cần migration thủ công cho luồng start thông thường.
 
 ### 16.3. Kiểm tra service
 
@@ -1103,13 +1171,22 @@ docker compose --profile livekit ps
 curl http://localhost:18000/api/health
 ```
 
-Mong đợi năm service running:
+Mong đợi các service sau running:
 
 - `avatar-chat`
 - `postgres` — healthy
 - `avatar-worker`
 - `redis` — healthy
 - `livekit`
+- `personaforge-control` — healthy
+- `personaforge-agent` — healthy khi dùng `AGENT_RUNTIME_PROVIDER=grpc`
+
+Kiểm tra inventory và hardware heartbeat:
+
+```bash
+curl -fsS http://127.0.0.1:8090/internal/workers \
+  -H "Authorization: Bearer ${CONTROL_OPERATOR_TOKEN}"
+```
 
 ### 16.4. Mở browser
 
@@ -1161,7 +1238,7 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e '.[dev]'
 bash scripts/generate_demo_videos.sh
-MEDIA_PROVIDER=aiortc uvicorn avatar_chat.main:app --host 0.0.0.0 --port 8000
+MEDIA_PROVIDER=aiortc uvicorn personaforge_chat.main:app --host 0.0.0.0 --port 8000
 ```
 
 Mở `http://localhost:8000`.
@@ -1294,8 +1371,9 @@ docker compose exec redis redis-cli XPENDING \
 | Redis command lỗi | Retry 3 lần, không ACK | Chưa DLQ/reclaim/alert |
 | Render start lỗi | Phát correlated failed event, Core đặt `FAILED` và cleanup | Chưa tự reschedule |
 | Stop treo | Chờ 5 giây rồi cancel | Chưa force cleanup GPU resource cụ thể |
-| Worker chết | Heartbeat hết hạn sau tối đa 15 giây | API chưa reschedule session |
-| LiveKit room close | Client/worker SDK reconnect tùy trạng thái | Chưa session recovery orchestration |
+| Worker restart cùng identity/GPU | Control phát hiện `boot_id` mới, phát lại persisted start; Master dựng Child và publisher | Publisher token hiện có TTL 1 giờ; cần token refresh cho session dài hơn |
+| Worker chết hoặc không quay lại | Heartbeat/lease hết hạn và release reservation | Chưa tự reschedule sang Worker khác |
+| LiveKit publisher mất do Worker restart | Child mới reconnect cùng room, browser nhận lại track | Cần UI recovery timeout rõ ràng khi SFU không hồi phục |
 | API restart + memory repo | Mất session/history | Dùng PostgreSQL; vẫn cần ownership design |
 
 ## 21. Security hiện tại và yêu cầu production
@@ -1412,16 +1490,34 @@ Nguyên tắc:
 
 ## 24. Scale worker trong tương lai
 
+Sơ đồ đầy đủ cho composite TTS/Avatar GPU slot, load voice/avatar model theo session,
+multi-reader audio master timeline và release lifecycle nằm tại
+[`tts-avatar-render-flow.md`](tts-avatar-render-flow.md).
+
+DTO, application ports, dependency direction, source structure và test strategy của Worker
+Application Core được mô tả riêng tại
+[`persona-worker-core-architecture.md`](persona-worker-core-architecture.md).
+
+Trạng thái implementation, data ownership, internal API và Docker enrollment runbook nằm tại
+[`control-plane-implementation.md`](control-plane-implementation.md).
+
+Quyết định cho giai đoạn model/TTS đầu tiên là worker auto-register qua Registration Service,
+nhận Redis ACL username/password động và giao tiếp Redis trực tiếp qua TLS. Scheduler replica,
+Redis HA/Cluster và Worker Control Service chỉ là target tương lai, chưa phải dependency MVP.
+
 Hiện tại API gửi mọi session tới một `RENDER_WORKER_ID` tĩnh. Kiến trúc production nên thêm:
 
-1. Worker registry dựa trên heartbeat/capabilities.
-2. Scheduler chọn worker theo GPU memory, active session và model affinity.
-3. Session-to-worker mapping bền vững.
-4. Worker-ready event sau khi track publish thành công.
-5. Timeout và reschedule nếu worker không ready.
-6. Graceful drain khi deploy worker.
-7. Idempotency/deduplication theo `command_id`.
-8. Pending reclaim và dead-letter stream.
+1. Worker registration bằng one-time bootstrap token.
+2. Dynamic Redis ACL credential theo `worker_id + boot_id`.
+3. Worker registry dựa trên heartbeat/capabilities.
+4. Scheduler chọn worker theo composite TTS/Avatar VRAM, compute budget, active session và
+   model/voice cache affinity.
+5. Session-to-worker mapping bền vững.
+6. Worker-ready event sau khi track publish thành công.
+7. Timeout và reschedule nếu worker không ready.
+8. Graceful drain khi deploy worker.
+9. Idempotency/deduplication theo `command_id`.
+10. Pending reclaim và dead-letter stream.
 
 Ví dụ mapping:
 
@@ -1429,7 +1525,7 @@ Ví dụ mapping:
 avatar:session:{session_id}:worker -> worker-7
 avatar:worker:worker-7             -> heartbeat/capabilities/load
 avatar:commands:worker-7           -> ordered commands
-avatar:events:{session_id}         -> ready/error/stopped events
+avatar:events:worker-7:{session_id} -> ready/error/stopped events
 ```
 
 ## 25. Test và quality gates
@@ -1476,20 +1572,23 @@ Smoke test end-to-end cần xác nhận thêm ngoài automated test:
 
 - Video vẫn là ba clip thu sẵn, chưa có avatar generation/lip-sync.
 - Audio là silence/beep, chưa có TTS nội dung.
-- Một worker ID tĩnh, chưa scheduler/capacity management.
-- Worker-ready/error đã correlation theo `command_id`; chưa có scheduler để reschedule.
+- Control đã schedule động theo cặp worker/GPU và atomic reservation; chưa tự reschedule sau khi
+  host mất heartbeat.
+- Worker-ready/error đã correlation theo `command_id`; cross-host recovery vẫn là HA roadmap.
 - Command pending chưa được reclaim và chưa có DLQ.
 - Publisher token nằm trong Redis command.
 - Room close dựa vào LiveKit tự cleanup.
 - Health endpoint chưa aggregate dependency readiness.
-- In-memory là mặc định và không hỗ trợ multi-replica API.
+- In-memory chỉ dùng local/test; Docker pipeline dùng PostgreSQL, Redis distributed turn lock và
+  Redis event fan-out để hỗ trợ nhiều API replica.
 - Redis Pub/Sub fan-out chat event giữa replica nhưng là kênh tạm thời; database cursor là
   nguồn phục hồi khi client reconnect. Session lock nằm trong process; optimistic version
   bảo vệ repository nhưng chưa thay distributed ownership khi hai replica đồng thời nhận chat.
 - Chưa TLS, TURN mặc định, quota hoặc production secret handling.
 - Frontend LiveKit SDK tải từ CDN và chưa pin/bundle version.
 - Chưa có metrics exporter/dashboard/alert.
-- Chưa có Kubernetes manifests, autoscaling hoặc GPU scheduling.
+- Chưa có Kubernetes manifests/autoscaling; Control Plane đã GPU scheduling ở application layer,
+  chưa tích hợp Kubernetes/MIG.
 
 ## 27. Thứ tự nâng cấp được khuyến nghị
 
@@ -1519,8 +1618,8 @@ Smoke test end-to-end cần xác nhận thêm ngoài automated test:
 
 ### Giai đoạn D — scale và production hardening
 
-- Scheduler + worker registry + session affinity.
-- PostgreSQL + migration + distributed ownership.
+- Scheduler/Worker registry HA và cross-host reschedule automation.
+- PostgreSQL partition maintenance và telemetry archival tier.
 - TLS, auth, TURN, secret manager và rate limiting.
 - Metrics/tracing/dashboard/alert.
 - Rolling deploy và graceful drain.
@@ -1540,9 +1639,11 @@ Smoke test end-to-end cần xác nhận thêm ngoài automated test:
 
 ### Sau khi start
 
-- [ ] Năm container running, PostgreSQL và Redis healthy.
+- [ ] API, Control, Agent, Worker, LiveKit, PostgreSQL và Redis running/healthy.
 - [ ] `/api/health` trả 200.
 - [ ] Worker heartbeat tồn tại.
+- [ ] `/internal/telemetry/status` có Redis Stream và PostgreSQL sample tăng.
+- [ ] Lease provision có cả `worker_id`, `gpu_uuid` và `resource_source`.
 - [ ] Browser connection state là connected.
 - [ ] Client subscribed audio và video.
 - [ ] Frame counter tăng.
@@ -1565,6 +1666,11 @@ Smoke test end-to-end cần xác nhận thêm ngoài automated test:
 10. Queue phải hữu hạn để kiểm soát latency và backpressure.
 11. Beep/flash và frame counter là observability nằm ngay trong media payload.
 12. Mọi external provider được thay bằng adapter và composition-root wiring.
+13. DB persona/model config là safety floor; request không được hạ thấp reservation.
+14. Observed profile được resolve theo GPU model/compute capability, không dùng chéo GPU class.
+15. Reservation ledger là authority; utilization/temperature chỉ dùng health và scoring.
+16. Persona/avatar/voice/TTS config trong DB là safety floor khi so sánh candidate GPU.
+17. Compatible profile chỉ dùng cùng GPU/runtime/output shape và phải cộng margin lớn hơn.
 
 Những quyết định này cho phép pipeline hiện tại tiếp tục chạy bằng clip demo, đồng thời mở
 đường thay clip decoder bằng model sinh avatar thật mà không viết lại session, chat, API hay

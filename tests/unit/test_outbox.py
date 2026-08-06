@@ -2,19 +2,19 @@ from datetime import datetime, timezone
 
 import pytest
 
-from avatar_chat.adapters.outbound.memory import (
+from personaforge_chat.adapters.outbound.memory import (
     InMemoryAuditLogRepository,
     InMemorySessionMutationUnitOfWork,
     InMemorySessionRepository,
     InMemorySessionShareRepository,
 )
-from avatar_chat.adapters.outbound.outbox import RealtimeOutboxDispatcher
-from avatar_chat.application.dto import (
+from personaforge_chat.adapters.outbound.outbox import RealtimeOutboxDispatcher
+from personaforge_chat.application.dto import (
     ChatEventType,
     ChatOutputEvent,
     RealtimeOutboxEvent,
 )
-from avatar_chat.domain.models import (
+from personaforge_chat.domain.models import (
     AuditLog,
     AvatarSession,
     AvatarState,

@@ -15,12 +15,23 @@ Tài liệu kiến trúc:
   [docs/direct-worker-streaming.md](docs/direct-worker-streaming.md).
 - Agent Runtime, gRPC streaming và delegated authorization:
   [docs/agent-runtime.md](docs/agent-runtime.md).
+- Luồng mục tiêu Core, composite TTS/Avatar GPU slot, audio timeline và LiveKit:
+  [docs/tts-avatar-render-flow.md](docs/tts-avatar-render-flow.md).
+- Worker Application Core, TTS/lip-sync interfaces và adapter boundaries:
+  [docs/persona-worker-core-architecture.md](docs/persona-worker-core-architecture.md).
+- Worker Master–Child, gRPC bidirectional stream qua Unix Domain Socket và multi-GPU:
+  [docs/worker-master-child-grpc.md](docs/worker-master-child-grpc.md).
+- Control Plane đã triển khai, data ownership, enrollment và Docker runbook:
+  [docs/control-plane-implementation.md](docs/control-plane-implementation.md).
 
 Phiên bản hiện tại là nền tảng MVP của PersonaForge, được triển khai theo Hexagonal
 Architecture. FastAPI nhận signaling/chat; media có thể chạy
 trực tiếp bằng aiortc hoặc qua Render Worker + LiveKit SFU. Video chuyển giữa các trạng thái
 `idle`, `thinking`, `speaking`, và core không phụ thuộc framework.
-Server đồng thời phát một audio track PCM im lặng; track này là điểm thay thế dành cho TTS.
+Trong LiveKit worker mode, text đi qua fake `CompositeSpeechPipeline`: tone PCM 440 Hz và frame
+lip-sync lấy từ `speaking.mp4` dùng chung audio master timeline. Tin nhắn bỏ cursor ngay khi
+Agent sinh xong text; avatar tiếp tục `speaking` cho đến khi audio/video playback hoàn tất.
+Các application port này là điểm thay thế dành cho model TTS/avatar thật.
 Mỗi frame video có bộ đếm sáu chữ số ở góc trái để quan sát stream còn đang chạy.
 Trạng thái `thinking` được giữ tối thiểu một giây và có thể chỉnh bằng
 `THINKING_MIN_DURATION`.
@@ -34,6 +45,41 @@ Provider `local` vẫn được giữ để demo không cần thêm service.
 
 ## Chạy local
 
+### Makefile for development and demo operations
+
+The repository provides a Makefile as the consistent entry point for common development and
+operations workflows. List all targets and supported overrides with:
+
+```bash
+make help
+make doctor
+make env-check
+```
+
+Main startup workflows:
+
+```bash
+make up            # aiortc + PostgreSQL + Redis
+make up-agent      # add the gRPC Agent Runtime
+make up-control    # first boot: start Control/LiveKit before Worker
+make enroll-worker # issue a one-time token and update .env without logging it
+make up-livekit    # full pipeline with a CPU Worker
+make up-gpu        # full pipeline with an NVIDIA Worker
+```
+
+`make restart-worker` does not reload `.env`. After changing Worker configuration, use
+`make recreate-worker` or `make recreate-worker-gpu`. The `worker-status`, `capacity`, and
+`telemetry` targets summarize heartbeat data without exposing credentials. `make reset-demo`
+deletes PostgreSQL, Redis, and Worker identity volumes, so it requires `CONFIRM=YES`.
+
+Local and CI quality gates:
+
+```bash
+make check
+make unit PYTEST_ARGS="-x -vv"
+make e2e
+```
+
 Yêu cầu Python 3.10+ và FFmpeg:
 
 ```bash
@@ -41,7 +87,7 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e '.[dev]'
 bash scripts/generate_demo_videos.sh
-uvicorn avatar_chat.main:app --reload
+uvicorn personaforge_chat.main:app --reload
 ```
 
 Mở <http://localhost:8000>. Trên máy khác cần HTTPS và cấu hình STUN/TURN trong `.env`.
@@ -193,13 +239,151 @@ Browser <-- WebRTC --> LiveKit SFU <-- WebRTC --> avatar-worker
 Browser <-- HTTP/WS --> avatar-chat <-- Redis Streams --> avatar-worker
 ```
 
-Chạy đầy đủ bằng Docker:
+### Khởi động LiveKit lần đầu với Worker enrollment
+
+Enrollment không thể dùng lệnh `up` tất cả ngay lần đầu vì Worker cần bootstrap token do
+Control Plane cấp trước khi nó khởi động. Chuẩn bị `.env`:
 
 ```bash
 cp .env.example .env
 sed -i 's/MEDIA_PROVIDER=aiortc/MEDIA_PROVIDER=livekit/' .env
-docker compose --profile livekit up --build
 ```
+
+Thay các development secret trong `.env`, đồng thời giữ các URL nội bộ và `host_id`:
+
+```env
+CONTROL_OPERATOR_TOKEN=<operator-secret>
+CONTROL_CORE_TOKEN=<different-core-secret>
+CONTROL_ENROLLMENT_JWT_SECRET=<random-secret-at-least-32-bytes>
+CONTROL_PLANE_URL=http://personaforge-control:8090
+AVATAR_REGISTRATION_URL=http://personaforge-control:8090
+AVATAR_HOST_ID=demo-host
+AVATAR_WORKER_BOOTSTRAP_TOKEN=
+```
+
+Khởi động storage, SFU, Control Plane và Agent trước; chưa start Worker:
+
+```bash
+docker compose --profile livekit --profile agent up -d --build \
+  postgres redis livekit personaforge-control personaforge-agent
+curl -fsS http://127.0.0.1:8090/health/live
+```
+
+Cấp bootstrap token bằng đúng `CONTROL_OPERATOR_TOKEN` và `AVATAR_HOST_ID` trong `.env`:
+
+```bash
+export CONTROL_OPERATOR_TOKEN='<same-operator-secret-as-env>'
+curl -fsS http://127.0.0.1:8090/internal/worker-enrollment-tokens \
+  -H "Authorization: Bearer ${CONTROL_OPERATOR_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "worker_type":"persona-render",
+    "cluster_id":"development",
+    "host_id":"demo-host",
+    "max_gpu_count":1,
+    "ttl_seconds":600
+  }'
+```
+
+Copy `bootstrap_token` trong response vào `.env`, rồi start Core và Worker CPU:
+
+```env
+AVATAR_WORKER_BOOTSTRAP_TOKEN=<returned-bootstrap-token>
+```
+
+```bash
+docker compose --profile livekit --profile agent up -d --build \
+  avatar-chat avatar-worker
+```
+
+Đối với Worker GPU, dùng file override ở bước cuối:
+
+```bash
+docker compose -f compose.yaml -f compose.gpu.yaml \
+  --profile livekit --profile agent up -d --build avatar-chat avatar-worker
+```
+
+Kiểm tra Worker đã register và đang gửi hardware heartbeat:
+
+```bash
+curl -fsS http://127.0.0.1:8090/internal/workers \
+  -H "Authorization: Bearer ${CONTROL_OPERATOR_TOKEN}"
+docker compose --profile livekit logs -f avatar-worker
+```
+
+Kết quả cần có `status=ready`, `worker_id`, GPU capability và `heartbeat`. Sau lần enrollment
+đầu, Worker lưu management token trong volume `avatar_worker_identity`; có thể xóa
+`AVATAR_WORKER_BOOTSTRAP_TOKEN` khỏi `.env`. Khi restart, Worker dùng management token để
+`reregister` và nhận Redis ACL credential mới, không cần bootstrap token mới. Chỉ phát token
+mới khi identity bị revoke hoặc volume identity bị xóa có chủ đích.
+
+`max_gpu_count` trong enrollment token và `AVATAR_WORKER_MAX_GPU_COUNT` phải bằng nhau. Control
+từ chối Worker advertise nhiều GPU hơn token. Một Master có thể quản lý nhiều GPU; Scheduler
+reserve theo key `(worker_id, gpu_uuid)` và lease trả về cả hai ID. Nếu identity cũ đã enrollment
+với một GPU, cần deregister identity cũ và cấp bootstrap token mới trước khi mở rộng inventory.
+
+Heartbeat được append vào Redis Stream và Control lưu raw samples vào PostgreSQL. Kiểm tra:
+
+```bash
+docker compose exec -T postgres psql -U avatar -d avatar -c \
+  "select worker_id,gpu_uuid,sampled_at,used_vram_mb,gpu_utilization \
+   from gpu_heartbeat_samples order by sampled_at desc limit 10;"
+```
+
+Cấu hình safety floor cho một cặp nhân vật/giọng đọc bằng operator API:
+
+```bash
+curl -fsS -X PUT http://127.0.0.1:8090/internal/resource-configs \
+  -H "Authorization: Bearer ${CONTROL_OPERATOR_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "character_id":"default",
+    "avatar_model_id":"recorded-avatar",
+    "avatar_revision":"default",
+    "voice_id":"default",
+    "tts_model_id":"scripted-tone",
+    "tts_revision":"default",
+    "runtime":"scripted",
+    "runtime_version":"default",
+    "precision":"fp32",
+    "resolution":"640x360",
+    "fps":25,
+    "isolation_mode":"subprocess",
+    "gpu_name":"NVIDIA GeForce RTX 3090",
+    "minimum_compute_capability":"8.0",
+    "manifest_peak_vram_mb":6000,
+    "manifest_gpu_duty_cycle":0.30,
+    "bootstrap_vram_margin_mb":512,
+    "bootstrap_compute_margin":0.05,
+    "active":true
+  }'
+```
+
+Scheduler đối chiếu đủ tuple nhân vật + avatar revision + voice + TTS revision trong PostgreSQL.
+Cấu hình này luôn là safety floor. Nếu có profile đo đúng cặp trên đúng GPU thì dùng P99/high
+watermark; nếu chưa có, Control có thể dùng profile tương thích cùng avatar hoặc cùng voice/TTS
+trên đúng GPU/runtime và cộng `CONTROL_RESOURCE_COMPATIBLE_VRAM_MARGIN_MB`. Chỉ khi không có cả
+profile lẫn config mới dùng platform default. Đặt `gpu_name: null` để manifest áp dụng cho mọi
+GPU; Control lưu nó bằng khóa chuẩn `*` để upsert idempotent.
+
+`GET /internal/resource-profiles`, `GET /internal/resource-configs` và
+`GET /internal/telemetry/status` lần lượt cho phép operator xem P50/P95/P99, manifest đang dùng
+và trạng thái ingest. Mỗi lease trả `resource_source`/`resource_profile_id` để audit quyết định.
+
+Muốn chạy legacy không enrollment, đặt `CONTROL_PLANE_URL=` và `AVATAR_REGISTRATION_URL=`;
+Worker khi đó kết nối trực tiếp bằng `REDIS_URL` và không có dynamic Redis ACL identity.
+
+Worker được tách khỏi image API: `Dockerfile.worker` dành cho fake pipeline CPU/local/CI.
+Trên NVIDIA host đã cài driver và NVIDIA Container Toolkit, dùng CUDA/cuDNN Worker bằng file
+override có sẵn:
+
+```bash
+docker compose -f compose.yaml -f compose.gpu.yaml \
+  --profile livekit --profile agent up -d --build
+```
+
+`WORKER_CUDA_IMAGE` trong `.env` cho phép pin CUDA/cuDNN base image phù hợp với framework model.
+Image GPU chưa cài PyTorch/ONNX/TensorRT cho đến khi adapter model thật được chọn.
 
 Sau đó mở <http://localhost:8000>. Các giá trị `devkey/secret` trong `.env.example` chỉ
 dành cho local. Frontend demo tải LiveKit browser SDK từ jsDelivr nên trình duyệt cần truy
@@ -225,7 +409,7 @@ Chạy worker ngoài Docker, khi Redis và LiveKit đã có sẵn:
 
 ```bash
 REDIS_URL=redis://localhost:6379/0 \
-python -m avatar_worker.main
+python -m personaforge_worker.main
 ```
 
 Chi tiết thiết kế và hướng tích hợp model thật nằm trong
@@ -264,6 +448,7 @@ cũng reconcile snapshot định kỳ để tránh giữ UI cũ.
 - Audio hiện là track im lặng 48 kHz; chưa có nội dung TTS.
 - Agent Runtime đã tách process và bảo vệ bằng delegated JWT, nhưng TTS/Avatar model thật
   chưa được gắn; audio/video vẫn do media runtime demo hiện tại phát.
-- Chế độ LiveKit hiện dùng một worker tĩnh qua `RENDER_WORKER_ID`; chưa có scheduler động.
+- Chế độ LiveKit + Control Plane đã chọn động cặp `worker_id + gpu_uuid`; `RENDER_WORKER_ID` chỉ
+  còn dùng trong legacy mode khi `CONTROL_PLANE_URL` để trống.
 - Redis Streams chưa có pending reclaim/DLQ; readiness đã được xác nhận theo `command_id`
   sau khi worker publish đủ audio và video track.

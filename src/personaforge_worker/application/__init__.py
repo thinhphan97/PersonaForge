@@ -1,0 +1,1 @@
+"""Persona worker application core."""

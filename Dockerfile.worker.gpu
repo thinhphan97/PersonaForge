@@ -1,0 +1,41 @@
+ARG CUDA_IMAGE=nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+FROM ${CUDA_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/src \
+    PROJECT_ROOT=/app \
+    PATH=/opt/personaforge-venv/bin:$PATH
+
+WORKDIR /app
+
+# Ubuntu 22.04 provides Python 3.10. CUDA/cuDNN come from the NVIDIA base image;
+# the host still supplies the compatible kernel driver through Container Toolkit.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        python3 \
+        python3-pip \
+        python3-venv \
+    && python3 -m venv /opt/personaforge-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.worker.txt ./requirements.worker.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.worker.txt
+
+COPY src/personaforge_chat ./src/personaforge_chat
+COPY src/personaforge_worker ./src/personaforge_worker
+COPY src/personaforge ./src/personaforge
+COPY src/personaforge_observability ./src/personaforge_observability
+COPY scripts/generate_demo_videos.sh ./scripts/generate_demo_videos.sh
+RUN bash scripts/generate_demo_videos.sh \
+    && useradd --create-home --uid 10001 personaforge \
+    && mkdir -p /var/lib/personaforge/avatar-worker /run/personaforge/worker-master \
+    && chown -R personaforge:personaforge \
+        /app /opt/personaforge-venv /var/lib/personaforge /run/personaforge
+
+USER personaforge
+
+CMD ["python", "-m", "personaforge_worker.main"]

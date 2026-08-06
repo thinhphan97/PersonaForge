@@ -1,7 +1,7 @@
 import jwt
 import pytest
 
-from avatar_chat.adapters.outbound.media.livekit_room import LiveKitMediaRoomAdapter
+from personaforge_chat.adapters.outbound.media.livekit_room import LiveKitMediaRoomAdapter
 
 
 @pytest.mark.asyncio

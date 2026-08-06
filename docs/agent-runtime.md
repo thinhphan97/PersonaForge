@@ -60,6 +60,10 @@ tránh hiển thị speaking trong lúc Agent chỉ gửi heartbeat. Nếu RPC l
 client hủy request hoặc session đóng, Core gọi `CancelTurn` best effort và lưu trạng thái
 `failed`, `timed_out` hoặc `cancelled`.
 
+`assistant_complete` được phát ngay sau `turn_completed` và kết thúc cursor text. Media playback
+là lifecycle riêng: avatar tiếp tục `speaking` cho đến khi Worker acknowledge audio/video cuối,
+sau đó Core mới phát `avatar_state=idle`.
+
 ## Contract gRPC
 
 Contract nguồn nằm tại `proto/personaforge/agent/v1/agent.proto`. Không sửa trực tiếp hai file
@@ -221,7 +225,7 @@ Nếu chạy service ngoài Docker:
 ```bash
 AGENT_GRPC_TARGET=127.0.0.1:50051 \
 AGENT_RUNTIME_PROVIDER=grpc \
-uvicorn avatar_chat.main:app --host 0.0.0.0 --port 8000
+uvicorn personaforge_chat.main:app --host 0.0.0.0 --port 8000
 
 python -m personaforge_agent.main
 ```

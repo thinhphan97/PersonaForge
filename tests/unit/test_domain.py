@@ -2,8 +2,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from avatar_chat.domain.errors import InvalidStateTransition
-from avatar_chat.domain.models import (
+from personaforge_chat.domain.errors import InvalidStateTransition
+from personaforge_chat.domain.models import (
     AvatarSession,
     AvatarState,
     SessionStatus,

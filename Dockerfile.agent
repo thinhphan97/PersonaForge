@@ -15,6 +15,7 @@ RUN pip install --no-cache-dir \
 
 COPY src/personaforge ./src/personaforge
 COPY src/personaforge_agent ./src/personaforge_agent
+COPY src/personaforge_observability ./src/personaforge_observability
 
 RUN useradd --create-home --uid 10001 personaforge
 USER personaforge

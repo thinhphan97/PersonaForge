@@ -2,10 +2,15 @@ services:
   avatar-chat:
     build: .
     command:
-      ["sh", "-c", "alembic upgrade head && exec uvicorn avatar_chat.main:app --host 0.0.0.0 --port 8000"]
+      ["sh", "-c", "alembic upgrade head && exec uvicorn personaforge_chat.main:app --host 0.0.0.0 --port 8000"]
     ports:
       - "${APP_HTTP_PORT:-8000}:8000"
     environment:
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_THIRD_PARTY_LEVEL: ${LOG_THIRD_PARTY_LEVEL:-WARNING}
+      LOG_ENVIRONMENT: ${LOG_ENVIRONMENT:-development}
+      LOG_SERVICE_VERSION: ${LOG_SERVICE_VERSION:-0.1.0}
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://avatar:avatar@postgres:5432/avatar}
       AUTO_CREATE_SCHEMA: ${AUTO_CREATE_SCHEMA:-false}
       REFRESH_COOKIE_NAME: ${REFRESH_COOKIE_NAME:-avatar_refresh}
@@ -49,6 +54,10 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       REALTIME_EVENT_BUS: ${REALTIME_EVENT_BUS:-auto}
       RENDER_WORKER_ID: ${RENDER_WORKER_ID:-avatar-worker-1}
+      CONTROL_PLANE_URL: ${CONTROL_PLANE_URL:-}
+      CONTROL_CORE_TOKEN: ${CONTROL_CORE_TOKEN:-development-core-control-token-change-me}
+      PERSONA_PEAK_VRAM_MB: ${PERSONA_PEAK_VRAM_MB:-0}
+      PERSONA_GPU_DUTY_CYCLE: ${PERSONA_GPU_DUTY_CYCLE:-0.1}
       AVATAR_CHARACTERS_ROOT: ${AVATAR_CHARACTERS_ROOT:-/app/assets/characters}
     depends_on:
       postgres:
@@ -64,8 +73,13 @@ services:
     command: ["python", "-m", "personaforge_agent.main"]
     profiles: ["agent"]
     environment:
-      AGENT_GRPC_HOST: 0.0.0.0
-      AGENT_GRPC_PORT: 50051
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_THIRD_PARTY_LEVEL: ${LOG_THIRD_PARTY_LEVEL:-WARNING}
+      LOG_ENVIRONMENT: ${LOG_ENVIRONMENT:-development}
+      LOG_SERVICE_VERSION: ${LOG_SERVICE_VERSION:-0.1.0}
+      AGENT_GRPC_HOST: ${AGENT_GRPC_HOST:-0.0.0.0}
+      AGENT_GRPC_PORT: ${AGENT_GRPC_PORT:-50051}
       AGENT_GRPC_TLS_CERT_FILE: ${AGENT_GRPC_TLS_CERT_FILE:-}
       AGENT_GRPC_TLS_KEY_FILE: ${AGENT_GRPC_TLS_KEY_FILE:-}
       AGENT_GRPC_TLS_CLIENT_CA_FILE: ${AGENT_GRPC_TLS_CLIENT_CA_FILE:-}
@@ -113,6 +127,61 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  personaforge-control:
+    build: .
+    command:
+      ["sh", "-c", "alembic upgrade head && exec uvicorn personaforge_control.main:app --host 0.0.0.0 --port 8090"]
+    profiles: ["livekit"]
+    ports:
+      - "127.0.0.1:${CONTROL_HTTP_PORT:-8090}:8090"
+    environment:
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_THIRD_PARTY_LEVEL: ${LOG_THIRD_PARTY_LEVEL:-WARNING}
+      LOG_ENVIRONMENT: ${LOG_ENVIRONMENT:-development}
+      LOG_SERVICE_VERSION: ${LOG_SERVICE_VERSION:-0.1.0}
+      CONTROL_HOST: ${CONTROL_HOST:-0.0.0.0}
+      CONTROL_PORT: ${CONTROL_PORT:-8090}
+      CONTROL_REDIS_ADMIN_URL: ${CONTROL_REDIS_ADMIN_URL:-redis://redis:6379/0}
+      CONTROL_REDIS_WORKER_URL: ${CONTROL_REDIS_WORKER_URL:-redis://redis:6379/0}
+      CONTROL_ENROLLMENT_JWT_SECRET: ${CONTROL_ENROLLMENT_JWT_SECRET:-development-control-enrollment-secret-change-me}
+      CONTROL_ENROLLMENT_ISSUER: ${CONTROL_ENROLLMENT_ISSUER:-personaforge-control}
+      CONTROL_ENROLLMENT_AUDIENCE: ${CONTROL_ENROLLMENT_AUDIENCE:-personaforge-render-worker-enrollment}
+      CONTROL_OPERATOR_TOKEN: ${CONTROL_OPERATOR_TOKEN:-development-operator-token-change-me}
+      CONTROL_CORE_TOKEN: ${CONTROL_CORE_TOKEN:-development-core-control-token-change-me}
+      CONTROL_REGISTRATION_TTL_SECONDS: ${CONTROL_REGISTRATION_TTL_SECONDS:-15}
+      CONTROL_REDIS_CREDENTIAL_TTL_SECONDS: ${CONTROL_REDIS_CREDENTIAL_TTL_SECONDS:-3600}
+      CONTROL_SLOT_LEASE_SECONDS: ${CONTROL_SLOT_LEASE_SECONDS:-30}
+      CONTROL_DATABASE_URL: ${CONTROL_DATABASE_URL:-postgresql+asyncpg://avatar:avatar@postgres:5432/avatar}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://avatar:avatar@postgres:5432/avatar}
+      CONTROL_TELEMETRY_CONSUMER_NAME: ${CONTROL_TELEMETRY_CONSUMER_NAME:-control-1}
+      CONTROL_TELEMETRY_BATCH_SIZE: ${CONTROL_TELEMETRY_BATCH_SIZE:-100}
+      CONTROL_TELEMETRY_POLL_SECONDS: ${CONTROL_TELEMETRY_POLL_SECONDS:-1}
+      CONTROL_TELEMETRY_CLAIM_IDLE_MS: ${CONTROL_TELEMETRY_CLAIM_IDLE_MS:-30000}
+      CONTROL_TELEMETRY_AGGREGATE_SECONDS: ${CONTROL_TELEMETRY_AGGREGATE_SECONDS:-60}
+      CONTROL_TELEMETRY_RETENTION_DAYS: ${CONTROL_TELEMETRY_RETENTION_DAYS:-30}
+      CONTROL_TELEMETRY_RETENTION_INTERVAL_SECONDS: ${CONTROL_TELEMETRY_RETENTION_INTERVAL_SECONDS:-3600}
+      CONTROL_RESOURCE_DEFAULT_PEAK_VRAM_MB: ${CONTROL_RESOURCE_DEFAULT_PEAK_VRAM_MB:-4096}
+      CONTROL_RESOURCE_DEFAULT_GPU_DUTY_CYCLE: ${CONTROL_RESOURCE_DEFAULT_GPU_DUTY_CYCLE:-0.25}
+      CONTROL_RESOURCE_COMPATIBLE_VRAM_MARGIN_MB: ${CONTROL_RESOURCE_COMPATIBLE_VRAM_MARGIN_MB:-1024}
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          assert urllib.request.urlopen('http://127.0.0.1:8090/health/live', timeout=2).status == 200
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
   postgres:
     image: postgres:16-alpine
     environment:
@@ -131,12 +200,49 @@ services:
     restart: unless-stopped
 
   avatar-worker:
-    build: .
-    command: ["python", "-m", "avatar_worker.main"]
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    image: personaforge-avatar-worker:local
+    command: ["python", "-m", "personaforge_worker.main"]
     profiles: ["livekit"]
     environment:
-      WORKER_ID: ${RENDER_WORKER_ID:-avatar-worker-1}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_THIRD_PARTY_LEVEL: ${LOG_THIRD_PARTY_LEVEL:-WARNING}
+      LOG_ENVIRONMENT: ${LOG_ENVIRONMENT:-development}
+      LOG_SERVICE_VERSION: ${LOG_SERVICE_VERSION:-0.1.0}
+      PERSONA_WORKER_ROLE: master
+      PERSONA_MASTER_SOCKET: ${PERSONA_MASTER_SOCKET:-/run/personaforge/worker-master/control.sock}
+      PERSONA_MASTER_MAX_CHILDREN: ${PERSONA_MASTER_MAX_CHILDREN:-32}
+      PERSONA_CHILD_HANDSHAKE_TIMEOUT_SECONDS: ${PERSONA_CHILD_HANDSHAKE_TIMEOUT_SECONDS:-10}
+      PERSONA_CHILD_HEARTBEAT_INTERVAL_SECONDS: ${PERSONA_CHILD_HEARTBEAT_INTERVAL_SECONDS:-1}
+      PERSONA_CHILD_HEARTBEAT_TIMEOUT_SECONDS: ${PERSONA_CHILD_HEARTBEAT_TIMEOUT_SECONDS:-5}
+      PERSONA_CHILD_STOP_GRACE_SECONDS: ${PERSONA_CHILD_STOP_GRACE_SECONDS:-10}
+      PERSONA_CHILD_COMMAND_QUEUE_SIZE: ${PERSONA_CHILD_COMMAND_QUEUE_SIZE:-100}
+      PERSONA_RESOURCE_PROBE_PROVIDER: ${PERSONA_RESOURCE_PROBE_PROVIDER:-auto}
+      PERSONA_RESOURCE_PROBE_TIMEOUT_SECONDS: ${PERSONA_RESOURCE_PROBE_TIMEOUT_SECONDS:-3}
+      AVATAR_WORKER_ID: ${AVATAR_WORKER_ID:-}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      AVATAR_REGISTRATION_URL: ${AVATAR_REGISTRATION_URL:-}
+      AVATAR_WORKER_BOOTSTRAP_TOKEN: ${AVATAR_WORKER_BOOTSTRAP_TOKEN:-}
+      AVATAR_WORKER_BOOTSTRAP_TOKEN_FILE: ${AVATAR_WORKER_BOOTSTRAP_TOKEN_FILE:-}
+      AVATAR_WORKER_STATE_DIR: ${AVATAR_WORKER_STATE_DIR:-/var/lib/personaforge/avatar-worker}
+      AVATAR_HOST_ID: ${AVATAR_HOST_ID:-}
+      AVATAR_GPU_UUID: ${AVATAR_GPU_UUID:-GPU-none}
+      AVATAR_GPU_NAME: ${AVATAR_GPU_NAME:-CPU or unreported GPU}
+      AVATAR_GPU_COMPUTE_CAPABILITY: ${AVATAR_GPU_COMPUTE_CAPABILITY:-0.0}
+      AVATAR_GPU_TOTAL_VRAM_MB: ${AVATAR_GPU_TOTAL_VRAM_MB:-0}
+      AVATAR_GPU_SCHEDULABLE_VRAM_MB: ${AVATAR_GPU_SCHEDULABLE_VRAM_MB:-0}
+      AVATAR_WORKER_MAX_SLOTS: ${AVATAR_WORKER_MAX_SLOTS:-1}
+      AVATAR_WORKER_MAX_GPU_COUNT: ${AVATAR_WORKER_MAX_GPU_COUNT:-1}
+      AVATAR_WORKER_COMPUTE_BUDGET: ${AVATAR_WORKER_COMPUTE_BUDGET:-0.85}
+      AVATAR_WORKER_REGISTRATION_TTL_SECONDS: ${AVATAR_WORKER_REGISTRATION_TTL_SECONDS:-15}
+      AVATAR_WORKER_HEARTBEAT_INTERVAL_SECONDS: ${AVATAR_WORKER_HEARTBEAT_INTERVAL_SECONDS:-5}
+      AVATAR_WORKER_TELEMETRY_STREAM_MAXLEN: ${AVATAR_WORKER_TELEMETRY_STREAM_MAXLEN:-17280}
+      AVATAR_GPU_PROBE_PROVIDER: ${AVATAR_GPU_PROBE_PROVIDER:-auto}
+      AVATAR_GPU_PROBE_TIMEOUT_SECONDS: ${AVATAR_GPU_PROBE_TIMEOUT_SECONDS:-3}
+      AVATAR_GPU_RESERVE_VRAM_MB: ${AVATAR_GPU_RESERVE_VRAM_MB:-512}
       WORKER_VIDEO_WIDTH: ${WORKER_VIDEO_WIDTH:-640}
       WORKER_VIDEO_HEIGHT: ${WORKER_VIDEO_HEIGHT:-360}
       WORKER_VIDEO_FPS: ${WORKER_VIDEO_FPS:-25}
@@ -144,6 +250,8 @@ services:
       WORKER_AUDIO_SAMPLE_RATE: ${WORKER_AUDIO_SAMPLE_RATE:-48000}
       WORKER_AUDIO_FRAME_DURATION: ${WORKER_AUDIO_FRAME_DURATION:-0.02}
       WORKER_VIDEO_QUEUE_MS: ${WORKER_VIDEO_QUEUE_MS:-80}
+      TTS_AUDIO_BUFFER_MAX_MS: ${TTS_AUDIO_BUFFER_MAX_MS:-2000}
+      SCRIPTED_TTS_MS_PER_CHARACTER: ${SCRIPTED_TTS_MS_PER_CHARACTER:-40}
       AV_SYNC_DEBUG: ${AV_SYNC_DEBUG:-true}
       AV_SYNC_INTERVAL: ${AV_SYNC_INTERVAL:-2.0}
       AV_SYNC_PULSE_DURATION: ${AV_SYNC_PULSE_DURATION:-0.1}
@@ -151,12 +259,20 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      personaforge-control:
+        condition: service_healthy
+        required: false
       livekit:
         condition: service_started
+    volumes:
+      - avatar_worker_identity:/var/lib/personaforge/avatar-worker
     restart: unless-stopped
 
   redis:
     image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
@@ -178,3 +294,5 @@ services:
 
 volumes:
   postgres_data:
+  redis_data:
+  avatar_worker_identity:

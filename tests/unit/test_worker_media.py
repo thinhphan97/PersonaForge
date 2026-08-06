@@ -1,19 +1,21 @@
 import av
 
-from avatar_chat.adapters.outbound.media.recorded_source import (
+from personaforge_chat.adapters.outbound.media.recorded_source import (
     RecordedCharacterCatalog,
     RecordedClipCatalog,
 )
-from avatar_chat.bootstrap.settings import Settings
-from avatar_chat.domain.models import AvatarState
-from avatar_worker.livekit_session import (
+from personaforge_chat.bootstrap.settings import Settings
+from personaforge_chat.domain.models import AvatarState
+from personaforge_worker.domain.media import PixelFormat, TimedVideoFrame
+from personaforge_worker.livekit_session import (
     LiveKitRenderSession,
     _audio_frame,
+    _to_livekit_timed_video_frame,
     _to_livekit_video_frame,
     _video_publish_options,
 )
-from avatar_worker.recorded_frames import LoopingRecordedFrameSource
-from avatar_worker.settings import WorkerSettings
+from personaforge_worker.recorded_frames import LoopingRecordedFrameSource
+from personaforge_worker.settings import WorkerSettings
 
 
 def test_worker_audio_uses_exact_twenty_millisecond_pcm_frames() -> None:
@@ -30,6 +32,31 @@ def test_worker_audio_uses_exact_twenty_millisecond_pcm_frames() -> None:
     assert frame.samples_per_channel == 960
     assert frame.duration == 0.02
     assert set(bytes(frame.data)) == {0}
+
+
+def test_lipsync_rgba_is_decorated_with_stable_output_counter() -> None:
+    width, height = 160, 80
+    data = bytes((11, 22, 33, 255)) * width * height
+
+    frame = _to_livekit_timed_video_frame(
+        TimedVideoFrame(
+            session_id="session-1",
+            utterance_id="utterance-1",
+            frame_index=0,
+            pts_ns=0,
+            width=width,
+            height=height,
+            pixel_format=PixelFormat.RGBA,
+            data=data,
+        ),
+        frame_number=731,
+        sync_flash=False,
+    )
+
+    assert frame.width == width
+    assert frame.height == height
+    assert len(frame.data) == len(data)
+    assert frame.data != data
 
 
 def test_demo_characters_have_distinct_video_colors() -> None:

@@ -294,7 +294,7 @@ adapter chỉ diễn ra trong `bootstrap/container.py`.
 ## 7. Cấu trúc source code mục tiêu
 
 ```text
-src/avatar_chat/
+src/personaforge_chat/
 ├── domain/
 │   ├── models.py
 │   ├── events.py
@@ -324,7 +324,7 @@ src/avatar_chat/
     ├── container.py
     └── settings.py
 
-src/avatar_worker/
+src/personaforge_worker/
 ├── application/
 │   ├── command_handlers.py
 │   └── session_manager.py
@@ -658,7 +658,7 @@ domain session chưa có; LiveKit MVP tạm dùng `RENDER_WORKER_ID` cấu hình
 
 ### Giai đoạn 2 - Worker process riêng trên một host — đã có MVP LiveKit
 
-1. Tạo `avatar_worker` và command handler độc lập.
+1. Tạo `personaforge_worker` và command handler độc lập.
 2. Dùng Redis Streams cho command/event và heartbeat.
 3. Ban đầu worker vẫn phát video thu sẵn để kiểm chứng lifecycle.
 4. Đường media đã chọn và triển khai: worker publish vào LiveKit SFU.

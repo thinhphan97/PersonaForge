@@ -1,0 +1,22 @@
+services:
+  avatar-worker:
+    # NVML reports host PIDs. Sharing the host PID namespace lets the Master
+    # correlate each supervised Child PID with nvitop/NVML process metrics.
+    pid: host
+    build:
+      context: .
+      dockerfile: Dockerfile.worker.gpu
+      args:
+        CUDA_IMAGE: ${WORKER_CUDA_IMAGE:-nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04}
+    image: personaforge-avatar-worker-gpu:local
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility,video}
+      PERSONA_RESOURCE_PROBE_PROVIDER: ${GPU_PERSONA_RESOURCE_PROBE_PROVIDER:-nvitop}
