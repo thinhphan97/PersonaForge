@@ -28,6 +28,7 @@ class WebRtcAnswer:
 class CreateSessionResult:
     session_id: str
     character_id: str
+    voice_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +70,7 @@ class AuthContext:
 class SessionSummary:
     session_id: str
     character_id: str
+    voice_id: str
     owner_user_id: str
     visibility: SessionVisibility
     status: SessionStatus
@@ -81,6 +83,7 @@ class SessionSummary:
 class PublicSessionInfo:
     session_id: str
     character_id: str
+    voice_id: str
     status: SessionStatus
     version: int
 
@@ -96,6 +99,23 @@ class ShareSummary:
 class CharacterSummary:
     character_id: str
     display_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceSummary:
+    voice_id: str
+    display_name: str
+    description: str
+    language: str
+    provider: str
+    provider_voice_key: str
+    model_id: str
+    model_revision: str
+    artifact_revision: str
+    artifact_checksum: str
+    speaker_embedding: tuple[float, ...]
+    reference_codes: tuple[tuple[int, ...], ...]
+    is_default: bool = False
 
 
 @dataclass(frozen=True, slots=True)

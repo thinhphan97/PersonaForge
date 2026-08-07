@@ -8,10 +8,13 @@ from uuid import uuid4
 
 import grpc
 
+from personaforge.voice_artifacts import voice_artifact_checksum
 from personaforge.worker.v1 import child_control_pb2, child_control_pb2_grpc
 from personaforge_chat.domain.models import AvatarState
 from personaforge_observability import bind_context
 from personaforge_observability.context import context_from_mapping
+from personaforge_worker.adapters.outbound.scripted_media import ScriptedToneTtsRuntime
+from personaforge_worker.adapters.outbound.vieneu_tts import VieNeuTtsSessionRuntime
 from personaforge_worker.ipc.messages import (
     PROTOCOL_VERSION,
     decode_command,
@@ -41,12 +44,13 @@ class CompositeChildRuntime:
         self._events: asyncio.Queue[child_control_pb2.ChildToMaster | None] = asyncio.Queue(
             maxsize=settings.child_command_queue_size
         )
-        self._commands: asyncio.PriorityQueue[
-            tuple[int, int, child_control_pb2.MasterToChild]
-        ] = asyncio.PriorityQueue(maxsize=settings.child_command_queue_size)
+        self._commands: asyncio.PriorityQueue[tuple[int, int, child_control_pb2.MasterToChild]] = (
+            asyncio.PriorityQueue(maxsize=settings.child_command_queue_size)
+        )
         self._finished = asyncio.Event()
         self._session: LiveKitRenderSession | None = None
         self._session_task: asyncio.Task[None] | None = None
+        self._speech_task: asyncio.Task[None] | None = None
         self._state = "starting"
         self._last_command_sequence = 0
         self._last_received_sequence = 0
@@ -141,8 +145,14 @@ class CompositeChildRuntime:
         elif payload_name == "change_state":
             self._change_state(command)
         elif payload_name == "speech":
-            utterance_id = await self._speak(command)
-            await self._playback_completed(message.meta.message_id, utterance_id)
+            if self._speech_task is not None:
+                if not self._speech_task.done():
+                    raise RuntimeError("A speech command is already running")
+                await asyncio.gather(self._speech_task, return_exceptions=True)
+            self._speech_task = asyncio.create_task(
+                self._run_speech_command(message.meta.message_id, command),
+                name=f"child-speech-{self._session_id}",
+            )
         elif payload_name == "stop":
             await self._cleanup_session()
             self._state = "stopped"
@@ -151,27 +161,88 @@ class CompositeChildRuntime:
         else:
             raise ValueError(f"Unsupported child command payload: {payload_name}")
 
+    async def _run_speech_command(
+        self,
+        command_id: str,
+        command: dict[str, Any],
+    ) -> None:
+        try:
+            utterance_id = await self._speak(command)
+            await self._playback_completed(command_id, utterance_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "Composite child speech failed",
+                extra={
+                    "event": "worker.child.speech.failed",
+                    "command_type": command.get("type"),
+                    "outcome": "failure",
+                },
+            )
+            await self._failed(command_id, str(exc))
+
     async def _start(self, command: dict[str, Any], command_id: str) -> None:
         if self._session is not None:
             return
         payload = required_mapping(command, "payload")
-        session = LiveKitRenderSession(
-            session_id=self._session_id,
-            character_id=required_string(payload, "character_id"),
-            livekit_url=required_string(payload, "livekit_url"),
-            publisher_token=required_string(payload, "publisher_token"),
-            settings=self._settings,
-        )
+        tts_runtime = await self._create_tts_runtime(payload)
+        try:
+            session = LiveKitRenderSession(
+                session_id=self._session_id,
+                character_id=required_string(payload, "character_id"),
+                livekit_url=required_string(payload, "livekit_url"),
+                publisher_token=required_string(payload, "publisher_token"),
+                settings=self._settings,
+                tts_runtime=tts_runtime,
+            )
+        except BaseException:
+            await tts_runtime.close()
+            raise
         self._session = session
         self._session_task = asyncio.create_task(
             session.run(),
             name=f"child-render-{self._session_id}",
         )
-        self._session_task.add_done_callback(
-            lambda task: self._session_done(task, command_id)
-        )
+        self._session_task.add_done_callback(lambda task: self._session_done(task, command_id))
         await session.wait_ready()
         self._state = "idle"
+
+    async def _create_tts_runtime(self, payload: dict[str, Any]) -> Any:
+        settings = self._settings
+        if settings.tts_runtime_provider == "scripted-tone":
+            return ScriptedToneTtsRuntime(
+                sample_rate=settings.audio_sample_rate,
+                frame_samples=round(
+                    settings.audio_sample_rate * settings.audio_frame_duration_seconds
+                ),
+                milliseconds_per_character=settings.scripted_tts_ms_per_character,
+            )
+        if settings.tts_runtime_provider != "vieneu-v3-turbo":
+            raise ValueError(f"Unsupported TTS runtime provider: {settings.tts_runtime_provider}")
+        embedding = payload.get("speaker_embedding")
+        codes = payload.get("reference_codes")
+        checksum = payload.get("voice_artifact_checksum")
+        if not isinstance(embedding, list) or len(embedding) != 192:
+            raise ValueError("VieNeu speaker embedding must contain 192 values")
+        if (
+            not isinstance(codes, list)
+            or not codes
+            or any(not isinstance(frame, list) or len(frame) != 16 for frame in codes)
+        ):
+            raise ValueError("VieNeu reference codes must have shape frames x 16")
+        calculated = voice_artifact_checksum(embedding, codes)
+        if not isinstance(checksum, str) or calculated != checksum:
+            raise ValueError("VieNeu voice artifact checksum mismatch")
+        return await VieNeuTtsSessionRuntime.create(
+            speaker_embedding=[float(value) for value in embedding],
+            reference_codes=[[int(value) for value in frame] for frame in codes],
+            backend=settings.vieneu_backend,
+            model_path=settings.vieneu_model_path,
+            onnx_precision=settings.vieneu_onnx_precision,
+            frame_samples=round(settings.audio_sample_rate * settings.audio_frame_duration_seconds),
+            apply_watermark=settings.vieneu_apply_watermark,
+        )
 
     def _change_state(self, command: dict[str, Any]) -> None:
         session = self._require_session()
@@ -195,6 +266,11 @@ class CompositeChildRuntime:
         return utterance_id
 
     async def _cleanup_session(self) -> None:
+        speech_task = self._speech_task
+        self._speech_task = None
+        if speech_task is not None and not speech_task.done():
+            speech_task.cancel()
+            await asyncio.gather(speech_task, return_exceptions=True)
         session = self._session
         task = self._session_task
         self._session = None

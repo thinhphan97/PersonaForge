@@ -84,12 +84,14 @@ class AuthResponse(BaseModel):
 
 class CreateSessionRequest(BaseModel):
     character_id: str = Field(default="default", min_length=1, max_length=100)
+    voice_id: str = Field(default="system-vi-minh-duc", min_length=1, max_length=100)
     visibility: SessionVisibility = SessionVisibility.PRIVATE
 
 
 class CreateSessionResponse(BaseModel):
     session_id: str
     character_id: str
+    voice_id: str
     owner_user_id: str
     visibility: SessionVisibility
     offer_url: str
@@ -103,6 +105,7 @@ class CreateSessionResponse(BaseModel):
 class SessionResponse(BaseModel):
     session_id: str
     character_id: str
+    voice_id: str
     owner_user_id: str
     visibility: SessionVisibility
     status: str
@@ -116,6 +119,7 @@ class SessionResponse(BaseModel):
 class PublicSessionResponse(BaseModel):
     session_id: str
     character_id: str
+    voice_id: str
     status: str
     media_provider: str
     version: int
@@ -149,6 +153,14 @@ class ShareResponse(BaseModel):
 class CharacterResponse(BaseModel):
     character_id: str
     display_name: str
+
+
+class VoiceResponse(BaseModel):
+    voice_id: str
+    display_name: str
+    description: str
+    language: str
+    is_default: bool
 
 
 class SessionDescriptionRequest(BaseModel):
@@ -407,6 +419,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return PublicSessionResponse(
             session_id=session.session_id,
             character_id=session.character_id,
+            voice_id=session.voice_id,
             status=session.status.value,
             media_provider=container.media_provider,
             version=session.version,
@@ -553,6 +566,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             for character in await container.list_characters.execute()
         ]
 
+    @router.get("/voices", response_model=list[VoiceResponse])
+    async def list_voices(
+        _auth: AuthDependency,
+        container: ContainerDependency,
+    ) -> list[VoiceResponse]:
+        return [
+            VoiceResponse(
+                voice_id=voice.voice_id,
+                display_name=voice.display_name,
+                description=voice.description,
+                language=voice.language,
+                is_default=voice.is_default,
+            )
+            for voice in await container.list_voices.execute()
+        ]
+
     @router.post("/sessions", response_model=CreateSessionResponse, status_code=201)
     async def create_session(
         body: CreateSessionRequest,
@@ -560,13 +589,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         container: ContainerDependency,
     ) -> CreateSessionResponse:
         result = await container.create_session.execute(
-            auth.user.user_id,
-            body.character_id,
-            body.visibility,
+            owner_user_id=auth.user.user_id,
+            character_id=body.character_id,
+            visibility=body.visibility,
+            voice_id=body.voice_id,
         )
         return _create_session_response(
             result.session_id,
             result.character_id,
+            result.voice_id,
             auth.user.user_id,
             body.visibility,
             container,
@@ -760,9 +791,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def chat(websocket: WebSocket, session_id: str) -> None:
         connection_id = new_id()
         request_id = websocket.headers.get("x-request-id") or new_id()
-        trace_id, span_id, trace_flags = parse_traceparent(
-            websocket.headers.get("traceparent")
-        )
+        trace_id, span_id, trace_flags = parse_traceparent(websocket.headers.get("traceparent"))
         with bind_context(
             connection_id=connection_id,
             request_id=request_id,
@@ -879,6 +908,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         @app.get("/public-watch.js", include_in_schema=False)
         async def public_watch_script() -> Response:
             return Response(public_watch_javascript, media_type="text/javascript")
+
     return app
 
 
@@ -944,6 +974,7 @@ def _websocket_bearer_token(websocket: WebSocket) -> str | None:
 def _create_session_response(
     session_id: str,
     character_id: str,
+    voice_id: str,
     owner_user_id: str,
     visibility: SessionVisibility,
     container: Container,
@@ -951,6 +982,7 @@ def _create_session_response(
     return CreateSessionResponse(
         session_id=session_id,
         character_id=character_id,
+        voice_id=voice_id,
         owner_user_id=owner_user_id,
         visibility=visibility,
         offer_url=f"/api/sessions/{session_id}/webrtc/offer",
@@ -961,11 +993,7 @@ def _create_session_response(
             else None
         ),
         chat_url=f"/api/sessions/{session_id}/chat",
-        public_url=(
-            f"/watch/{session_id}"
-            if visibility is SessionVisibility.PUBLIC
-            else None
-        ),
+        public_url=(f"/watch/{session_id}" if visibility is SessionVisibility.PUBLIC else None),
         version=0,
     )
 
@@ -981,6 +1009,7 @@ def _session_response(summary: SessionSummary, media_provider: str) -> SessionRe
     return SessionResponse(
         session_id=summary.session_id,
         character_id=summary.character_id,
+        voice_id=summary.voice_id,
         owner_user_id=summary.owner_user_id,
         visibility=summary.visibility,
         status=summary.status.value,

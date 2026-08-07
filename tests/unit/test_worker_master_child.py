@@ -127,6 +127,7 @@ async def test_child_runs_session_commands_over_grpc_uds(
     monkeypatch.setenv("PERSONA_PARENT_WORKER_ID", "worker-1")
     monkeypatch.setenv("PERSONA_CHILD_LEASE_TOKEN", "lease-1")
     monkeypatch.setenv("PERSONA_CHILD_GENERATION", "7")
+    monkeypatch.setenv("TTS_RUNTIME_PROVIDER", "scripted-tone")
     monkeypatch.setattr(
         child_runtime_module,
         "LiveKitRenderSession",

@@ -15,6 +15,7 @@ RUN pip install --no-cache-dir .
 
 COPY alembic.ini ./alembic.ini
 COPY migrations ./migrations
+COPY config ./config
 COPY frontend ./frontend
 COPY scripts ./scripts
 RUN bash scripts/generate_demo_videos.sh

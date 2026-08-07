@@ -17,6 +17,7 @@ from personaforge_chat.application.dto import (
     MediaAccess,
     MediaProvisioning,
     ReplyChunk,
+    VoiceSummary,
     WebRtcAnswer,
     WebRtcOffer,
 )
@@ -78,6 +79,34 @@ class FakeCharacters:
         return (CharacterSummary("default", "Default"),)
 
 
+class FakeVoices:
+    def __init__(self) -> None:
+        self.voice = VoiceSummary(
+            voice_id="system-vi-minh-duc",
+            display_name="Minh Duc",
+            description="Test voice",
+            language="vi-VN",
+            provider="vieneu-v3-turbo",
+            provider_voice_key="Minh Đức",
+            model_id="pnnbao-ump/VieNeu-TTS-v3-Turbo",
+            model_revision="test",
+            artifact_revision="test",
+            artifact_checksum="test-checksum",
+            speaker_embedding=tuple(0.0 for _ in range(192)),
+            reference_codes=(tuple(0 for _ in range(16)),),
+            is_default=True,
+        )
+
+    async def get(self, voice_id: str) -> VoiceSummary | None:
+        return self.voice if voice_id == self.voice.voice_id else None
+
+    async def list(self) -> tuple[VoiceSummary, ...]:
+        return (self.voice,)
+
+    async def default(self) -> VoiceSummary:
+        return self.voice
+
+
 class FakeAvatarStream:
     def __init__(self) -> None:
         self.states: list[AvatarState] = []
@@ -90,14 +119,14 @@ class FakeAvatarStream:
         self,
         session_id: str,
         character_id: str,
+        voice: VoiceSummary,
         room_name: str,
         publisher_token: str,
     ) -> None:
+        assert voice.voice_id == "system-vi-minh-duc"
         if self.fail_start:
             raise RuntimeError("worker failed to start")
-        self.started.append(
-            (session_id, character_id, room_name, publisher_token)
-        )
+        self.started.append((session_id, character_id, room_name, publisher_token))
 
     async def negotiate(
         self,
@@ -288,6 +317,7 @@ async def test_create_session_rejects_unknown_character() -> None:
             SequentialIds(),
             FixedClock(),
             FakeCharacters(),
+            FakeVoices(),
         ).execute(USER_ID, "missing")
 
 
@@ -299,7 +329,7 @@ async def test_message_flow_changes_avatar_and_persists_history() -> None:
     clock = FixedClock()
     avatar = FakeAvatarStream()
 
-    created = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
+    created = await CreateSession(sessions, ids, clock, FakeCharacters(), FakeVoices()).execute(
         USER_ID, "default"
     )
     access = access_policy()
@@ -317,10 +347,7 @@ async def test_message_flow_changes_avatar_and_persists_history() -> None:
         clock,
         access,
     )
-    events = [
-        event
-        async for event in handler.execute(USER_ID, created.session_id, "Hello")
-    ]
+    events = [event async for event in handler.execute(USER_ID, created.session_id, "Hello")]
 
     assert answer.type == "answer"
     assert avatar.states == [
@@ -354,9 +381,7 @@ async def test_message_flow_changes_avatar_and_persists_history() -> None:
     ]
     assert len({event.message_id for event in assistant_events}) == 1
     assert [
-        event.content
-        for event in assistant_events
-        if event.type is ChatEventType.ASSISTANT_CHUNK
+        event.content for event in assistant_events if event.type is ChatEventType.ASSISTANT_CHUNK
     ] == ["Xin ", "Xin chào"]
     history = await conversations.list_recent(created.session_id, 10)
     assert [message.content for message in history] == ["Hello", "Xin chào"]
@@ -376,7 +401,7 @@ async def test_assistant_cursor_completes_before_media_playback_drains() -> None
     ids = SequentialIds()
     clock = FixedClock()
     avatar = BlockingPlaybackAvatar()
-    created = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
+    created = await CreateSession(sessions, ids, clock, FakeCharacters(), FakeVoices()).execute(
         USER_ID, "default"
     )
     access = access_policy()
@@ -420,7 +445,7 @@ async def test_closed_session_is_read_only_and_rejects_new_chat() -> None:
     clock = FixedClock()
     avatar = FakeAvatarStream()
     access = access_policy()
-    created = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
+    created = await CreateSession(sessions, ids, clock, FakeCharacters(), FakeVoices()).execute(
         USER_ID,
         "default",
     )
@@ -477,7 +502,7 @@ async def test_livekit_media_provision_starts_worker_and_connects_session() -> N
     ids = SequentialIds()
     clock = FixedClock()
     avatar = FakeAvatarStream()
-    created = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
+    created = await CreateSession(sessions, ids, clock, FakeCharacters(), FakeVoices()).execute(
         USER_ID, "default"
     )
 
@@ -489,6 +514,7 @@ async def test_livekit_media_provision_starts_worker_and_connects_session() -> N
         FakeMediaRooms(),
         clock,
         access_policy_instance,
+        FakeVoices(),
     ).execute(USER_ID, created.session_id)
 
     assert access.provider == "livekit"
@@ -514,10 +540,10 @@ async def test_livekit_media_provision_is_idempotent_after_ready() -> None:
     clock = FixedClock()
     avatar = FakeAvatarStream()
     rooms = FakeMediaRooms()
-    created = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
+    created = await CreateSession(sessions, ids, clock, FakeCharacters(), FakeVoices()).execute(
         USER_ID, "default"
     )
-    provision = ProvisionMedia(sessions, avatar, rooms, clock, access_policy())
+    provision = ProvisionMedia(sessions, avatar, rooms, clock, access_policy(), FakeVoices())
 
     first = await provision.execute(USER_ID, created.session_id)
     second = await provision.execute(USER_ID, created.session_id)
@@ -538,18 +564,18 @@ async def test_public_media_requires_public_ready_session() -> None:
     clock = FixedClock()
     avatar = FakeAvatarStream()
     rooms = FakeMediaRooms()
-    private = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
+    private = await CreateSession(sessions, ids, clock, FakeCharacters(), FakeVoices()).execute(
         USER_ID, "default"
     )
     with pytest.raises(SessionNotFound):
         await ProvisionPublicMedia(sessions, rooms, ids).execute(private.session_id)
 
-    public = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
+    public = await CreateSession(sessions, ids, clock, FakeCharacters(), FakeVoices()).execute(
         USER_ID,
         "default",
         SessionVisibility.PUBLIC,
     )
-    await ProvisionMedia(sessions, avatar, rooms, clock, access_policy()).execute(
+    await ProvisionMedia(sessions, avatar, rooms, clock, access_policy(), FakeVoices()).execute(
         USER_ID,
         public.session_id,
     )
@@ -565,14 +591,14 @@ async def test_public_conversation_is_read_only_and_requires_public_session() ->
     conversations = InMemoryConversationRepository()
     ids = SequentialIds()
     clock = FixedClock()
-    private = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
+    private = await CreateSession(sessions, ids, clock, FakeCharacters(), FakeVoices()).execute(
         USER_ID,
         "default",
     )
     with pytest.raises(SessionNotFound):
         await GetPublicConversation(sessions, conversations).execute(private.session_id)
 
-    public = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
+    public = await CreateSession(sessions, ids, clock, FakeCharacters(), FakeVoices()).execute(
         USER_ID,
         "default",
         SessionVisibility.PUBLIC,
@@ -586,9 +612,7 @@ async def test_public_conversation_is_read_only_and_requires_public_session() ->
             clock.now(),
         )
     )
-    history = await GetPublicConversation(sessions, conversations).execute(
-        public.session_id
-    )
+    history = await GetPublicConversation(sessions, conversations).execute(public.session_id)
 
     assert [message.content for message in history] == ["Xin chào public viewer"]
 
@@ -601,14 +625,14 @@ async def test_media_start_failure_marks_session_failed_and_cleans_up() -> None:
     avatar = FakeAvatarStream()
     avatar.fail_start = True
     rooms = FakeMediaRooms()
-    created = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
+    created = await CreateSession(sessions, ids, clock, FakeCharacters(), FakeVoices()).execute(
         USER_ID, "default"
     )
 
     with pytest.raises(RuntimeError, match="worker failed to start"):
-        await ProvisionMedia(
-            sessions, avatar, rooms, clock, access_policy()
-        ).execute(USER_ID, created.session_id)
+        await ProvisionMedia(sessions, avatar, rooms, clock, access_policy(), FakeVoices()).execute(
+            USER_ID, created.session_id
+        )
 
     session = await sessions.get(created.session_id)
     assert session is not None
@@ -635,7 +659,7 @@ async def test_provider_failure_restores_idle_state() -> None:
     ids = SequentialIds()
     clock = FixedClock()
     avatar = FakeAvatarStream()
-    created = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
+    created = await CreateSession(sessions, ids, clock, FakeCharacters(), FakeVoices()).execute(
         USER_ID, "default"
     )
     access = access_policy()
@@ -688,7 +712,7 @@ async def test_thinking_render_failure_restores_core_and_renderer_to_idle() -> N
     ids = SequentialIds()
     clock = FixedClock()
     avatar = FakeAvatarStream()
-    created = await CreateSession(sessions, ids, clock, FakeCharacters()).execute(
+    created = await CreateSession(sessions, ids, clock, FakeCharacters(), FakeVoices()).execute(
         USER_ID, "default"
     )
     access = access_policy()
@@ -709,10 +733,7 @@ async def test_thinking_render_failure_restores_core_and_renderer_to_idle() -> N
     )
 
     with pytest.raises(RuntimeError, match="failed to render thinking"):
-        _ = [
-            event
-            async for event in handler.execute(USER_ID, created.session_id, "Hello")
-        ]
+        _ = [event async for event in handler.execute(USER_ID, created.session_id, "Hello")]
 
     session = await sessions.get(created.session_id)
     assert session is not None
@@ -729,6 +750,4 @@ async def test_get_conversation_rejects_unknown_session() -> None:
     conversations = InMemoryConversationRepository()
 
     with pytest.raises(SessionNotFound):
-        await GetConversation(
-            sessions, conversations, access_policy()
-        ).execute(USER_ID, "missing")
+        await GetConversation(sessions, conversations, access_policy()).execute(USER_ID, "missing")

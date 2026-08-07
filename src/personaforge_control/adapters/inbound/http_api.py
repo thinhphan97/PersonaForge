@@ -154,7 +154,7 @@ class CompositeProvisionRequest(BaseModel):
     runtime_version: str = "default"
     precision: str = "fp32"
     isolation_mode: str = "subprocess"
-    media_payload: dict[str, str]
+    media_payload: dict[str, object]
 
 
 class CompositeLeaseResponse(BaseModel):
@@ -279,9 +279,7 @@ def create_control_app(container: ControlContainer) -> FastAPI:
                     gpu_name=registration.capabilities.gpu_name,
                     compute_capability=registration.capabilities.compute_capability,
                     total_vram_mb=registration.capabilities.total_vram_mb,
-                    schedulable_vram_mb=(
-                        registration.capabilities.schedulable_vram_mb
-                    ),
+                    schedulable_vram_mb=(registration.capabilities.schedulable_vram_mb),
                     max_slots=registration.capabilities.max_slots,
                     compute_budget=registration.capabilities.compute_budget,
                     supported_runtimes=registration.capabilities.supported_runtimes,

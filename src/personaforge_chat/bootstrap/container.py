@@ -45,6 +45,7 @@ from personaforge_chat.adapters.outbound.sqlalchemy_repositories import (
     SqlAlchemySessionMutationUnitOfWork,
     SqlAlchemySessionRepository,
     SqlAlchemySessionShareRepository,
+    SqlAlchemySystemVoiceCatalog,
     SqlAlchemyUserRepository,
 )
 from personaforge_chat.adapters.outbound.system import (
@@ -53,6 +54,7 @@ from personaforge_chat.adapters.outbound.system import (
     SystemClock,
     UuidGenerator,
 )
+from personaforge_chat.adapters.outbound.voices import InMemorySystemVoiceCatalog
 from personaforge_chat.application.auth_use_cases import (
     AuthenticateAccessToken,
     LoginUser,
@@ -75,6 +77,7 @@ from personaforge_chat.application.ports import (
     SessionShareRepository,
     SessionTurnLockPort,
     UserRepository,
+    VoiceCatalogPort,
 )
 from personaforge_chat.application.session_access import (
     ChangeSessionVisibility,
@@ -95,6 +98,7 @@ from personaforge_chat.application.use_cases import (
     GetPublicSession,
     HandleMessage,
     ListCharacters,
+    ListVoices,
     NegotiateStream,
     ProvisionMedia,
     ProvisionPublicMedia,
@@ -119,6 +123,7 @@ class Container:
     logout_all: LogoutAll
     create_session: CreateSession
     list_characters: ListCharacters
+    list_voices: ListVoices
     negotiate_stream: NegotiateStream
     handle_message: HandleMessage
     get_conversation: GetConversation
@@ -170,6 +175,7 @@ def build_container(settings: Settings) -> Container:
     outbox: RealtimeOutboxRepository
     agent_turns: AgentTurnRepository
     turn_locks: SessionTurnLockPort | None
+    voices: VoiceCatalogPort
     if settings.database_url:
         database = SqlAlchemyDatabase(
             settings.database_url,
@@ -181,6 +187,7 @@ def build_container(settings: Settings) -> Container:
         users = SqlAlchemyUserRepository(database.sessions)
         auth_sessions = SqlAlchemyAuthSessionRepository(database.sessions)
         shares = SqlAlchemySessionShareRepository(database.sessions)
+        voices = SqlAlchemySystemVoiceCatalog(database.sessions)
         sql_mutations = SqlAlchemySessionMutationUnitOfWork(database.sessions)
         mutations = sql_mutations
         outbox = sql_mutations
@@ -192,6 +199,7 @@ def build_container(settings: Settings) -> Container:
         users = InMemoryUserRepository()
         auth_sessions = InMemoryAuthSessionRepository()
         shares = InMemorySessionShareRepository()
+        voices = InMemorySystemVoiceCatalog()
         audit = InMemoryAuditLogRepository()
         memory_mutations = InMemorySessionMutationUnitOfWork(sessions, shares, audit)
         mutations = memory_mutations
@@ -208,8 +216,7 @@ def build_container(settings: Settings) -> Container:
         turn_locks = None
     else:
         raise ValueError(
-            "Unsupported SESSION_TURN_LOCK_PROVIDER: "
-            f"{settings.session_turn_lock_provider}"
+            f"Unsupported SESSION_TURN_LOCK_PROVIDER: {settings.session_turn_lock_provider}"
         )
     ids = UuidGenerator()
     clock = SystemClock()
@@ -242,9 +249,7 @@ def build_container(settings: Settings) -> Container:
             sync_pulse_duration_seconds=settings.av_sync_pulse_duration_seconds,
         )
     elif settings.media_provider == "livekit":
-        if not all(
-            (settings.livekit_url, settings.livekit_api_key, settings.livekit_api_secret)
-        ):
+        if not all((settings.livekit_url, settings.livekit_api_key, settings.livekit_api_secret)):
             raise ValueError(
                 "LIVEKIT_URL, LIVEKIT_API_KEY and LIVEKIT_API_SECRET are required "
                 "when MEDIA_PROVIDER=livekit"
@@ -266,6 +271,7 @@ def build_container(settings: Settings) -> Container:
                 fps=settings.persona_fps,
                 peak_vram_mb=settings.persona_peak_vram_mb,
                 gpu_duty_cycle=settings.persona_gpu_duty_cycle,
+                start_timeout_seconds=settings.persona_start_timeout_seconds,
             )
         else:
             avatar_stream = RedisAvatarStreamAdapter(
@@ -273,14 +279,12 @@ def build_container(settings: Settings) -> Container:
                 worker_id=settings.render_worker_id,
                 livekit_url=settings.livekit_worker_url or livekit_url,
             )
-        provision_media = ProvisionMedia(sessions, avatar_stream, rooms, clock, access)
+        provision_media = ProvisionMedia(sessions, avatar_stream, rooms, clock, access, voices)
     else:
         raise ValueError(f"Unsupported MEDIA_PROVIDER: {settings.media_provider}")
 
     if settings.agent_runtime_provider == "grpc":
-        if bool(settings.agent_grpc_client_cert_file) != bool(
-            settings.agent_grpc_client_key_file
-        ):
+        if bool(settings.agent_grpc_client_cert_file) != bool(settings.agent_grpc_client_key_file):
             raise ValueError(
                 "AGENT_GRPC_CLIENT_CERT_FILE and AGENT_GRPC_CLIENT_KEY_FILE "
                 "must be configured together"
@@ -324,9 +328,7 @@ def build_container(settings: Settings) -> Container:
         )
         agent_runtime = LegacyReplyAgentAdapter(replies)
     else:
-        raise ValueError(
-            f"Unsupported AGENT_RUNTIME_PROVIDER: {settings.agent_runtime_provider}"
-        )
+        raise ValueError(f"Unsupported AGENT_RUNTIME_PROVIDER: {settings.agent_runtime_provider}")
     delegation_tokens = AgentDelegationJwtAdapter(
         settings.agent_delegation_secret,
         settings.agent_delegation_issuer,
@@ -336,9 +338,7 @@ def build_container(settings: Settings) -> Container:
         settings.realtime_event_bus == "auto" and settings.media_provider == "livekit"
     )
     if settings.realtime_event_bus not in {"auto", "memory", "redis"}:
-        raise ValueError(
-            f"Unsupported REALTIME_EVENT_BUS: {settings.realtime_event_bus}"
-        )
+        raise ValueError(f"Unsupported REALTIME_EVENT_BUS: {settings.realtime_event_bus}")
     realtime_events: RealtimeEventBusPort = (
         RedisRealtimeEventBus(settings.redis_url)
         if use_redis_events
@@ -370,9 +370,7 @@ def build_container(settings: Settings) -> Container:
             refresh_ttl,
             passwords.hash("authentication-dummy-password"),
         ),
-        authenticate_token=AuthenticateAccessToken(
-            users, auth_sessions, jwt_tokens, clock
-        ),
+        authenticate_token=AuthenticateAccessToken(users, auth_sessions, jwt_tokens, clock),
         refresh_access_token=RefreshAccessToken(
             users,
             auth_sessions,
@@ -385,8 +383,9 @@ def build_container(settings: Settings) -> Container:
         ),
         logout_user=LogoutUser(auth_sessions, clock),
         logout_all=LogoutAll(auth_sessions, clock),
-        create_session=CreateSession(sessions, ids, clock, characters),
+        create_session=CreateSession(sessions, ids, clock, characters, voices),
         list_characters=ListCharacters(characters),
+        list_voices=ListVoices(voices),
         negotiate_stream=NegotiateStream(sessions, avatar_stream, clock, access),
         handle_message=HandleMessage(
             sessions,
@@ -422,9 +421,7 @@ def build_container(settings: Settings) -> Container:
             sessions, access, mutations, ids, clock, shares, rooms
         ),
         get_session_summary=GetSessionSummary(sessions, shares, access),
-        share_session=ShareSession(
-            sessions, users, shares, access, mutations, ids, clock
-        ),
+        share_session=ShareSession(sessions, users, shares, access, mutations, ids, clock),
         list_session_shares=ListSessionShares(sessions, users, shares, access),
         revoke_session_share=RevokeSessionShare(
             sessions, shares, access, mutations, ids, clock, rooms

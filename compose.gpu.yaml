@@ -7,7 +7,9 @@ services:
       context: .
       dockerfile: Dockerfile.worker.gpu
       args:
-        CUDA_IMAGE: ${WORKER_CUDA_IMAGE:-nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04}
+        CUDA_IMAGE: ${WORKER_CUDA_IMAGE:-nvidia/cuda:12.8.0-cudnn-runtime-ubuntu24.04}
+        WORKER_UID: ${WORKER_UID:-1000}
+        WORKER_GID: ${WORKER_GID:-1000}
     image: personaforge-avatar-worker-gpu:local
     deploy:
       resources:
@@ -19,4 +21,6 @@ services:
     environment:
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
       NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility,video}
+      TTS_VIENEU_BACKEND: ${GPU_TTS_VIENEU_BACKEND:-pytorch}
+      TTS_VIENEU_ONNX_PRECISION: ${TTS_VIENEU_ONNX_PRECISION:-fp32}
       PERSONA_RESOURCE_PROBE_PROVIDER: ${GPU_PERSONA_RESOURCE_PROBE_PROVIDER:-nvitop}

@@ -162,6 +162,18 @@ class RedisControlPlane:
             if heartbeat.status is not WorkerStatus.READY or heartbeat.draining:
                 continue
             if requirement.runtime not in capabilities.supported_runtimes:
+                logger.info(
+                    "Worker does not advertise the requested composite runtime",
+                    extra={
+                        "event": "control.candidate.runtime_mismatch",
+                        "worker_id": worker_id,
+                        "session_id": requirement.session_id,
+                        "requested_runtime": requirement.runtime,
+                        "supported_runtimes": list(capabilities.supported_runtimes),
+                        "reason": "runtime_not_supported",
+                        "outcome": "rejected",
+                    },
+                )
                 continue
             heartbeat_by_uuid = {item.gpu_uuid: item for item in heartbeat.gpu_resources}
             for gpu_capability in capabilities.advertised_gpus():
@@ -200,8 +212,7 @@ class RedisControlPlane:
                 reserved_vram = int(usage[1] or 0)
                 reserved_compute = float(usage[2] or 0)
                 utilization_ewma_raw = await _hget(
-                    self._redis,
-                    _runtime_key(worker_id, gpu.gpu_uuid), "utilization_ewma"
+                    self._redis, _runtime_key(worker_id, gpu.gpu_uuid), "utilization_ewma"
                 )
                 failure_penalty_raw, cooldown_until_raw = await _hmget(
                     self._redis,
@@ -254,9 +265,7 @@ class RedisControlPlane:
                     json.loads(heartbeat_raw),
                     now + timedelta(milliseconds=int(heartbeat_ttl)),
                 )
-            snapshots.append(
-                (_registration_from_data(json.loads(registration_raw)), heartbeat)
-            )
+            snapshots.append((_registration_from_data(json.loads(registration_raw)), heartbeat))
         return tuple(snapshots)
 
     async def acquire(
@@ -516,9 +525,7 @@ class RedisControlPlane:
                             session_id,
                         )
                         continue
-                    heartbeat_raw = await self._redis.get(
-                        _heartbeat_key(lease.worker_id)
-                    )
+                    heartbeat_raw = await self._redis.get(_heartbeat_key(lease.worker_id))
                     if heartbeat_raw is not None:
                         renewed = await self.renew(
                             lease,
@@ -676,9 +683,7 @@ def _compute_capability(value: str) -> tuple[int, int]:
 
 def _registration_from_data(data: dict[str, Any]) -> WorkerRegistration:
     capability_data = data["capabilities"]
-    capability_data["supported_runtimes"] = tuple(
-        capability_data.get("supported_runtimes", ())
-    )
+    capability_data["supported_runtimes"] = tuple(capability_data.get("supported_runtimes", ()))
     capability_data["gpus"] = tuple(
         GpuCapability(**item) for item in capability_data.get("gpus", ())
     )
@@ -760,14 +765,10 @@ def _heartbeat_from_data(data: dict[str, Any], expires_at: datetime) -> WorkerHe
             if isinstance(item, dict) and item.get("gpu_uuid")
         ),
         host_resources=(
-            dict(data["host_resources"])
-            if isinstance(data.get("host_resources"), dict)
-            else None
+            dict(data["host_resources"]) if isinstance(data.get("host_resources"), dict) else None
         ),
         child_resources=tuple(
-            dict(item)
-            for item in data.get("child_resources", ())
-            if isinstance(item, dict)
+            dict(item) for item in data.get("child_resources", ()) if isinstance(item, dict)
         ),
     )
 
@@ -799,8 +800,6 @@ def _lease_from_data(data: dict[str, Any]) -> CompositeSlotLease:
         gpu_uuid=str(data.get("gpu_uuid", "")),
         resource_source=str(data.get("resource_source", "request")),
         resource_profile_id=(
-            str(data["resource_profile_id"])
-            if data.get("resource_profile_id")
-            else None
+            str(data["resource_profile_id"]) if data.get("resource_profile_id") else None
         ),
     )

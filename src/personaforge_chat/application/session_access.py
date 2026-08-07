@@ -186,8 +186,7 @@ class ChangeSessionVisibility:
         )
         if visibility is SessionVisibility.PRIVATE and self.rooms is not None:
             allowed = (session.owner_user_id,) + tuple(
-                share.grantee_user_id
-                for share in await self.shares.list_for_session(session_id)
+                share.grantee_user_id for share in await self.shares.list_for_session(session_id)
             )
             try:
                 await self.rooms.revoke_participants_except(session_id, allowed)
@@ -328,6 +327,7 @@ def _summary(
     return SessionSummary(
         session.session_id,
         session.character_id,
+        session.voice_id,
         session.owner_user_id,
         session.visibility,
         session.status,

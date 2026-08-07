@@ -14,6 +14,7 @@ from personaforge_chat.application.dto import (
     MediaAccess,
     PublicSessionInfo,
     RealtimeOutboxEvent,
+    VoiceSummary,
     WebRtcAnswer,
     WebRtcOffer,
 )
@@ -32,11 +33,14 @@ from personaforge_chat.application.ports import (
     SessionRepository,
     SessionTurnLockLease,
     SessionTurnLockPort,
+    VoiceCatalogPort,
 )
 from personaforge_chat.application.session_access import SessionAccessPolicy
+from personaforge_chat.application.text_segmentation import StreamingTextSegmenter
 from personaforge_chat.domain.errors import (
     CharacterNotFound,
     ConcurrentSessionUpdate,
+    InvalidInput,
     SessionBusy,
     SessionClosed,
     SessionNotFound,
@@ -64,19 +68,27 @@ class CreateSession:
     ids: IdGenerator
     clock: Clock
     characters: CharacterCatalogPort
+    voices: VoiceCatalogPort
 
     async def execute(
         self,
         owner_user_id: str,
         character_id: str,
         visibility: SessionVisibility = SessionVisibility.PRIVATE,
+        voice_id: str | None = None,
     ) -> CreateSessionResult:
         if self.characters.get(character_id) is None:
             raise CharacterNotFound(character_id)
+        resolved_voice = (
+            await self.voices.get(voice_id) if voice_id else await self.voices.default()
+        )
+        if resolved_voice is None:
+            raise InvalidInput(f"Unknown or disabled system voice: {voice_id}")
         now = self.clock.now()
         session = AvatarSession(
             session_id=self.ids.new_id(),
             character_id=character_id,
+            voice_id=resolved_voice.voice_id,
             owner_user_id=owner_user_id,
             visibility=visibility,
             status=SessionStatus.CREATED,
@@ -85,7 +97,7 @@ class CreateSession:
             updated_at=now,
         )
         await self.sessions.save(session)
-        return CreateSessionResult(session.session_id, session.character_id)
+        return CreateSessionResult(session.session_id, session.character_id, session.voice_id)
 
 
 @dataclass(slots=True)
@@ -94,6 +106,14 @@ class ListCharacters:
 
     async def execute(self) -> tuple[CharacterSummary, ...]:
         return self.characters.list()
+
+
+@dataclass(slots=True)
+class ListVoices:
+    voices: VoiceCatalogPort
+
+    async def execute(self) -> tuple[VoiceSummary, ...]:
+        return await self.voices.list()
 
 
 @dataclass(slots=True)
@@ -152,6 +172,7 @@ class ProvisionMedia:
     rooms: MediaRoomPort
     clock: Clock
     access: SessionAccessPolicy
+    voices: VoiceCatalogPort
 
     async def execute(self, actor_user_id: str, session_id: str) -> MediaAccess:
         session = await _require_session(self.sessions, session_id)
@@ -162,6 +183,9 @@ class ProvisionMedia:
         if session.status is SessionStatus.MEDIA_STARTING:
             raise SessionBusy(session_id)
         await self.access.require(actor_user_id, session, SessionAction.MANAGE)
+        voice = await self.voices.get(session.voice_id)
+        if voice is None:
+            raise RuntimeError(f"Configured voice is unavailable: {session.voice_id}")
 
         await _transition_session(
             self.sessions,
@@ -173,6 +197,7 @@ class ProvisionMedia:
             await self.avatar.start(
                 session_id=session.session_id,
                 character_id=session.character_id,
+                voice=voice,
                 room_name=provisioning.client.room_name,
                 publisher_token=provisioning.publisher_token,
             )
@@ -204,6 +229,7 @@ class GetPublicSession:
         return PublicSessionInfo(
             session.session_id,
             session.character_id,
+            session.voice_id,
             session.status,
             session.version,
         )
@@ -270,6 +296,8 @@ class HandleMessage:
                 owns_avatar_state = False
                 assistant_message: ChatMessage | None = None
                 agent_turn: AgentTurn | None = None
+                speech_task: asyncio.Task[None] | None = None
+                speech_queue: asyncio.Queue[tuple[int, str] | None] | None = None
                 try:
                     await _transition_session(
                         self.sessions,
@@ -380,6 +408,55 @@ class HandleMessage:
                         request.knowledge_base_ids,
                         now,
                     )
+                    speech_queue = asyncio.Queue(maxsize=32)
+                    speech_turn_id = agent_turn.turn_id
+                    speech_message_id = assistant_message.message_id
+
+                    async def stream_speech() -> None:
+                        assert speech_queue is not None
+                        while True:
+                            item = await speech_queue.get()
+                            if item is None:
+                                return
+                            segment_sequence, segment_text = item
+                            await self.avatar.speak(
+                                session_id,
+                                speech_turn_id,
+                                f"{speech_message_id}:{segment_sequence}",
+                                segment_text,
+                            )
+
+                    speech_task = asyncio.create_task(
+                        stream_speech(),
+                        name=f"tts-segments-{speech_turn_id}",
+                    )
+
+                    async def enqueue_speech(
+                        item: tuple[int, str] | None,
+                    ) -> None:
+                        """Apply backpressure without hanging if media playback fails."""
+
+                        assert speech_queue is not None
+                        assert speech_task is not None
+                        put_task = asyncio.create_task(speech_queue.put(item))
+                        done, _pending = await asyncio.wait(
+                            {put_task, speech_task},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if speech_task in done:
+                            if not put_task.done():
+                                put_task.cancel()
+                                await asyncio.gather(put_task, return_exceptions=True)
+                            await speech_task
+                            if item is not None:
+                                raise RuntimeError(
+                                    "Speech pipeline stopped before accepting all segments"
+                                )
+                            return
+                        await put_task
+
+                    text_segmenter = StreamingTextSegmenter()
+                    speech_sequence = 0
                     chunks: list[str] = []
                     speaking = False
                     completed = False
@@ -420,6 +497,9 @@ class HandleMessage:
                                 avatar_state=AvatarState.SPEAKING,
                             )
                         chunks.append(event.text)
+                        for speech_text in text_segmenter.feed(event.text):
+                            await enqueue_speech((speech_sequence, speech_text))
+                            speech_sequence += 1
                         expected_revision = assistant_message.revision
                         assistant_message = replace(
                             assistant_message,
@@ -441,6 +521,10 @@ class HandleMessage:
 
                     if not completed:
                         raise RuntimeError("Agent stream ended before turn completion")
+                    tail = text_segmenter.flush()
+                    if tail:
+                        await enqueue_speech((speech_sequence, tail))
+                    await enqueue_speech(None)
                     if distributed_lease is not None:
                         await distributed_lease.ensure_valid()
 
@@ -487,14 +571,12 @@ class HandleMessage:
                         revision=assistant_message.revision,
                     )
 
-                    if full_reply:
-                        await self.avatar.speak(
-                            session_id,
-                            agent_turn.turn_id,
-                            assistant_message.message_id,
-                            full_reply,
-                        )
+                    if speech_task is not None:
+                        await speech_task
                 except BaseException as exc:
+                    if speech_task is not None and not speech_task.done():
+                        speech_task.cancel()
+                        await asyncio.gather(speech_task, return_exceptions=True)
                     if agent_turn is not None and agent_turn.status is AgentTurnStatus.RUNNING:
                         try:
                             await self.agent.cancel_turn(agent_turn.turn_id)

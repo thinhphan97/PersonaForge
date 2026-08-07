@@ -12,7 +12,7 @@ from personaforge_chat.adapters.outbound.media.media_clock import MediaClock
 from personaforge_chat.adapters.outbound.media.recorded_source import RecordedCharacterCatalog
 from personaforge_chat.adapters.outbound.media.silent_audio_track import SilentAudioTrack
 from personaforge_chat.adapters.outbound.media.switchable_track import SwitchableAvatarVideoTrack
-from personaforge_chat.application.dto import WebRtcAnswer, WebRtcOffer
+from personaforge_chat.application.dto import VoiceSummary, WebRtcAnswer, WebRtcOffer
 from personaforge_chat.domain.models import AvatarState
 
 
@@ -56,11 +56,12 @@ class AiortcAvatarStreamAdapter:
         self,
         session_id: str,
         character_id: str,
+        voice: VoiceSummary,
         room_name: str,
         publisher_token: str,
     ) -> None:
         # In-process aiortc sessions are started by SDP negotiation.
-        del session_id, character_id, room_name, publisher_token
+        del session_id, character_id, voice, room_name, publisher_token
 
     async def negotiate(
         self,
@@ -94,9 +95,7 @@ class AiortcAvatarStreamAdapter:
                 await self._discard_if_current(session_id, context)
 
         try:
-            await peer.setRemoteDescription(
-                RTCSessionDescription(sdp=offer.sdp, type=offer.type)
-            )
+            await peer.setRemoteDescription(RTCSessionDescription(sdp=offer.sdp, type=offer.type))
             answer = await peer.createAnswer()
             await peer.setLocalDescription(answer)
             local = peer.localDescription

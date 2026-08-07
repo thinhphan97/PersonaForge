@@ -132,6 +132,8 @@ class AvatarSession:
     updated_at: datetime
     version: int = 0
     agent_id: str = "default"
+    voice_id: str = "system-vi-minh-duc"
+
     def start_media(self, now: datetime) -> None:
         self._transition_status(
             SessionStatus.MEDIA_STARTING,

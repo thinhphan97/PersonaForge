@@ -119,6 +119,7 @@ async function enterApplication(auth) {
   appView.hidden = false;
   $("#current-user").textContent = `@${auth.username}`;
   await loadCharacters();
+  await loadVoices();
   await loadSessions("mine");
 }
 
@@ -179,6 +180,21 @@ async function loadCharacters() {
   );
 }
 
+async function loadVoices() {
+  const voices = await (await api("/api/voices")).json();
+  $("#voice-select").replaceChildren(
+    ...voices.map((voice) => {
+      const option = new Option(
+        `${voice.display_name} — ${voice.description}`,
+        voice.voice_id,
+        voice.is_default,
+        voice.is_default,
+      );
+      return option;
+    }),
+  );
+}
+
 $("#create-session").addEventListener("click", async () => {
   const session = await (
     await api(
@@ -187,6 +203,7 @@ $("#create-session").addEventListener("click", async () => {
         method: "POST",
         body: JSON.stringify({
           character_id: $("#character-select").value,
+          voice_id: $("#voice-select").value,
           visibility: $("#create-visibility").value,
         }),
       },
@@ -227,7 +244,7 @@ async function loadSessions(kind) {
     button.dataset.sessionId = session.session_id;
     button.classList.toggle("is-active", session.session_id === currentSession?.session_id);
     button.classList.toggle("is-closed", session.status === "closed");
-    button.innerHTML = `<strong>${escapeHtml(session.character_id)}</strong><span>${escapeHtml(session.access_role)} · ${escapeHtml(session.visibility)} · ${escapeHtml(session.status)}</span>`;
+    button.innerHTML = `<strong>${escapeHtml(session.character_id)}</strong><span>${escapeHtml(session.voice_id)} · ${escapeHtml(session.access_role)} · ${escapeHtml(session.visibility)} · ${escapeHtml(session.status)}</span>`;
     button.addEventListener("click", () => openSession(session));
     list.append(button);
   }

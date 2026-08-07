@@ -6,7 +6,7 @@ from uuid import uuid4
 
 from redis.asyncio import Redis
 
-from personaforge_chat.application.dto import WebRtcAnswer, WebRtcOffer
+from personaforge_chat.application.dto import VoiceSummary, WebRtcAnswer, WebRtcOffer
 from personaforge_chat.domain.models import AvatarState
 from personaforge_observability import current_context
 
@@ -24,6 +24,7 @@ class RedisAvatarStreamAdapter:
         self,
         session_id: str,
         character_id: str,
+        voice: VoiceSummary,
         room_name: str,
         publisher_token: str,
     ) -> None:
@@ -35,6 +36,15 @@ class RedisAvatarStreamAdapter:
             session_id,
             {
                 "character_id": character_id,
+                "voice_id": voice.voice_id,
+                "tts_model_id": voice.model_id,
+                "tts_revision": voice.model_revision,
+                "voice_provider": voice.provider,
+                "provider_voice_key": voice.provider_voice_key,
+                "voice_artifact_revision": voice.artifact_revision,
+                "voice_artifact_checksum": voice.artifact_checksum,
+                "speaker_embedding": list(voice.speaker_embedding),
+                "reference_codes": [list(frame) for frame in voice.reference_codes],
                 "room_name": room_name,
                 "livekit_url": self._livekit_url,
                 "publisher_token": publisher_token,

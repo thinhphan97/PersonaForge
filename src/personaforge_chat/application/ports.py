@@ -14,6 +14,7 @@ from personaforge_chat.application.dto import (
     RealtimeOutboxEvent,
     RefreshTokenClaims,
     ReplyChunk,
+    VoiceSummary,
     WebRtcAnswer,
     WebRtcOffer,
 )
@@ -75,6 +76,14 @@ class CharacterCatalogPort(Protocol):
     def get(self, character_id: str) -> CharacterSummary | None: ...
 
     def list(self) -> tuple[CharacterSummary, ...]: ...
+
+
+class VoiceCatalogPort(Protocol):
+    async def get(self, voice_id: str) -> VoiceSummary | None: ...
+
+    async def list(self) -> tuple[VoiceSummary, ...]: ...
+
+    async def default(self) -> VoiceSummary: ...
 
 
 class UserRepository(Protocol):
@@ -208,6 +217,7 @@ class AvatarStreamPort(Protocol):
         self,
         session_id: str,
         character_id: str,
+        voice: VoiceSummary,
         room_name: str,
         publisher_token: str,
     ) -> None: ...

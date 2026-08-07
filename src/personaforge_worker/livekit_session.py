@@ -27,6 +27,7 @@ from personaforge_worker.adapters.outbound.scripted_media import (
     ScriptedToneTtsRuntime,
 )
 from personaforge_worker.application.audio_timeline import BoundedAudioTimeline
+from personaforge_worker.application.media_ports import TtsSessionRuntimePort
 from personaforge_worker.application.speech_pipeline import CompositeSpeechPipeline
 from personaforge_worker.domain.media import SpeechSegment, TimedVideoFrame
 from personaforge_worker.recorded_frames import LoopingRecordedFrameSource
@@ -45,6 +46,7 @@ class LiveKitRenderSession:
         livekit_url: str,
         publisher_token: str,
         settings: WorkerSettings,
+        tts_runtime: TtsSessionRuntimePort | None = None,
     ) -> None:
         self.session_id = session_id
         self.character_id = character_id
@@ -63,7 +65,8 @@ class LiveKitRenderSession:
             settings.avatar_clips,
         ).clips_for(character_id)
         self._speech_pipeline = CompositeSpeechPipeline(
-            ScriptedToneTtsRuntime(
+            tts_runtime
+            or ScriptedToneTtsRuntime(
                 sample_rate=settings.audio_sample_rate,
                 frame_samples=round(
                     settings.audio_sample_rate * settings.audio_frame_duration_seconds
@@ -191,12 +194,8 @@ class LiveKitRenderSession:
         )
         try:
             await room.connect(self._livekit_url, self._publisher_token)
-            audio_track = rtc.LocalAudioTrack.create_audio_track(
-                "avatar-audio", audio_source
-            )
-            video_track = rtc.LocalVideoTrack.create_video_track(
-                "avatar-video", video_source
-            )
+            audio_track = rtc.LocalAudioTrack.create_audio_track("avatar-audio", audio_source)
+            video_track = rtc.LocalVideoTrack.create_video_track("avatar-video", video_source)
             await room.local_participant.publish_track(
                 audio_track,
                 rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE),
@@ -227,9 +226,7 @@ class LiveKitRenderSession:
         finally:
             self._finished.set()
             if self._pipeline_started and not self._pipeline_stopped:
-                self._media_publisher.abort(
-                    RuntimeError("LiveKit publishing loop stopped")
-                )
+                self._media_publisher.abort(RuntimeError("LiveKit publishing loop stopped"))
                 with contextlib.suppress(Exception):
                     await self._speech_pipeline.stop()
                 self._pipeline_stopped = True
@@ -256,6 +253,8 @@ class LiveKitRenderSession:
         audio_sample = 0
         video_frame_number = 0
         next_metrics_at = 5.0
+        active_audio_utterance: str | None = None
+        audio_underrun_frames = 0
         while not self._stop.is_set():
             audio_start = audio_sample / settings.audio_sample_rate
             next_video_time = video_frame_number / settings.video_fps
@@ -293,10 +292,20 @@ class LiveKitRenderSession:
                     raise
                 if video_delivery is not None:
                     acknowledge(video_delivery)
+                    # Let the bounded producer enqueue the next frame before the
+                    # non-blocking media-clock loop polls again. Without this
+                    # handoff, every other slot can incorrectly fall back to a
+                    # recorded frame even though lip-sync output is ready.
+                    await asyncio.sleep(0)
                 video_frame_number += 1
                 next_video_time = video_frame_number / settings.video_fps
 
             audio_delivery = self._media_publisher.pop_audio()
+            if audio_delivery is not None and active_audio_utterance is None:
+                active_audio_utterance = audio_delivery.frame.utterance_id
+                audio_underrun_frames = 0
+            elif audio_delivery is None and active_audio_utterance is not None:
+                audio_underrun_frames += 1
             audio_frame = _audio_frame(
                 sample_rate=settings.audio_sample_rate,
                 start_sample=audio_sample,
@@ -304,11 +313,7 @@ class LiveKitRenderSession:
                 debug_enabled=settings.av_sync_debug,
                 sync_interval=settings.av_sync_interval_seconds,
                 sync_duration=settings.av_sync_pulse_duration_seconds,
-                pcm=(
-                    audio_delivery.frame.samples
-                    if audio_delivery is not None
-                    else None
-                ),
+                pcm=(audio_delivery.frame.samples if audio_delivery is not None else None),
             )
             audio_sample += samples_per_audio_frame
             try:
@@ -322,11 +327,30 @@ class LiveKitRenderSession:
                 raise
             if audio_delivery is not None:
                 acknowledge(audio_delivery)
+                if audio_delivery.frame.end_of_utterance:
+                    logger.info(
+                        "LiveKit utterance playback drained",
+                        extra={
+                            "event": "worker.media.audio.playback.completed",
+                            "utterance_id": audio_delivery.frame.utterance_id,
+                            "audio_underrun_frames": audio_underrun_frames,
+                            "audio_underrun_ms": round(
+                                audio_underrun_frames
+                                * settings.audio_frame_duration_seconds
+                                * 1_000,
+                                2,
+                            ),
+                        },
+                    )
+                    active_audio_utterance = None
+                    audio_underrun_frames = 0
+                # ``publish_audio`` waits for this acknowledgement before it can
+                # enqueue the following 20 ms PCM frame. Yielding here prevents
+                # the next non-blocking poll from inserting a false silence frame.
+                await asyncio.sleep(0)
             media_time = audio_sample / settings.audio_sample_rate
             if media_time >= next_metrics_at:
-                drift_ms = (
-                    synchronizer.last_video_time - synchronizer.last_audio_time
-                ) * 1_000
+                drift_ms = (synchronizer.last_video_time - synchronizer.last_audio_time) * 1_000
                 self._observed_fps = synchronizer.actual_fps
                 self._av_drift_ms = drift_ms
                 logger.info(

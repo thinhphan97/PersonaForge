@@ -24,7 +24,7 @@ services:
       REPLY_PROVIDER: ${REPLY_PROVIDER:-scripted}
       REPLY_CHUNK_DELAY: ${REPLY_CHUNK_DELAY:-0.25}
       THINKING_MIN_DURATION: ${THINKING_MIN_DURATION:-1.0}
-      AV_SYNC_DEBUG: ${AV_SYNC_DEBUG:-true}
+      AV_SYNC_DEBUG: ${AV_SYNC_DEBUG:-false}
       AV_SYNC_INTERVAL: ${AV_SYNC_INTERVAL:-2.0}
       AV_SYNC_PULSE_DURATION: ${AV_SYNC_PULSE_DURATION:-0.1}
       REPLY_HTTP_URL: ${REPLY_HTTP_URL:-}
@@ -203,6 +203,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.worker
+      args:
+        WORKER_UID: ${WORKER_UID:-1000}
+        WORKER_GID: ${WORKER_GID:-1000}
     image: personaforge-avatar-worker:local
     command: ["python", "-m", "personaforge_worker.main"]
     profiles: ["livekit"]
@@ -236,6 +239,7 @@ services:
       AVATAR_GPU_SCHEDULABLE_VRAM_MB: ${AVATAR_GPU_SCHEDULABLE_VRAM_MB:-0}
       AVATAR_WORKER_MAX_SLOTS: ${AVATAR_WORKER_MAX_SLOTS:-1}
       AVATAR_WORKER_MAX_GPU_COUNT: ${AVATAR_WORKER_MAX_GPU_COUNT:-1}
+      AVATAR_WORKER_SUPPORTED_RUNTIMES: ${AVATAR_WORKER_SUPPORTED_RUNTIMES:-recorded,scripted,vieneu-v3-turbo}
       AVATAR_WORKER_COMPUTE_BUDGET: ${AVATAR_WORKER_COMPUTE_BUDGET:-0.85}
       AVATAR_WORKER_REGISTRATION_TTL_SECONDS: ${AVATAR_WORKER_REGISTRATION_TTL_SECONDS:-15}
       AVATAR_WORKER_HEARTBEAT_INTERVAL_SECONDS: ${AVATAR_WORKER_HEARTBEAT_INTERVAL_SECONDS:-5}
@@ -251,8 +255,15 @@ services:
       WORKER_AUDIO_FRAME_DURATION: ${WORKER_AUDIO_FRAME_DURATION:-0.02}
       WORKER_VIDEO_QUEUE_MS: ${WORKER_VIDEO_QUEUE_MS:-80}
       TTS_AUDIO_BUFFER_MAX_MS: ${TTS_AUDIO_BUFFER_MAX_MS:-2000}
+      TTS_RUNTIME_PROVIDER: ${TTS_RUNTIME_PROVIDER:-vieneu-v3-turbo}
+      TTS_VIENEU_BACKEND: ${TTS_VIENEU_BACKEND:-onnx}
+      TTS_VIENEU_MODEL_PATH: ${TTS_VIENEU_MODEL_PATH:-pnnbao-ump/VieNeu-TTS-v3-Turbo}
+      TTS_VIENEU_ONNX_PRECISION: ${TTS_VIENEU_ONNX_PRECISION:-fp32}
+      TTS_VIENEU_APPLY_WATERMARK: ${TTS_VIENEU_APPLY_WATERMARK:-false}
+      PERSONA_START_TIMEOUT_SECONDS: ${PERSONA_START_TIMEOUT_SECONDS:-600}
+      HF_HOME: ${HF_HOME:-/var/cache/personaforge/huggingface}
       SCRIPTED_TTS_MS_PER_CHARACTER: ${SCRIPTED_TTS_MS_PER_CHARACTER:-40}
-      AV_SYNC_DEBUG: ${AV_SYNC_DEBUG:-true}
+      AV_SYNC_DEBUG: ${AV_SYNC_DEBUG:-false}
       AV_SYNC_INTERVAL: ${AV_SYNC_INTERVAL:-2.0}
       AV_SYNC_PULSE_DURATION: ${AV_SYNC_PULSE_DURATION:-0.1}
       AVATAR_CHARACTERS_ROOT: ${AVATAR_CHARACTERS_ROOT:-/app/assets/characters}
@@ -266,6 +277,11 @@ services:
         condition: service_started
     volumes:
       - avatar_worker_identity:/var/lib/personaforge/avatar-worker
+      - type: bind
+        source: ${VIENEU_MODEL_CACHE_DIR:-./.cache/vieneu}
+        target: /var/cache/personaforge/huggingface
+        bind:
+          create_host_path: true
     restart: unless-stopped
 
   redis:

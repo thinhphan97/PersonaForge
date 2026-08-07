@@ -39,12 +39,32 @@ _SAFE_FIELDS = {
     "reason",
     "input_chars",
     "output_chars",
+    "text_chars",
     "history_count",
     "event_count",
     "active_turns",
     "queued_turns",
     "stream_message_id",
     "listen_address",
+    "audio_frames",
+    "audio_duration_ms",
+    "first_audio_ms",
+    "output_mode",
+    "model_inference_ms",
+    "model_dtype",
+    "model_shape",
+    "model_samples",
+    "model_sample_rate",
+    "model_audio_duration_ms",
+    "model_min",
+    "model_max",
+    "model_peak",
+    "model_rms",
+    "model_dc_offset",
+    "model_clipping_ratio",
+    "model_nonfinite_samples",
+    "audio_underrun_frames",
+    "audio_underrun_ms",
 }
 
 
@@ -57,9 +77,9 @@ class JsonLogFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
-            "timestamp": datetime.fromtimestamp(
-                record.created, tz=timezone.utc
-            ).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z"),
             "level": record.levelname,
             "service": self._service,
             "environment": self._environment,
@@ -110,9 +130,7 @@ def configure_logging(service: str, process_role: str | None = None) -> None:
             )
         )
     else:
-        handler.setFormatter(
-            ConsoleLogFormatter("%(asctime)s %(levelname)s %(name)s %(message)s")
-        )
+        handler.setFormatter(ConsoleLogFormatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
     root = logging.getLogger()
     root.handlers.clear()
     root.addHandler(handler)

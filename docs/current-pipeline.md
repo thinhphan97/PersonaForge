@@ -1039,7 +1039,7 @@ ICE timeout.
 
 | Biến | Mặc định | Ý nghĩa |
 |---|---|---|
-| `AV_SYNC_DEBUG` | `true` | Bật beep + flash |
+| `AV_SYNC_DEBUG` | `false` | Chỉ bật khi chẩn đoán A/V để phát beep + flash |
 | `AV_SYNC_INTERVAL` | `2.0` | Chu kỳ pulse |
 | `AV_SYNC_PULSE_DURATION` | `0.1` | Độ dài pulse |
 | `AVATAR_CHARACTERS_ROOT` | `assets/characters` | Catalog, mỗi thư mục con là một nhân vật |
@@ -1337,12 +1337,13 @@ Tìm:
 - `HandleMessage` có cleanup về idle cả success và exception; nếu UI sai nhưng renderer đúng,
   kiểm tra WebSocket event delivery.
 
-### 19.6. Không nghe beep
+### 19.6. Không nghe TTS
 
-- `AV_SYNC_DEBUG=true`.
+- Giữ `AV_SYNC_DEBUG=false`; beep chỉ là tín hiệu chẩn đoán, không phải TTS.
 - Bấm nút bật âm thanh vì autoplay mặc định muted.
 - Kiểm tra browser/system volume.
 - Xác nhận browser subscribe audio track.
+- Kiểm tra log `worker.tts.loaded` và command `avatar.speech.synthesize` hoàn tất.
 
 ### 19.7. Worker nhận state trước start
 

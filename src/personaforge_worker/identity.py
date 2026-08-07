@@ -222,7 +222,7 @@ class WorkerIdentityClient:
             "schedulable_vram_mb": schedulable_vram_mb,
             "max_slots": self._settings.maximum_slots,
             "compute_budget": self._settings.compute_budget,
-            "supported_runtimes": ["recorded", "scripted"],
+            "supported_runtimes": list(self._settings.supported_runtimes),
             "gpus": [gpu_capability(item) for item in visible],
         }
 

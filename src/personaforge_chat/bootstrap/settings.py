@@ -69,6 +69,7 @@ class Settings:
     persona_gpu_duty_cycle: float
     persona_resolution: str
     persona_fps: float
+    persona_start_timeout_seconds: float
     characters_root: Path
     avatar_clips: dict[AvatarState, Path]
 
@@ -109,9 +110,7 @@ class Settings:
             ),
             reply_provider=os.getenv("REPLY_PROVIDER", "scripted"),
             reply_chunk_delay_seconds=float(os.getenv("REPLY_CHUNK_DELAY", "0.25")),
-            thinking_min_duration_seconds=float(
-                os.getenv("THINKING_MIN_DURATION", "1.0")
-            ),
+            thinking_min_duration_seconds=float(os.getenv("THINKING_MIN_DURATION", "1.0")),
             reply_http_url=os.getenv("REPLY_HTTP_URL"),
             reply_http_token=os.getenv("REPLY_HTTP_TOKEN"),
             agent_runtime_provider=os.getenv("AGENT_RUNTIME_PROVIDER", "local").lower(),
@@ -125,30 +124,17 @@ class Settings:
                 "AGENT_DELEGATION_SECRET",
                 "development-agent-delegation-secret-change-me",
             ),
-            agent_delegation_issuer=os.getenv(
-                "AGENT_DELEGATION_ISSUER", "personaforge-api"
-            ),
-            agent_delegation_audience=os.getenv(
-                "AGENT_DELEGATION_AUDIENCE", "personaforge-agent"
-            ),
-            session_turn_lock_provider=os.getenv(
-                "SESSION_TURN_LOCK_PROVIDER", "memory"
-            ).lower(),
-            session_turn_lock_timeout_seconds=float(
-                os.getenv("SESSION_TURN_LOCK_TIMEOUT", "0")
-            ),
-            session_turn_lock_lease_seconds=float(
-                os.getenv("SESSION_TURN_LOCK_LEASE", "30")
-            ),
+            agent_delegation_issuer=os.getenv("AGENT_DELEGATION_ISSUER", "personaforge-api"),
+            agent_delegation_audience=os.getenv("AGENT_DELEGATION_AUDIENCE", "personaforge-agent"),
+            session_turn_lock_provider=os.getenv("SESSION_TURN_LOCK_PROVIDER", "memory").lower(),
+            session_turn_lock_timeout_seconds=float(os.getenv("SESSION_TURN_LOCK_TIMEOUT", "0")),
+            session_turn_lock_lease_seconds=float(os.getenv("SESSION_TURN_LOCK_LEASE", "30")),
             ice_server_urls=ice_urls,
             ice_username=os.getenv("WEBRTC_ICE_USERNAME"),
             ice_credential=os.getenv("WEBRTC_ICE_CREDENTIAL"),
-            av_sync_debug=os.getenv("AV_SYNC_DEBUG", "true").lower()
-            in {"1", "true", "yes", "on"},
+            av_sync_debug=os.getenv("AV_SYNC_DEBUG", "false").lower() in {"1", "true", "yes", "on"},
             av_sync_interval_seconds=float(os.getenv("AV_SYNC_INTERVAL", "2.0")),
-            av_sync_pulse_duration_seconds=float(
-                os.getenv("AV_SYNC_PULSE_DURATION", "0.1")
-            ),
+            av_sync_pulse_duration_seconds=float(os.getenv("AV_SYNC_PULSE_DURATION", "0.1")),
             media_provider=os.getenv("MEDIA_PROVIDER", "aiortc").lower(),
             livekit_url=os.getenv("LIVEKIT_URL") or None,
             livekit_api_url=os.getenv("LIVEKIT_API_URL") or None,
@@ -164,21 +150,18 @@ class Settings:
                 "development-core-control-token-change-me",
             ),
             persona_peak_vram_mb=int(os.getenv("PERSONA_PEAK_VRAM_MB", "0")),
-            persona_gpu_duty_cycle=float(
-                os.getenv("PERSONA_GPU_DUTY_CYCLE", "0.1")
-            ),
+            persona_gpu_duty_cycle=float(os.getenv("PERSONA_GPU_DUTY_CYCLE", "0.1")),
             persona_resolution=(
                 f"{os.getenv('WORKER_VIDEO_WIDTH', '640')}x"
                 f"{os.getenv('WORKER_VIDEO_HEIGHT', '360')}"
             ),
             persona_fps=float(os.getenv("WORKER_VIDEO_FPS", "25")),
+            persona_start_timeout_seconds=float(os.getenv("PERSONA_START_TIMEOUT_SECONDS", "600")),
             characters_root=Path(
                 os.getenv("AVATAR_CHARACTERS_ROOT", root / "assets" / "characters")
             ),
             avatar_clips={
-                AvatarState.IDLE: Path(
-                    os.getenv("AVATAR_IDLE_VIDEO", default_assets / "idle.mp4")
-                ),
+                AvatarState.IDLE: Path(os.getenv("AVATAR_IDLE_VIDEO", default_assets / "idle.mp4")),
                 AvatarState.THINKING: Path(
                     os.getenv("AVATAR_THINKING_VIDEO", default_assets / "thinking.mp4")
                 ),

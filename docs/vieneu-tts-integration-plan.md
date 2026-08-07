@@ -1,7 +1,7 @@
 # Kế hoạch tích hợp VieNeu-TTS vào PersonaForge
 
-> Trạng thái: kế hoạch triển khai. Phần 1 đã đủ quyết định để bắt đầu implementation sau khi
-> được duyệt. Phần 2 mới là design draft; phải thảo luận và chốt design gate trước khi viết code.
+> Trạng thái: Phần 1 đã được triển khai trong source hiện tại. Phần 2 mới là design draft;
+> phải thảo luận và chốt design gate trước khi viết code.
 >
 > Phiên bản upstream được review: VieNeu-TTS `v3.2.4`, commit
 > `a8c9fbf99749d5ce45c89111f71558d6ceef3424`.
@@ -181,15 +181,18 @@ SystemVoiceDefinition
   is_default
 ```
 
-Giai đoạn đầu, catalog là immutable manifest được version và bake vào Core/Worker image. Core và
-Worker phải dùng cùng manifest checksum. Không mutate package JSON khi runtime đang chạy. Khi
-cần quản trị catalog động, manifest sẽ được migrate vào PostgreSQL mà không thay domain port.
+PostgreSQL là source of truth ngay từ giai đoạn đầu. Migration `20260806_09` seed catalog từ
+fixture đã pin theo VieNeu v3.2.4 và lưu cả `speaker_embedding` lẫn `reference_codes` bằng native
+PostgreSQL arrays. File `config/system_voices.v3.2.4.json` chỉ là migration fixture/audit input;
+Worker không đọc file này để resolve voice lúc runtime. Core resolve row trong DB, tạo immutable
+snapshot kèm revision/checksum và chuyển snapshot một lần trong start command. Redis không phải
+voice repository và không lưu PCM.
 
 Quy tắc resolve:
 
 1. Session có `voice_id` hợp lệ và enabled: dùng voice đó.
 2. Session không cấu hình: dùng đúng một `is_default=true`.
-3. Voice bị disable trước provision: fallback default và lưu resolved snapshot.
+3. Voice bị disable/không tồn tại trước khi tạo session: trả lỗi input; không fallback âm thầm.
 4. Voice/model revision không tồn tại trên Worker: Child fail typed `VOICE_ARTIFACT_UNAVAILABLE`;
    không âm thầm chọn một giọng khác sau khi session đã được provision.
 
@@ -233,9 +236,11 @@ class TtsSessionRuntimePort(Protocol):
 Adapter phần 1 thực hiện:
 
 1. Khởi tạo VieNeu v3 Turbo trên GPU visible của Child.
-2. Resolve preset từ system voice manifest đã kiểm tra checksum.
-3. Chạy synchronous `infer_stream()` trong bounded executor/thread thuộc Child.
-4. Bridge kết quả sang bounded `asyncio.Queue`; cancel/close phải dừng producer.
+2. Nhận `speaker_emb + reference_codes` từ immutable DB snapshot và kiểm tra checksum trong Child.
+3. Chạy synchronous `infer_stream()` trên một OS thread riêng thuộc Child. Toàn bộ thao tác tạo,
+   iterate và đóng generator của một segment phải ở cùng thread vì VieNeu dùng `RLock`.
+4. Bridge model chunk sang event loop, kiểm tra waveform rồi rechunk thành frame media 20 ms.
+   Media publisher phải handoff sau mỗi acknowledgement để không chèn false-silence giữa frame.
 5. Clamp float32 về `[-1, 1]`, convert thành PCM S16LE mono.
 6. Rechunk chính xác 960 samples, tương đương 20 ms tại 48 kHz.
 7. Đánh `end_of_segment=true` sau khi generator của segment kết thúc hợp lệ; chỉ segment cuối
@@ -254,7 +259,7 @@ Agent TEXT_DELTA or token
     -> StreamingTextSegmenter
 immutable synthesis segment
     -> VieNeu infer_stream
-streamed PCM chunks
+streamed, clocked PCM frames
 ```
 
 Không gọi VieNeu theo từng từ. Một từ không có đủ ngữ cảnh ngữ điệu, làm tăng số lần setup
@@ -564,35 +569,57 @@ tục export RSS/CPU/GPU/VRAM theo PID để attribution đúng session.
 ## 11. Dependency và image strategy
 
 - Pin VieNeu source/package version, Hugging Face revision và checksum.
-- Model phải có sẵn trong image hoặc read-only model cache trước khi Child nhận assignment; không
-  phụ thuộc Internet trong session startup.
+- Checkpoint không bake vào writable image layer. Hugging Face cache được bind mount từ host qua
+  `VIENEU_MODEL_CACHE_DIR` và dùng lại qua image rebuild/container recreate/Child restart. Lần đầu
+  có thể tải model; production nên prewarm cache trước khi nhận traffic.
 - Xác minh Torch/CUDA/NVML compatibility trong GPU image hiện tại bằng smoke test.
 - Import CUDA-dependent module chỉ sau khi Master đã đặt GPU visibility cho Child.
 - Tách optional dependency group `tts-vieneu`; CPU test không buộc cài GPU stack.
 - Giữ scripted adapter trong test/dev và làm rollback provider bằng config.
 - Không log JWT, reference artifact, speaker embedding, raw PCM hoặc signed artifact locator.
 
-Environment contract dự kiến:
+Environment contract hiện tại:
 
 ```dotenv
 TTS_RUNTIME_PROVIDER=vieneu-v3-turbo
-TTS_MODEL_ID=vieneu-v3-turbo
-TTS_MODEL_REVISION=<pinned-revision>
-TTS_MODEL_PATH=/models/vieneu-v3-turbo
-TTS_SYSTEM_VOICE_MANIFEST=/app/config/system-voices.v1.json
-TTS_SYSTEM_DEFAULT_VOICE_ID=system-vi-minh-duc
-TTS_INFERENCE_QUEUE_MAX_CHUNKS=64
-TTS_SEGMENT_MIN_CHARACTERS=20
-TTS_SEGMENT_TARGET_CHARACTERS=60
-TTS_SEGMENT_MAX_CHARACTERS=160
-TTS_SEGMENT_MAX_WAIT_MS=200
-TTS_LIPSYNC_PREBUFFER_MS=160
-TTS_MODEL_LOAD_TIMEOUT_SECONDS=120
-TTS_INFERENCE_TIMEOUT_SECONDS=120
-TTS_CHILD_SHUTDOWN_GRACE_SECONDS=20
+TTS_VIENEU_BACKEND=onnx
+GPU_TTS_VIENEU_BACKEND=pytorch
+TTS_VIENEU_MODEL_PATH=pnnbao-ump/VieNeu-TTS-v3-Turbo
+TTS_VIENEU_ONNX_PRECISION=fp32
+TTS_VIENEU_APPLY_WATERMARK=false
+TTS_AUDIO_BUFFER_MAX_MS=2000
+PERSONA_START_TIMEOUT_SECONDS=600
+HF_HOME=/var/cache/personaforge/huggingface
+VIENEU_MODEL_CACHE_DIR=./.cache/vieneu
 ```
 
-Tên cuối cùng phải tuân theo `WorkerSettings`; không đưa secret vào các biến trên.
+### 11.1. PyTorch GPU và ONNX GPU
+
+GPU Worker image cài cả PyTorch CUDA 12.8 và `onnxruntime-gpu`, do đó backend có thể đổi bằng
+`GPU_TTS_VIENEU_BACKEND` rồi recreate Worker:
+
+```bash
+# Recommended baseline: native VieNeu GPU path
+GPU_TTS_VIENEU_BACKEND=pytorch make recreate-worker-gpu
+
+# ONNX graphs on CUDA Execution Provider
+GPU_TTS_VIENEU_BACKEND=onnx-gpu make recreate-worker-gpu
+```
+
+VieNeu v3.2.4 upstream hard-code `CPUExecutionProvider` trong `OnnxV3LiteEngine`. Adapter
+PersonaForge chỉ trong PID Child tạm redirect các session đó sang
+`CUDAExecutionProvider(device_id=0)`; GPU vật lý do Scheduler chọn đã được cô lập bằng
+`CUDA_VISIBLE_DEVICES`, vì vậy device 0 trong Child chính là GPU được cấp. Adapter kiểm tra
+provider sau load và fail-fast nếu CUDA không available. ONNX GPU mặc định dùng graph `fp32` để
+tránh phần lớn quantized op rơi về CPU; ORT vẫn được phép fallback từng operator về CPU.
+
+PyTorch backend kiểm tra `torch.cuda.is_available()` và device của VieNeu engine. Không có chế độ
+GPU nào được phép âm thầm hạ xuống CPU. Backend `onnx` còn lại dành cho CPU demo.
+
+Cache trên host mặc định ở `.cache/vieneu`. Entrypoint khởi tạo quyền một lần rồi chạy Worker bằng
+user không đặc quyền `personaforge`; `.cache` cũng bị loại khỏi Docker build context để checkpoint
+không bị copy nhầm vào image. Audio sinh ra chỉ tồn tại trong bounded in-memory pipeline, không ghi
+WAV, PostgreSQL, Redis hay cache này.
 
 ## 12. Observability và error contract
 
@@ -830,7 +857,7 @@ voice_config_version
 
 ## 19. Đổi voice ở sentence boundary
 
-VieNeu resolve voice một lần cho mỗi `infer_stream()`, do đó PersonaForge phải segment text trước
+VieNeu resolve voice một lần cho mỗi lệnh inference, do đó PersonaForge phải segment text trước
 SDK call. Child giữ:
 
 ```text

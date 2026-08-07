@@ -1,5 +1,8 @@
 FROM python:3.10-slim
 
+ARG WORKER_UID=1000
+ARG WORKER_GID=1000
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app/src \
@@ -8,23 +11,27 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends ffmpeg git gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # Worker-only runtime dependencies. The API/database/auth stack is intentionally absent.
 COPY requirements.worker.txt ./requirements.worker.txt
-RUN pip install --no-cache-dir -r requirements.worker.txt
+RUN pip install --no-cache-dir -r requirements.worker.txt \
+    && pip install --no-cache-dir --no-deps \
+        "vieneu @ git+https://github.com/pnnbao97/VieNeu-TTS.git@a8c9fbf99749d5ce45c89111f71558d6ceef3424"
 
 COPY src/personaforge_chat ./src/personaforge_chat
 COPY src/personaforge_worker ./src/personaforge_worker
 COPY src/personaforge ./src/personaforge
 COPY src/personaforge_observability ./src/personaforge_observability
 COPY scripts/generate_demo_videos.sh ./scripts/generate_demo_videos.sh
+COPY scripts/worker-entrypoint.sh ./scripts/worker-entrypoint.sh
 RUN bash scripts/generate_demo_videos.sh \
-    && useradd --create-home --uid 10001 personaforge \
+    && chmod 0755 scripts/worker-entrypoint.sh \
+    && groupadd --gid ${WORKER_GID} personaforge \
+    && useradd --create-home --uid ${WORKER_UID} --gid ${WORKER_GID} personaforge \
     && mkdir -p /var/lib/personaforge/avatar-worker /run/personaforge/worker-master \
     && chown -R personaforge:personaforge /app /var/lib/personaforge /run/personaforge
 
-USER personaforge
-
+ENTRYPOINT ["/app/scripts/worker-entrypoint.sh"]
 CMD ["python", "-m", "personaforge_worker.main"]

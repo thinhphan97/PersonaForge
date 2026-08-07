@@ -5,7 +5,7 @@ from typing import Any
 import httpx
 from redis.asyncio import Redis
 
-from personaforge_chat.application.dto import WebRtcAnswer, WebRtcOffer
+from personaforge_chat.application.dto import VoiceSummary, WebRtcAnswer, WebRtcOffer
 from personaforge_chat.domain.errors import MediaCapacityUnavailable
 from personaforge_chat.domain.models import AvatarState
 from personaforge_observability import http_headers
@@ -24,6 +24,7 @@ class ControlPlaneAvatarStreamAdapter:
         fps: float,
         peak_vram_mb: int,
         gpu_duty_cycle: float,
+        start_timeout_seconds: float,
     ) -> None:
         self._base_url = control_url.rstrip("/")
         self._headers = {"Authorization": f"Bearer {core_token}"}
@@ -34,11 +35,13 @@ class ControlPlaneAvatarStreamAdapter:
         self._fps = fps
         self._peak_vram_mb = peak_vram_mb
         self._gpu_duty_cycle = gpu_duty_cycle
+        self._start_timeout_seconds = start_timeout_seconds
 
     async def start(
         self,
         session_id: str,
         character_id: str,
+        voice: VoiceSummary,
         room_name: str,
         publisher_token: str,
     ) -> None:
@@ -48,8 +51,11 @@ class ControlPlaneAvatarStreamAdapter:
             json={
                 "character_id": character_id,
                 "avatar_model_id": f"recorded-{character_id}",
-                "tts_model_id": "scripted-tone",
-                "runtime": "scripted",
+                "tts_model_id": voice.model_id,
+                "tts_revision": voice.model_revision,
+                "voice_id": voice.voice_id,
+                "runtime": "vieneu-v3-turbo",
+                "runtime_version": voice.artifact_revision,
                 "minimum_compute_capability": "0.0",
                 "resolution": self._resolution,
                 "fps": self._fps,
@@ -59,6 +65,12 @@ class ControlPlaneAvatarStreamAdapter:
                     "room_name": room_name,
                     "livekit_url": self._livekit_url,
                     "publisher_token": publisher_token,
+                    "voice_provider": voice.provider,
+                    "provider_voice_key": voice.provider_voice_key,
+                    "voice_artifact_revision": voice.artifact_revision,
+                    "voice_artifact_checksum": voice.artifact_checksum,
+                    "speaker_embedding": list(voice.speaker_embedding),
+                    "reference_codes": [list(frame) for frame in voice.reference_codes],
                 },
             },
         )
@@ -71,7 +83,7 @@ class ControlPlaneAvatarStreamAdapter:
             session_id,
             int(lease["generation"]),
             "avatar.session.ready",
-            timeout_seconds=30,
+            timeout_seconds=self._start_timeout_seconds,
             utterance_id=None,
         )
 

@@ -39,6 +39,11 @@ async def test_invalid_management_token_falls_back_to_fresh_bootstrap_token(
         payload = json.loads(request.content)
         assert request.headers["Authorization"] == "Bearer fresh-bootstrap-token"
         assert payload["proposed_worker_id"] == "worker-stable"
+        assert payload["capabilities"]["supported_runtimes"] == [
+            "recorded",
+            "scripted",
+            "vieneu-v3-turbo",
+        ]
         return httpx.Response(
             200,
             json={

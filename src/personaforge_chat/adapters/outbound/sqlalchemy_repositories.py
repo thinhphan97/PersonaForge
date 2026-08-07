@@ -3,10 +3,13 @@ from dataclasses import replace
 from datetime import datetime
 
 from sqlalchemy import (
+    ARRAY,
     JSON,
+    REAL,
     DateTime,
     ForeignKey,
     Integer,
+    SmallInteger,
     String,
     UniqueConstraint,
     and_,
@@ -25,11 +28,13 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql import Select
 from sqlalchemy.sql.elements import ColumnElement
+from sqlalchemy.types import TypeDecorator
 
 from personaforge_chat.application.dto import (
     ChatEventType,
     ChatOutputEvent,
     RealtimeOutboxEvent,
+    VoiceSummary,
 )
 from personaforge_chat.domain.errors import ConcurrentMessageUpdate, ConcurrentSessionUpdate
 from personaforge_chat.domain.models import (
@@ -55,11 +60,36 @@ class Base(DeclarativeBase):
     pass
 
 
+class FloatArray(TypeDecorator[list[float]]):
+    impl = JSON
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect: object) -> object:
+        if getattr(dialect, "name", "") == "postgresql":
+            return dialect.type_descriptor(ARRAY(REAL))  # type: ignore[attr-defined,no-any-return]
+        return dialect.type_descriptor(JSON())  # type: ignore[attr-defined,no-any-return]
+
+
+class SmallIntArray(TypeDecorator[list[int]]):
+    impl = JSON
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect: object) -> object:
+        if getattr(dialect, "name", "") == "postgresql":
+            return dialect.type_descriptor(ARRAY(SmallInteger))  # type: ignore[attr-defined,no-any-return]
+        return dialect.type_descriptor(JSON())  # type: ignore[attr-defined,no-any-return]
+
+
 class AvatarSessionRow(Base):
     __tablename__ = "avatar_sessions"
 
     session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     character_id: Mapped[str] = mapped_column(String(100))
+    voice_id: Mapped[str] = mapped_column(
+        String(100),
+        ForeignKey("system_voices.voice_id"),
+        default="system-vi-minh-duc",
+    )
     owner_user_id: Mapped[str] = mapped_column(
         String(64),
         ForeignKey("users.user_id"),
@@ -74,6 +104,27 @@ class AvatarSessionRow(Base):
     agent_id: Mapped[str] = mapped_column(String(100), default="default")
 
 
+class SystemVoiceRow(Base):
+    __tablename__ = "system_voices"
+
+    voice_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(100))
+    description: Mapped[str] = mapped_column(String(500))
+    language: Mapped[str] = mapped_column(String(16), index=True)
+    provider: Mapped[str] = mapped_column(String(50))
+    provider_voice_key: Mapped[str] = mapped_column(String(200))
+    model_id: Mapped[str] = mapped_column(String(100))
+    model_revision: Mapped[str] = mapped_column(String(100))
+    artifact_revision: Mapped[str] = mapped_column(String(100))
+    artifact_checksum: Mapped[str] = mapped_column(String(64))
+    speaker_embedding: Mapped[list[float]] = mapped_column(FloatArray())
+    reference_codes: Mapped[list[int]] = mapped_column(SmallIntArray())
+    reference_code_frames: Mapped[int] = mapped_column(Integer)
+    reference_codebooks: Mapped[int] = mapped_column(Integer)
+    enabled: Mapped[bool] = mapped_column(default=True, index=True)
+    is_default: Mapped[bool] = mapped_column(default=False, index=True)
+
+
 class AgentTurnRow(Base):
     __tablename__ = "agent_turns"
 
@@ -86,9 +137,7 @@ class AgentTurnRow(Base):
     last_event_sequence: Mapped[int] = mapped_column(Integer, default=0)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    completed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     failure_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     failure_detail: Mapped[str | None] = mapped_column(String(1000), nullable=True)
 
@@ -223,6 +272,7 @@ class SqlAlchemySessionRepository:
             return AvatarSession(
                 session_id=row.session_id,
                 character_id=row.character_id,
+                voice_id=row.voice_id,
                 owner_user_id=row.owner_user_id,
                 visibility=SessionVisibility(row.visibility),
                 status=SessionStatus(row.status),
@@ -244,6 +294,7 @@ class SqlAlchemySessionRepository:
                     AvatarSessionRow(
                         session_id=session.session_id,
                         character_id=session.character_id,
+                        voice_id=session.voice_id,
                         owner_user_id=session.owner_user_id,
                         visibility=session.visibility.value,
                         status=session.status.value,
@@ -263,6 +314,7 @@ class SqlAlchemySessionRepository:
                     )
                     .values(
                         character_id=session.character_id,
+                        voice_id=session.voice_id,
                         owner_user_id=session.owner_user_id,
                         visibility=session.visibility.value,
                         status=session.status.value,
@@ -312,6 +364,7 @@ class SqlAlchemySessionRepository:
             AvatarSession(
                 session_id=row.session_id,
                 character_id=row.character_id,
+                voice_id=row.voice_id,
                 owner_user_id=row.owner_user_id,
                 visibility=SessionVisibility(row.visibility),
                 status=SessionStatus(row.status),
@@ -323,6 +376,66 @@ class SqlAlchemySessionRepository:
             )
             for row in rows
         )
+
+
+class SqlAlchemySystemVoiceCatalog:
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+        self._sessions = sessions
+
+    async def get(self, voice_id: str) -> VoiceSummary | None:
+        async with self._sessions() as database:
+            row = await database.get(SystemVoiceRow, voice_id)
+        return None if row is None or not row.enabled else _voice_summary(row)
+
+    async def list(self) -> tuple[VoiceSummary, ...]:
+        async with self._sessions() as database:
+            rows = tuple(
+                (
+                    await database.scalars(
+                        select(SystemVoiceRow)
+                        .where(SystemVoiceRow.enabled.is_(True))
+                        .order_by(SystemVoiceRow.is_default.desc(), SystemVoiceRow.display_name)
+                    )
+                ).all()
+            )
+        return tuple(_voice_summary(row) for row in rows)
+
+    async def default(self) -> VoiceSummary:
+        async with self._sessions() as database:
+            row = await database.scalar(
+                select(SystemVoiceRow).where(
+                    SystemVoiceRow.enabled.is_(True),
+                    SystemVoiceRow.is_default.is_(True),
+                )
+            )
+        if row is None:
+            raise RuntimeError("No enabled default system voice is configured")
+        return _voice_summary(row)
+
+
+def _voice_summary(row: SystemVoiceRow) -> VoiceSummary:
+    return VoiceSummary(
+        voice_id=row.voice_id,
+        display_name=row.display_name,
+        description=row.description,
+        language=row.language,
+        provider=row.provider,
+        provider_voice_key=row.provider_voice_key,
+        model_id=row.model_id,
+        model_revision=row.model_revision,
+        artifact_revision=row.artifact_revision,
+        artifact_checksum=row.artifact_checksum,
+        speaker_embedding=tuple(row.speaker_embedding),
+        reference_codes=tuple(
+            tuple(row.reference_codes[offset : offset + row.reference_codebooks])
+            for offset in range(
+                0,
+                row.reference_code_frames * row.reference_codebooks,
+                row.reference_codebooks,
+            )
+        ),
+        is_default=row.is_default,
+    )
 
 
 class SqlAlchemyAgentTurnRepository:
@@ -657,9 +770,7 @@ class SqlAlchemySessionShareRepository:
 
     async def _list(self, condition: ColumnElement[bool]) -> tuple[SessionShare, ...]:
         async with self._sessions() as database:
-            rows = list(
-                (await database.scalars(select(SessionShareRow).where(condition))).all()
-            )
+            rows = list((await database.scalars(select(SessionShareRow).where(condition))).all())
         return tuple(share for row in rows if (share := _share_from_row(row)) is not None)
 
     async def save(self, share: SessionShare) -> None:

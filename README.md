@@ -37,7 +37,7 @@ Các application port này là điểm thay thế dành cho model TTS/avatar th�
 Mỗi frame video có bộ đếm sáu chữ số ở góc trái để quan sát stream còn đang chạy.
 Trạng thái `thinking` được giữ tối thiểu một giây và có thể chỉnh bằng
 `THINKING_MIN_DURATION`.
-Chế độ `AV_SYNC_DEBUG` mặc định phát beep 1 kHz và nháy ô trắng đồng thời mỗi hai giây;
+Chế độ chẩn đoán `AV_SYNC_DEBUG=true` phát beep 1 kHz và nháy ô trắng đồng thời mỗi hai giây;
 bấm “Bật âm thanh kiểm tra” trên video để nghe do giới hạn autoplay của trình duyệt.
 
 Mỗi chat turn hiện có thể được giao cho Agent Runtime độc lập qua server-streaming gRPC.

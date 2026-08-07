@@ -6,3 +6,15 @@ nvitop>=1.5,<2
 grpcio>=1.81.1,<2
 protobuf>=6.33.5,<7
 redis>=5.2,<7
+# Curated VieNeu v3 Turbo runtime dependencies. The pinned upstream package is
+# installed with --no-deps in the Worker Dockerfiles so its Gradio/legacy stack
+# cannot leak into the production render image.
+numpy>=1.26,<3
+sea-g2p>=0.7.31,<1
+onnxruntime>=1.20,<2
+soundfile>=0.12,<1
+soxr>=0.5,<2
+tokenizers>=0.20,<0.24
+huggingface-hub>=0.34,<1
+PyYAML>=6,<7
+perth>=0.2,<2

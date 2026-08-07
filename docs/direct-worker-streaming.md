@@ -603,7 +603,7 @@ REDIS_URL=redis://redis:6379/0
 MEDIA_PROVIDER=livekit
 LIVEKIT_URL=wss://media.example.com
 MODEL_PROVIDER=recorded
-AV_SYNC_DEBUG=true
+AV_SYNC_DEBUG=false
 ```
 
 Secret nên được inject qua secret manager/Kubernetes Secret thay vì commit vào `.env`.
