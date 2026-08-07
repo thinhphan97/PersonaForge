@@ -19,8 +19,11 @@ APP_PUBLIC_URL ?= http://localhost:$(shell $(DEVOPS) value APP_HTTP_PORT 8000)
 
 .PHONY: help doctor env-check install assets format format-check lint typecheck \
 	unit contract integration test e2e check compose-config compose-config-gpu \
-	build build-gpu up up-agent up-control up-livekit up-gpu restart-agent \
-	restart-worker recreate-worker recreate-worker-gpu recover-worker-gpu ps health health-full \
+	build build-gpu build-chat build-agent build-control build-worker build-worker-gpu \
+	up up-agent up-control up-livekit up-gpu restart-agent restart-worker \
+	recreate-chat recreate-agent recreate-control recreate-worker recreate-worker-gpu \
+	rebuild-chat rebuild-agent rebuild-control rebuild-worker rebuild-worker-gpu \
+	recover-worker-gpu ps health health-full \
 	wait-ready smoke-control \
 	logs logs-chat logs-agent logs-control logs-worker logs-livekit logs-errors \
 	worker-status capacity telemetry gpu-check migrate migration migration-check \
@@ -77,31 +80,46 @@ compose-config: ## Validate the CPU Compose configuration
 compose-config-gpu: ## Validate the GPU Compose override
 	$(GPU_COMPOSE) config --quiet
 
-build: ## Build all CPU images
+build: ## Build all CPU images explicitly
 	$(FULL_COMPOSE) build
 
-build-gpu: ## Build all images including the NVIDIA worker
+build-gpu: ## Build all images including the NVIDIA Worker explicitly (slow)
 	$(GPU_COMPOSE) build
 
-up: ## Start the basic PostgreSQL, Redis, and aiortc demo
-	MEDIA_PROVIDER=aiortc AGENT_RUNTIME_PROVIDER=local $(COMPOSE) up -d --build postgres redis avatar-chat
+build-chat: ## Build only the Avatar Chat/Core API image
+	$(COMPOSE) build avatar-chat
 
-up-agent: ## Start the Core demo with the gRPC Agent Runtime
-	MEDIA_PROVIDER=aiortc AGENT_RUNTIME_PROVIDER=grpc $(COMPOSE) --profile agent up -d --build postgres redis personaforge-agent avatar-chat
+build-agent: ## Build only the Agent Runtime image
+	$(FULL_COMPOSE) build personaforge-agent
 
-up-control: ## Start storage, Agent, LiveKit, and Control without Worker
-	$(FULL_COMPOSE) up -d --build postgres redis livekit personaforge-control personaforge-agent
+build-control: ## Build only the Control Plane image
+	$(FULL_COMPOSE) build personaforge-control
+
+build-worker: ## Build only the CPU Worker image
+	$(FULL_COMPOSE) build avatar-worker
+
+build-worker-gpu: ## Build only the NVIDIA Worker image (slow)
+	$(GPU_COMPOSE) build avatar-worker
+
+up: ## Start the basic aiortc demo using existing images (builds only if missing)
+	MEDIA_PROVIDER=aiortc AGENT_RUNTIME_PROVIDER=local $(COMPOSE) up -d postgres redis avatar-chat
+
+up-agent: ## Start the gRPC Agent demo using existing images (builds only if missing)
+	MEDIA_PROVIDER=aiortc AGENT_RUNTIME_PROVIDER=grpc $(COMPOSE) --profile agent up -d postgres redis personaforge-agent avatar-chat
+
+up-control: ## Start Control/Agent/LiveKit using existing images (builds only if missing)
+	$(FULL_COMPOSE) up -d postgres redis livekit personaforge-control personaforge-agent
 	@$(DEVOPS) wait-ready --control-only
 
 enroll-worker: ## Issue a one-time worker token and update the env file
 	@$(DEVOPS) enroll-worker
 
-up-livekit: ## Start the full LiveKit pipeline with a CPU worker
-	MEDIA_PROVIDER=livekit AGENT_RUNTIME_PROVIDER=grpc $(FULL_COMPOSE) up -d --build
+up-livekit: ## Start the full CPU LiveKit pipeline using existing images
+	MEDIA_PROVIDER=livekit AGENT_RUNTIME_PROVIDER=grpc $(FULL_COMPOSE) up -d
 	@$(DEVOPS) wait-ready --full
 
-up-gpu: ## Start the full LiveKit pipeline with an NVIDIA worker
-	MEDIA_PROVIDER=livekit AGENT_RUNTIME_PROVIDER=grpc $(GPU_COMPOSE) up -d --build
+up-gpu: ## Start the full NVIDIA LiveKit pipeline using existing images
+	MEDIA_PROVIDER=livekit AGENT_RUNTIME_PROVIDER=grpc $(GPU_COMPOSE) up -d
 	@$(DEVOPS) wait-ready --full
 
 restart-agent: ## Restart the Agent Runtime
@@ -110,16 +128,36 @@ restart-agent: ## Restart the Agent Runtime
 restart-worker: ## Restart Worker without reloading environment values
 	$(FULL_COMPOSE) restart avatar-worker
 
+recreate-chat: ## Recreate Avatar Chat and reload Compose/.env without building
+	$(COMPOSE) up -d --force-recreate --no-deps avatar-chat
+
+recreate-agent: ## Recreate Agent Runtime and reload Compose/.env without building
+	$(FULL_COMPOSE) up -d --force-recreate --no-deps personaforge-agent
+
+recreate-control: ## Recreate Control Plane and reload Compose/.env without building
+	$(FULL_COMPOSE) up -d --force-recreate --no-deps personaforge-control
+	@$(DEVOPS) wait-ready --control-only
+
 recreate-worker: ## Recreate the CPU Worker and reload the env file
 	$(FULL_COMPOSE) up -d --force-recreate --no-deps avatar-worker
 	@$(DEVOPS) wait-ready --worker-only
 
-recreate-worker-gpu: ## Rebuild and recreate the GPU Worker, then reload the env file
-	$(GPU_COMPOSE) up -d --build --force-recreate --no-deps avatar-worker
+recreate-worker-gpu: ## Recreate the NVIDIA Worker and reload Compose/.env without building
+	$(GPU_COMPOSE) up -d --force-recreate --no-deps avatar-worker
 	@$(DEVOPS) wait-ready --worker-only
 
+rebuild-chat: build-chat recreate-chat ## Build and recreate Avatar Chat after source/dependency changes
+
+rebuild-agent: build-agent recreate-agent ## Build and recreate Agent Runtime after source/dependency changes
+
+rebuild-control: build-control recreate-control ## Build and recreate Control Plane after source/dependency changes
+
+rebuild-worker: build-worker recreate-worker ## Build and recreate the CPU Worker
+
+rebuild-worker-gpu: build-worker-gpu recreate-worker-gpu ## Build and recreate the NVIDIA Worker (slow)
+
 recover-worker-gpu: enroll-worker ## Re-enroll a GPU Worker whose persisted identity is stale
-	$(GPU_COMPOSE) up -d --build --force-recreate --no-deps avatar-worker
+	$(GPU_COMPOSE) up -d --force-recreate --no-deps avatar-worker
 	@$(DEVOPS) wait-ready --worker-only
 
 ps: ## Show status for all services and profiles

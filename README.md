@@ -69,8 +69,22 @@ make up-livekit    # full pipeline with a CPU Worker
 make up-gpu        # full pipeline with an NVIDIA Worker
 ```
 
-`make restart-worker` does not reload `.env`. After changing Worker configuration, use
-`make recreate-worker` or `make recreate-worker-gpu`. The `worker-status`, `capacity`, and
+Startup targets use an existing image and do not force a rebuild. Docker Compose builds an image
+only when it is missing. Choose the operation from the type of change:
+
+| Change | Command | Docker build |
+|---|---|---|
+| Start/stop an existing stack | `make up-gpu`, `make up-livekit`, `make up-control` | No |
+| Change only `.env` or a Compose environment value | `make recreate-worker-gpu`, `make recreate-chat`, etc. | No |
+| Restart a process without reloading `.env` | `make restart-worker`, `make restart-agent` | No |
+| Change Core/frontend/migrations/shared API source | `make rebuild-chat` and, when used, `make rebuild-control` | Yes, selected images only |
+| Change Agent source or dependencies | `make rebuild-agent` | Yes, Agent only |
+| Change Worker source, worker requirements, entrypoint, or Worker Dockerfile | `make rebuild-worker-gpu` or `make rebuild-worker` | Yes, Worker only |
+| Change only docs, Makefile, or host-side `scripts/devops.py` | Run the command directly | No |
+| Intentionally rebuild the whole stack | `make build` or `make build-gpu` | Yes, all selected images |
+
+`make restart-worker` does not reload `.env`; use `make recreate-worker` or
+`make recreate-worker-gpu` for Worker configuration changes. The `worker-status`, `capacity`, and
 `telemetry` targets summarize heartbeat data without exposing credentials. `make reset-demo`
 deletes PostgreSQL, Redis, and Worker identity volumes, so it requires `CONFIRM=YES`.
 
