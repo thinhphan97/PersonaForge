@@ -391,14 +391,28 @@ def command_worker_status(env: dict[str, str], capacity: bool, children: bool) -
         )
         if capacity:
             gpu_caps = {gpu.get("gpu_uuid"): gpu for gpu in caps.get("gpus", [])}
+            used_slots_by_gpu: dict[str, int] = {}
+            for child in heartbeat.get("child_resources", []):
+                assigned_gpu = child.get("assigned_gpu_uuid") or child.get("gpu_uuid")
+                if assigned_gpu:
+                    used_slots_by_gpu[str(assigned_gpu)] = (
+                        used_slots_by_gpu.get(str(assigned_gpu), 0) + 1
+                    )
             for gpu in heartbeat.get("gpu_resources", []):
-                cap = gpu_caps.get(gpu.get("gpu_uuid"), {})
+                gpu_uuid = gpu.get("gpu_uuid")
+                cap = gpu_caps.get(gpu_uuid, {})
+                maximum_slots = cap.get("max_slots")
+                used_slots = used_slots_by_gpu.get(str(gpu_uuid), 0)
+                free_slots = (
+                    max(0, int(maximum_slots) - used_slots) if maximum_slots is not None else None
+                )
                 used_vram = fmt(gpu.get("used_vram_mb"), "MiB")
                 total_vram = fmt(gpu.get("total_vram_mb"), "MiB")
                 free_vram = fmt(gpu.get("free_vram_mb"), "MiB")
                 utilization = fmt(gpu.get("gpu_utilization"), "%")
                 print(
-                    f"  gpu={gpu.get('gpu_uuid')} slots={cap.get('max_slots', '-')} "
+                    f"  gpu={gpu_uuid} slots={fmt(maximum_slots)} "
+                    f"used_slots={used_slots} free_slots={fmt(free_slots)} "
                     f"vram={used_vram}/{total_vram} free={free_vram} util={utilization} "
                     f"temp={fmt(gpu.get('temperature_c'), 'C')} healthy={gpu.get('healthy', True)}"
                 )
@@ -408,17 +422,34 @@ def command_worker_status(env: dict[str, str], capacity: bool, children: bool) -
                 print("  children: none")
             for child in rows:
                 session_id = child.get("session_id")
-                gpu_uuid = child.get("gpu_uuid")
+                gpu_uuid = child.get("gpu_uuid") or child.get("assigned_gpu_uuid")
                 cpu = fmt(child.get("cpu_utilization"), "%")
-                ram = fmt(child.get("ram_used_bytes"))
+                gpu_memory_mb = child.get("gpu_memory_used_mb")
+                if gpu_memory_mb is None:
+                    gpu_memory_mb = bytes_to_mib(child.get("gpu_memory_bytes"))
+                gpu_utilization = child.get("gpu_utilization")
+                if gpu_utilization is None:
+                    gpu_utilization = child.get("gpu_sm_utilization")
+                ram_mb = child.get("ram_used_mb")
+                if ram_mb is None:
+                    ram_bytes = child.get("host_rss_bytes")
+                    if ram_bytes is None:
+                        ram_bytes = child.get("ram_used_bytes")
+                    ram_mb = bytes_to_mib(ram_bytes)
                 print(
                     f"  session={session_id} pid={child.get('pid')} gpu={gpu_uuid} "
-                    f"vram={fmt(child.get('gpu_memory_used_mb'), 'MiB')} "
-                    f"gpu_util={fmt(child.get('gpu_utilization'), '%')} "
-                    f"cpu={cpu} ram={ram} "
+                    f"vram={fmt(gpu_memory_mb, 'MiB')} "
+                    f"gpu_util={fmt(gpu_utilization, '%')} "
+                    f"cpu={cpu} ram={fmt(ram_mb, 'MiB')} "
                     f"identity_ok={child.get('process_identity_matches')}"
                 )
     return 0
+
+
+def bytes_to_mib(value: Any) -> float | None:
+    if value is None:
+        return None
+    return round(float(value) / (1024 * 1024), 1)
 
 
 def build_parser() -> argparse.ArgumentParser:
