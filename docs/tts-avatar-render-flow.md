@@ -1,5 +1,8 @@
 # Luồng Composite TTS và Avatar Render Worker
 
+> Kế hoạch mở rộng từ recorded/server-video avatar sang LAM client-motion avatar và custom
+> character được mô tả tại [`lam-avatar-integration-plan.md`](lam-avatar-integration-plan.md).
+
 > Trạng thái: Enrollment/Identity Plane, Redis ACL, Control Plane scheduler, composite lease,
 > worker heartbeat và application-level `CompositeSpeechPipeline` đã được triển khai. Luồng
 > LiveKit hiện chạy end-to-end bằng scripted tone TTS và recorded-clip lip-sync giả qua bounded
