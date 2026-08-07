@@ -427,6 +427,12 @@ Các quyết định ưu tiên latency:
    trước video; cả hai dùng cùng audio master clock.
 7. Warm-up output không append timeline hoặc publish LiveKit.
 
+Implementation hiện tại gọi một lượt `infer_stream()` ngắn với voice snapshot của session ngay sau
+khi load VieNeu. Adapter consume và validate toàn bộ output trong Child nhưng loại bỏ PCM; không
+đưa warm-up qua speech pipeline, lip-sync hay LiveKit. Child chỉ hoàn tất khởi tạo sau khi warm-up
+thành công. Các event `worker.tts.warmup.started/completed/failed` ghi duration, số chunk và số
+sample để phân biệt model-load latency với cold-inference latency của câu đầu tiên.
+
 Model load/warm-up làm tăng session connect time nhưng giảm latency mọi speech turn. Đây là chủ
 đích của session-scoped Child: không load lại model theo utterance.
 
@@ -686,6 +692,7 @@ Unit/contract tests:
 - System voice unknown/disabled bị từ chối trước provision.
 - Cùng manifest/revision cho kết quả resolve deterministic giữa Core và Child.
 - Adapter emit đúng PCM S16LE mono 48 kHz và chunk 20 ms.
+- Warm-up chạy đúng một lần cho mỗi session-owned model và không publish audio/video.
 - Segmenter không emit từng từ, không cắt giữa codepoint/word và flush tail đúng một lần.
 - Tail audio không mất; segment/chunk sequence tăng đơn điệu; marker segment/utterance đúng.
 - Nhiều synthesis segment của một utterance không phát playback completed sớm.

@@ -11,10 +11,32 @@ from personaforge_worker.domain.media import SpeechSegment
 
 
 class FakeVieNeuEngine:
+    def __init__(self) -> None:
+        self.inference_count = 0
+
     def infer_stream(self, text: str, **_kwargs: object):
         assert text == "Xin chào."
+        self.inference_count += 1
         yield [0.5] * 1_200
         yield [-0.5] * 1_200
+
+
+@pytest.mark.asyncio
+async def test_vieneu_warmup_primes_model_once_without_media_output() -> None:
+    pytest.importorskip("numpy")
+    engine = FakeVieNeuEngine()
+    runtime = VieNeuTtsSessionRuntime(
+        engine,
+        {"speaker_emb": (), "codes": ()},
+        frame_samples=960,
+        apply_watermark=False,
+    )
+
+    assert await asyncio.wait_for(runtime.warmup(), timeout=2) is None
+    assert await asyncio.wait_for(runtime.warmup(), timeout=2) is None
+    await runtime.close()
+
+    assert engine.inference_count == 1
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,7 @@ from typing import Any
 from personaforge_worker.domain.media import NativeAudioChunk, SpeechSegment
 
 logger = logging.getLogger(__name__)
+_DEFAULT_WARMUP_TEXT = "Xin chào."
 
 
 class VieNeuTtsSessionRuntime:
@@ -30,6 +31,8 @@ class VieNeuTtsSessionRuntime:
         if self._sample_rate != 48_000:
             raise ValueError(f"VieNeu v3 output sample rate is {self._sample_rate}, expected 48000")
         self._closed = False
+        self._warmed_up = False
+        self._warmup_lock = asyncio.Lock()
         self._model_stream_completed_at: float | None = None
 
     @classmethod
@@ -85,12 +88,74 @@ class VieNeuTtsSessionRuntime:
                 ),
             },
         )
-        return cls(
+        runtime = cls(
             engine,
             voice,
             frame_samples=frame_samples,
             apply_watermark=apply_watermark,
         )
+        try:
+            await runtime.warmup()
+        except BaseException:
+            await runtime.close()
+            raise
+        return runtime
+
+    async def warmup(self) -> None:
+        """Prime the session-owned model without publishing generated audio."""
+
+        if self._closed:
+            raise RuntimeError("VieNeu TTS runtime is closed")
+        async with self._warmup_lock:
+            if self._warmed_up:
+                return
+            started_at = time.perf_counter()
+            model_chunks = 0
+            model_samples = 0
+            logger.info(
+                "VieNeu warm-up started",
+                extra={
+                    "event": "worker.tts.warmup.started",
+                    "text_chars": len(_DEFAULT_WARMUP_TEXT),
+                },
+            )
+            try:
+                async for waveform in self._stream_model_chunks(_DEFAULT_WARMUP_TEXT):
+                    pcm, metrics = _float32_to_s16le_with_metrics(
+                        waveform,
+                        self._sample_rate,
+                    )
+                    if not pcm:
+                        continue
+                    model_chunks += 1
+                    model_samples += int(metrics["model_samples"])
+                if model_samples == 0:
+                    raise RuntimeError("VieNeu warm-up returned empty audio")
+            except BaseException:
+                logger.exception(
+                    "VieNeu warm-up failed",
+                    extra={
+                        "event": "worker.tts.warmup.failed",
+                        "duration_ms": round((time.perf_counter() - started_at) * 1_000, 2),
+                        "outcome": "failure",
+                    },
+                )
+                raise
+            self._warmed_up = True
+            logger.info(
+                "VieNeu warm-up completed",
+                extra={
+                    "event": "worker.tts.warmup.completed",
+                    "duration_ms": round((time.perf_counter() - started_at) * 1_000, 2),
+                    "model_shape": f"chunks:{model_chunks}",
+                    "model_samples": model_samples,
+                    "model_audio_duration_ms": round(
+                        model_samples / self._sample_rate * 1_000,
+                        2,
+                    ),
+                    "outcome": "success",
+                },
+            )
 
     async def synthesize(self, segment: SpeechSegment) -> AsyncIterator[NativeAudioChunk]:
         if self._closed:
@@ -114,8 +179,7 @@ class VieNeuTtsSessionRuntime:
         model_metrics: dict[str, Any] = {}
         model_chunk_count = 0
         async for waveform in self._stream_model_chunks(segment.text):
-            pcm, chunk_metrics = await asyncio.to_thread(
-                _float32_to_s16le_with_metrics,
+            pcm, chunk_metrics = _float32_to_s16le_with_metrics(
                 waveform,
                 self._sample_rate,
             )
