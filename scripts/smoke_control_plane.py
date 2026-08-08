@@ -17,7 +17,13 @@ async def main() -> None:
         "CONTROL_OPERATOR_TOKEN",
         "development-operator-token-change-me",
     )
-    redis_admin_url = os.getenv("CONTROL_REDIS_ADMIN_URL", "redis://redis:6379/0")
+    redis_admin_url = os.getenv(
+        "CONTROL_REDIS_ADMIN_URL",
+        os.getenv(
+            "REDIS_URL",
+            "redis://default:development-redis-admin-change-me@redis:6379/0",
+        ),
+    )
     suffix = uuid4().hex
     worker_id = f"smoke-worker-{suffix}"
     boot_id = f"boot-{suffix}"
@@ -105,9 +111,7 @@ async def main() -> None:
                 headers={"Authorization": f"Bearer {operator_token}"},
             )
             inventory.raise_for_status()
-            observed = next(
-                item for item in inventory.json() if item["worker_id"] == worker_id
-            )
+            observed = next(item for item in inventory.json() if item["worker_id"] == worker_id)
             assert observed["heartbeat"]["hardware_source"] == "smoke"
             try:
                 await redis.set("avatar:worker:another-worker:heartbeat", "forbidden")

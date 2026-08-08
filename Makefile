@@ -20,8 +20,10 @@ APP_PUBLIC_URL ?= http://localhost:$(shell $(DEVOPS) value APP_HTTP_PORT 8000)
 .PHONY: help doctor env-check install assets format format-check lint typecheck \
 	unit contract integration test e2e check compose-config compose-config-gpu \
 	build build-gpu build-chat build-agent build-control build-worker build-worker-gpu \
-	up up-agent up-control up-livekit up-gpu restart-agent restart-worker \
+	up up-agent up-control up-livekit up-gpu up-remote-worker up-remote-worker-gpu \
+	restart-agent restart-worker \
 	recreate-chat recreate-agent recreate-control recreate-worker recreate-worker-gpu \
+	recreate-remote-worker recreate-remote-worker-gpu \
 	rebuild-chat rebuild-agent rebuild-control rebuild-worker rebuild-worker-gpu \
 	recover-worker-gpu ps health health-full \
 	wait-ready smoke-control \
@@ -122,6 +124,14 @@ up-gpu: ## Start the full NVIDIA LiveKit pipeline using existing images
 	MEDIA_PROVIDER=livekit AGENT_RUNTIME_PROVIDER=grpc $(GPU_COMPOSE) up -d
 	@$(DEVOPS) wait-ready --full
 
+up-remote-worker: ## Start only the CPU Worker against an external Control/Redis/LiveKit host
+	$(FULL_COMPOSE) up -d --no-deps avatar-worker
+	@$(FULL_COMPOSE) ps avatar-worker
+
+up-remote-worker-gpu: ## Start only the NVIDIA Worker against external services
+	$(GPU_COMPOSE) up -d --no-deps avatar-worker
+	@$(GPU_COMPOSE) ps avatar-worker
+
 restart-agent: ## Restart the Agent Runtime
 	$(FULL_COMPOSE) restart personaforge-agent
 
@@ -145,6 +155,14 @@ recreate-worker: ## Recreate the CPU Worker and reload the env file
 recreate-worker-gpu: ## Recreate the NVIDIA Worker and reload Compose/.env without building
 	$(GPU_COMPOSE) up -d --force-recreate --no-deps avatar-worker
 	@$(DEVOPS) wait-ready --worker-only
+
+recreate-remote-worker: ## Recreate only a remote CPU Worker and reload its env
+	$(FULL_COMPOSE) up -d --force-recreate --no-deps avatar-worker
+	@$(FULL_COMPOSE) ps avatar-worker
+
+recreate-remote-worker-gpu: ## Recreate only a remote NVIDIA Worker and reload its env
+	$(GPU_COMPOSE) up -d --force-recreate --no-deps avatar-worker
+	@$(GPU_COMPOSE) ps avatar-worker
 
 rebuild-chat: build-chat recreate-chat ## Build and recreate Avatar Chat after source/dependency changes
 
@@ -221,7 +239,7 @@ db-shell: ## Open psql inside the PostgreSQL container
 	$(COMPOSE) exec postgres psql -U $$($(DEVOPS) value POSTGRES_USER avatar) -d $$($(DEVOPS) value POSTGRES_DB avatar)
 
 redis-cli: ## Open Redis CLI
-	$(COMPOSE) exec redis redis-cli
+	$(COMPOSE) exec redis sh -c 'REDISCLI_AUTH="$${REDIS_ADMIN_PASSWORD}" exec redis-cli'
 
 down: ## Stop the basic demo and retain volumes
 	$(COMPOSE) down

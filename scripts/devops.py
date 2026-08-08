@@ -15,6 +15,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 DEVELOPMENT_VALUES = {
     "CONTROL_OPERATOR_TOKEN": "development-operator-token-change-me",
@@ -22,6 +23,7 @@ DEVELOPMENT_VALUES = {
     "CONTROL_ENROLLMENT_JWT_SECRET": "development-control-enrollment-secret-change-me",
     "JWT_SECRET": "development-only-jwt-secret-change-me-32-bytes",
     "AGENT_DELEGATION_SECRET": "development-agent-delegation-secret-change-me",
+    "REDIS_ADMIN_PASSWORD": "development-redis-admin-change-me",
 }
 
 
@@ -40,6 +42,20 @@ def load_env(path: Path) -> dict[str, str]:
 
 def setting(env: dict[str, str], key: str, default: str = "") -> str:
     return os.getenv(key, env.get(key, default))
+
+
+def control_public_url(env: dict[str, str]) -> str:
+    configured = setting(env, "CONTROL_PUBLIC_URL")
+    if configured:
+        return configured.rstrip("/")
+    return f"http://127.0.0.1:{setting(env, 'CONTROL_HTTP_PORT', '8090')}"
+
+
+def app_public_url(env: dict[str, str]) -> str:
+    configured = setting(env, "APP_PUBLIC_URL")
+    if configured:
+        return configured.rstrip("/")
+    return f"http://127.0.0.1:{setting(env, 'APP_HTTP_PORT', '8000')}"
 
 
 def http_json(url: str, token: str | None = None, payload: object | None = None) -> Any:
@@ -108,6 +124,39 @@ def command_env_check(env: dict[str, str], env_file: Path) -> int:
         ):
             if not setting(env, key):
                 errors.append(f"LiveKit mode requires {key}")
+    remote_workers = setting(env, "REMOTE_WORKERS_ENABLED", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if remote_workers:
+        for key in (
+            "CONTROL_PUBLIC_URL",
+            "CONTROL_REDIS_ADVERTISED_URL",
+            "LIVEKIT_WORKER_URL",
+        ):
+            if not setting(env, key):
+                errors.append(f"Remote Worker mode requires {key}")
+        for key in (
+            "CONTROL_PUBLIC_URL",
+            "CONTROL_REDIS_ADVERTISED_URL",
+            "LIVEKIT_WORKER_URL",
+        ):
+            value = setting(env, key)
+            if value and urlsplit(value).hostname in {
+                "redis",
+                "livekit",
+                "personaforge-control",
+                "localhost",
+                "127.0.0.1",
+                "::1",
+            }:
+                errors.append(f"{key} must be reachable outside the Docker network")
+        if setting(env, "CONTROL_HTTP_BIND_HOST", "127.0.0.1") in {"127.0.0.1", "::1"}:
+            errors.append("CONTROL_HTTP_BIND_HOST must expose Control to remote workers")
+        if setting(env, "REDIS_BIND_HOST", "127.0.0.1") in {"127.0.0.1", "::1"}:
+            errors.append("REDIS_BIND_HOST must expose Redis to remote workers")
     operator = setting(env, "CONTROL_OPERATOR_TOKEN")
     core = setting(env, "CONTROL_CORE_TOKEN")
     if operator and operator == core:
@@ -221,9 +270,8 @@ def compose_ps(env_file: Path) -> list[dict[str, Any]]:
 
 
 def get_inventory(env: dict[str, str]) -> list[dict[str, Any]]:
-    port = setting(env, "CONTROL_HTTP_PORT", "8090")
     token = setting(env, "CONTROL_OPERATOR_TOKEN")
-    data = http_json(f"http://127.0.0.1:{port}/internal/workers", token=token)
+    data = http_json(f"{control_public_url(env)}/internal/workers", token=token)
     if not isinstance(data, list):
         raise RuntimeError("Control Plane returned an invalid worker inventory")
     return data
@@ -240,9 +288,7 @@ def check_http(name: str, url: str, failure_label: str = "ERROR") -> bool:
 
 
 def command_health(env: dict[str, str], env_file: Path, full: bool) -> int:
-    ok = check_http(
-        "Avatar Chat", f"http://127.0.0.1:{setting(env, 'APP_HTTP_PORT', '8000')}/api/health"
-    )
+    ok = check_http("Avatar Chat", f"{app_public_url(env)}/api/health")
     try:
         services = compose_ps(env_file)
         observed_services: set[str] = set()
@@ -268,7 +314,7 @@ def command_health(env: dict[str, str], env_file: Path, full: bool) -> int:
     if full:
         ok &= check_http(
             "Control Plane",
-            f"http://127.0.0.1:{setting(env, 'CONTROL_HTTP_PORT', '8090')}/health/live",
+            f"{control_public_url(env)}/health/live",
         )
         try:
             inventory = get_inventory(env)
@@ -299,7 +345,7 @@ def command_wait_ready(
         if not worker_only:
             control_ok = check_http(
                 "Control Plane",
-                f"http://127.0.0.1:{setting(env, 'CONTROL_HTTP_PORT', '8090')}/health/live",
+                f"{control_public_url(env)}/health/live",
                 failure_label="WAIT",
             )
         if control_only:
@@ -310,7 +356,7 @@ def command_wait_ready(
         app_ok = (
             check_http(
                 "Avatar Chat",
-                f"http://127.0.0.1:{setting(env, 'APP_HTTP_PORT', '8000')}/api/health",
+                f"{app_public_url(env)}/api/health",
                 failure_label="WAIT",
             )
             if not worker_only
@@ -345,10 +391,9 @@ def command_enroll(env: dict[str, str], env_file: Path) -> int:
         "max_gpu_count": int(setting(env, "AVATAR_WORKER_MAX_GPU_COUNT", "1")),
         "ttl_seconds": int(setting(env, "AVATAR_WORKER_ENROLLMENT_TTL_SECONDS", "600")),
     }
-    port = setting(env, "CONTROL_HTTP_PORT", "8090")
     try:
         response = http_json(
-            f"http://127.0.0.1:{port}/internal/worker-enrollment-tokens",
+            f"{control_public_url(env)}/internal/worker-enrollment-tokens",
             token=token,
             payload=payload,
         )

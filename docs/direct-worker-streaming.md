@@ -587,7 +587,7 @@ LIVEKIT_API_KEY=...
 LIVEKIT_API_SECRET=...
 
 RENDER_PROVIDER=redis
-REDIS_URL=redis://redis:6379/0
+REDIS_URL=redis://default:<admin-password>@redis:6379/0
 WORKER_HEARTBEAT_TIMEOUT=15
 SESSION_READY_TIMEOUT=30
 ```
@@ -598,7 +598,7 @@ Render Worker:
 WORKER_ID=gpu-worker-02
 WORKER_MAX_SESSIONS=8
 WORKER_MODELS=avatar-v1
-REDIS_URL=redis://redis:6379/0
+REDIS_URL=redis://default:<admin-password>@redis:6379/0
 
 MEDIA_PROVIDER=livekit
 LIVEKIT_URL=wss://media.example.com

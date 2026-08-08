@@ -136,6 +136,10 @@ Model TTS/lip-sync thật chỉ cần implement application ports; không đổi
 
 ## 6. Chạy enrollment mode bằng Docker Compose
 
+Worker trên GPU host vật lý khác phải dùng advertised Redis/LiveKit URL thay cho Docker DNS.
+Cấu hình, firewall ports và lệnh start riêng được mô tả tại
+[`remote-worker-deployment.md`](remote-worker-deployment.md).
+
 Đặt các biến sau trong `.env`:
 
 ```env

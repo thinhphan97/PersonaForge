@@ -29,6 +29,16 @@ def test_replace_env_value_updates_once_and_preserves_other_lines(tmp_path: Path
     assert env_file.read_text(encoding="utf-8") == ("A=1\nTOKEN=new\nB=2\nEXTRA=value\n")
 
 
+def test_public_service_urls_come_from_env() -> None:
+    env = {
+        "APP_PUBLIC_URL": "http://10.0.0.10:18000/",
+        "CONTROL_PUBLIC_URL": "http://10.0.0.10:8090/",
+    }
+
+    assert devops.app_public_url(env) == "http://10.0.0.10:18000"
+    assert devops.control_public_url(env) == "http://10.0.0.10:8090"
+
+
 def test_env_check_rejects_shared_control_tokens(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -41,6 +51,56 @@ def test_env_check_rejects_shared_control_tokens(
 
     assert result == 1
     assert "must be different" in capsys.readouterr().out
+
+
+def test_env_check_rejects_docker_dns_for_remote_workers(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            (
+                "REMOTE_WORKERS_ENABLED=true",
+                "CONTROL_PUBLIC_URL=http://personaforge-control:8090",
+                "CONTROL_REDIS_ADVERTISED_URL=redis://redis:6379/0",
+                "LIVEKIT_WORKER_URL=ws://livekit:7880",
+                "CONTROL_HTTP_BIND_HOST=127.0.0.1",
+                "REDIS_BIND_HOST=127.0.0.1",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = devops.command_env_check(devops.load_env(env_file), env_file)
+
+    output = capsys.readouterr().out
+    assert result == 1
+    assert "CONTROL_REDIS_ADVERTISED_URL must be reachable" in output
+    assert "CONTROL_HTTP_BIND_HOST must expose Control" in output
+
+
+def test_env_check_accepts_remote_worker_advertised_endpoints(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            (
+                "REMOTE_WORKERS_ENABLED=true",
+                "CONTROL_PUBLIC_URL=http://10.0.0.10:8090",
+                "CONTROL_REDIS_ADVERTISED_URL=redis://10.0.0.10:16379/0",
+                "LIVEKIT_WORKER_URL=ws://10.0.0.10:17880",
+                "CONTROL_HTTP_BIND_HOST=0.0.0.0",
+                "REDIS_BIND_HOST=0.0.0.0",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert devops.command_env_check(devops.load_env(env_file), env_file) == 0
 
 
 def test_port_state_handles_restricted_socket_probe(monkeypatch: pytest.MonkeyPatch) -> None:

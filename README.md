@@ -406,8 +406,9 @@ dành cho local. Frontend demo tải LiveKit browser SDK từ jsDelivr nên trì
 cập Internet; production nên pin version và bundle SDK cùng frontend.
 
 Nếu port mặc định đã bị chiếm, đổi đồng thời `APP_HTTP_PORT`, `LIVEKIT_HTTP_PORT` và phần
-port trong `LIVEKIT_URL`; `LIVEKIT_WORKER_URL=ws://livekit:7880` vẫn giữ nguyên vì đây là
-địa chỉ nội bộ Docker.
+port trong `LIVEKIT_URL`. `LIVEKIT_WORKER_URL=ws://livekit:7880` chỉ đúng khi Worker nằm trong
+cùng Compose network. Worker trên GPU host khác phải dùng LAN/private LiveKit URL; xem
+[`remote-worker-deployment.md`](docs/remote-worker-deployment.md).
 
 Worker hiện dùng lại các clip `idle`, `thinking`, `speaking`, nhưng chạy trong process riêng.
 Nó publish một audio track PCM mono 48 kHz theo frame 20 ms và video theo

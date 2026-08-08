@@ -1,5 +1,6 @@
 import os
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,11 +31,23 @@ class ControlSettings:
 
     @classmethod
     def from_env(cls) -> "ControlSettings":
+        redis_worker_url = (
+            os.getenv("CONTROL_REDIS_ADVERTISED_URL")
+            or os.getenv("CONTROL_REDIS_WORKER_URL")
+            or "redis://redis:6379/0"
+        )
+        if os.getenv("REMOTE_WORKERS_ENABLED", "false").lower() in {"1", "true", "yes", "on"}:
+            hostname = urlsplit(redis_worker_url).hostname
+            if hostname in {None, "redis", "localhost", "127.0.0.1", "::1"}:
+                raise ValueError(
+                    "CONTROL_REDIS_ADVERTISED_URL must use an address reachable from remote "
+                    "workers when REMOTE_WORKERS_ENABLED=true"
+                )
         return cls(
             host=os.getenv("CONTROL_HOST", "0.0.0.0"),
             port=int(os.getenv("CONTROL_PORT", "8090")),
             redis_admin_url=os.getenv("CONTROL_REDIS_ADMIN_URL", "redis://redis:6379/0"),
-            redis_worker_url=os.getenv("CONTROL_REDIS_WORKER_URL", "redis://redis:6379/0"),
+            redis_worker_url=redis_worker_url,
             enrollment_jwt_secret=os.getenv(
                 "CONTROL_ENROLLMENT_JWT_SECRET",
                 "development-control-enrollment-secret-change-me",
@@ -52,12 +65,8 @@ class ControlSettings:
                 "CONTROL_CORE_TOKEN",
                 "development-core-control-token-change-me",
             ),
-            registration_ttl_seconds=int(
-                os.getenv("CONTROL_REGISTRATION_TTL_SECONDS", "15")
-            ),
-            credential_ttl_seconds=int(
-                os.getenv("CONTROL_REDIS_CREDENTIAL_TTL_SECONDS", "3600")
-            ),
+            registration_ttl_seconds=int(os.getenv("CONTROL_REGISTRATION_TTL_SECONDS", "15")),
+            credential_ttl_seconds=int(os.getenv("CONTROL_REDIS_CREDENTIAL_TTL_SECONDS", "3600")),
             slot_lease_seconds=int(os.getenv("CONTROL_SLOT_LEASE_SECONDS", "30")),
             database_url=os.getenv(
                 "CONTROL_DATABASE_URL",

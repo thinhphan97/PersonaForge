@@ -1006,14 +1006,16 @@ nhiều API replica có thể đồng thời nhận chat cho cùng session.
 | Biến | Mặc định mẫu | Ý nghĩa |
 |---|---|---|
 | `LIVEKIT_URL` | `ws://localhost:7880` | URL browser/public dùng connect SFU |
-| `LIVEKIT_WORKER_URL` | `ws://livekit:7880` | URL worker nội bộ Docker |
+| `LIVEKIT_WORKER_URL` | `ws://livekit:7880` | URL Core gửi cho Worker; phải đổi sang LAN/private URL khi Worker ở host khác |
 | `LIVEKIT_API_KEY` | `devkey` | Ký JWT, chỉ dành local |
 | `LIVEKIT_API_SECRET` | `secret` | Ký JWT, phải đổi production |
 | `LIVEKIT_HTTP_PORT` | `7880` | Signaling/API host port |
 | `LIVEKIT_RTC_TCP_PORT` | `7881` | WebRTC TCP host và container port |
 | `LIVEKIT_RTC_UDP_PORT` | `7882` | WebRTC UDP host và container port |
 | `LIVEKIT_NODE_IP` | rỗng | IP SFU quảng bá cho browser ngoài host |
-| `REDIS_URL` | `redis://redis:6379/0` | Redis connection |
+| `REDIS_URL` | authenticated Docker URL | Redis admin/internal connection của Core/Agent |
+| `CONTROL_REDIS_ADVERTISED_URL` | `redis://redis:6379/0` | URL trả cho Worker; remote mode phải dùng LAN/private host và published port |
+| `REDIS_PORT` | `6379` | Redis host port; chỉ cần publish cho remote Worker |
 | `REALTIME_EVENT_BUS` | `auto` | `auto`: Redis ở LiveKit, memory ở aiortc; hoặc ép `redis`/`memory` |
 | `RENDER_WORKER_ID` | `avatar-worker-1` | Stream/worker affinity |
 | `WORKER_ID` | từ `RENDER_WORKER_ID` | ID worker process |
@@ -1068,7 +1070,8 @@ LIVEKIT_API_SECRET=secret
 LIVEKIT_HTTP_PORT=17880
 LIVEKIT_RTC_TCP_PORT=17881
 LIVEKIT_RTC_UDP_PORT=17882
-REDIS_URL=redis://redis:6379/0
+REDIS_ADMIN_PASSWORD=<development-admin-password>
+REDIS_URL=redis://default:<development-admin-password>@redis:6379/0
 REALTIME_EVENT_BUS=auto
 RENDER_WORKER_ID=avatar-worker-1
 CONTROL_PLANE_URL=http://personaforge-control:8090
@@ -1105,8 +1108,10 @@ LIVEKIT_URL=ws://192.168.20.166:17880
 LIVEKIT_NODE_IP=192.168.20.166
 ```
 
-Không đổi `LIVEKIT_WORKER_URL=ws://livekit:7880`, vì worker dùng Docker DNS và cổng HTTP
-nội bộ của LiveKit.
+Nếu Worker chạy trong cùng Compose network, giữ `LIVEKIT_WORKER_URL=ws://livekit:7880`. Nếu
+Worker chạy trên host vật lý khác, biến này phải là URL được GPU host truy cập được, ví dụ
+`ws://192.168.20.166:17880`. Runbook đầy đủ nằm tại
+[`remote-worker-deployment.md`](remote-worker-deployment.md).
 
 ### 16.2. Start lần đầu và đăng ký Worker
 
@@ -1263,6 +1268,10 @@ LiveKit mode cần browser truy cập:
 | `17881` | TCP | WebRTC TCP fallback |
 | `17882` | UDP | WebRTC media ưu tiên |
 
+Remote Render Worker còn cần Control `8090/TCP` và published Redis, ví dụ `16379/TCP`. Worker
+không cần truy cập PostgreSQL hoặc Agent gRPC trực tiếp. Xem bảng port đầy đủ tại
+[`remote-worker-deployment.md`](remote-worker-deployment.md#3-port-cần-mở).
+
 Triệu chứng signaling đúng nhưng không có video thường là:
 
 - Browser join room nhưng ICE không thành `connected`.
@@ -1276,7 +1285,8 @@ Giải pháp local/LAN:
 - Giữ RTC host port và container listen port giống nhau như `compose.yaml` hiện tại.
 - Mở firewall TCP signaling, RTC TCP và RTC UDP.
 - Đặt `LIVEKIT_URL` theo địa chỉ nhìn từ browser, không theo địa chỉ nhìn từ container.
-- Đặt `LIVEKIT_WORKER_URL` theo Docker DNS, không theo địa chỉ browser.
+- Đặt `LIVEKIT_WORKER_URL` theo network scope của Worker: Docker DNS cho Worker cùng Compose,
+  hoặc LAN/private URL cho Worker nằm trên host khác.
 
 Qua Internet production cần TLS (`https/wss`), domain, certificate, public IP đúng và TURN cho
 network hạn chế. HTTP page từ remote origin cũng có thể gặp browser secure-context policy.
@@ -1354,10 +1364,12 @@ nên lỗi này thường chỉ xuất hiện do command thủ công hoặc prod
 ### 19.8. Inspect Redis
 
 ```bash
-docker compose exec redis redis-cli GET avatar:worker:avatar-worker-1
-docker compose exec redis redis-cli XLEN avatar:commands:avatar-worker-1
-docker compose exec redis redis-cli XPENDING \
-  avatar:commands:avatar-worker-1 avatar-render-workers
+docker compose exec redis sh -c \
+  'REDISCLI_AUTH="$REDIS_ADMIN_PASSWORD" redis-cli GET avatar:worker:avatar-worker-1'
+docker compose exec redis sh -c \
+  'REDISCLI_AUTH="$REDIS_ADMIN_PASSWORD" redis-cli XLEN avatar:commands:avatar-worker-1'
+docker compose exec redis sh -c \
+  'REDISCLI_AUTH="$REDIS_ADMIN_PASSWORD" redis-cli XPENDING avatar:commands:avatar-worker-1 avatar-render-workers'
 ```
 
 ## 20. Failure behavior hiện tại
