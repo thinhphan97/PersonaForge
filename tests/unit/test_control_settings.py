@@ -26,3 +26,14 @@ def test_remote_worker_mode_rejects_docker_only_redis_hostname(
 
     with pytest.raises(ValueError, match="reachable from remote workers"):
         ControlSettings.from_env()
+
+
+def test_remote_worker_mode_rejects_mismatched_published_redis_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REMOTE_WORKERS_ENABLED", "true")
+    monkeypatch.setenv("CONTROL_REDIS_ADVERTISED_URL", "redis://10.0.0.10:16379/0")
+    monkeypatch.setenv("REDIS_PORT", "16380")
+
+    with pytest.raises(ValueError, match="port must match"):
+        ControlSettings.from_env()

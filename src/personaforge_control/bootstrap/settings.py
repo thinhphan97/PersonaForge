@@ -37,11 +37,18 @@ class ControlSettings:
             or "redis://redis:6379/0"
         )
         if os.getenv("REMOTE_WORKERS_ENABLED", "false").lower() in {"1", "true", "yes", "on"}:
-            hostname = urlsplit(redis_worker_url).hostname
+            parsed_redis_worker_url = urlsplit(redis_worker_url)
+            hostname = parsed_redis_worker_url.hostname
             if hostname in {None, "redis", "localhost", "127.0.0.1", "::1"}:
                 raise ValueError(
                     "CONTROL_REDIS_ADVERTISED_URL must use an address reachable from remote "
                     "workers when REMOTE_WORKERS_ENABLED=true"
+                )
+            published_port = os.getenv("REDIS_PORT")
+            if published_port and (parsed_redis_worker_url.port or 6379) != int(published_port):
+                raise ValueError(
+                    "CONTROL_REDIS_ADVERTISED_URL port must match the Redis port published "
+                    "by this deployment (REDIS_PORT)"
                 )
         return cls(
             host=os.getenv("CONTROL_HOST", "0.0.0.0"),

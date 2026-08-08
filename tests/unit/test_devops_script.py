@@ -91,6 +91,7 @@ def test_env_check_accepts_remote_worker_advertised_endpoints(
                 "REMOTE_WORKERS_ENABLED=true",
                 "CONTROL_PUBLIC_URL=http://10.0.0.10:8090",
                 "CONTROL_REDIS_ADVERTISED_URL=redis://10.0.0.10:16379/0",
+                "REDIS_PORT=16379",
                 "LIVEKIT_WORKER_URL=ws://10.0.0.10:17880",
                 "CONTROL_HTTP_BIND_HOST=0.0.0.0",
                 "REDIS_BIND_HOST=0.0.0.0",
@@ -101,6 +102,33 @@ def test_env_check_accepts_remote_worker_advertised_endpoints(
     )
 
     assert devops.command_env_check(devops.load_env(env_file), env_file) == 0
+
+
+def test_env_check_rejects_mismatched_advertised_redis_port(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            (
+                "REMOTE_WORKERS_ENABLED=true",
+                "CONTROL_PUBLIC_URL=http://10.0.0.10:8090",
+                "CONTROL_REDIS_ADVERTISED_URL=redis://10.0.0.10:16379/0",
+                "REDIS_PORT=16380",
+                "LIVEKIT_WORKER_URL=ws://10.0.0.10:17880",
+                "CONTROL_HTTP_BIND_HOST=0.0.0.0",
+                "REDIS_BIND_HOST=0.0.0.0",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = devops.command_env_check(devops.load_env(env_file), env_file)
+
+    assert result == 1
+    assert "port must match REDIS_PORT" in capsys.readouterr().out
 
 
 def test_port_state_handles_restricted_socket_probe(monkeypatch: pytest.MonkeyPatch) -> None:

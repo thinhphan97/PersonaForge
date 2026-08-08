@@ -157,6 +157,18 @@ def command_env_check(env: dict[str, str], env_file: Path) -> int:
             errors.append("CONTROL_HTTP_BIND_HOST must expose Control to remote workers")
         if setting(env, "REDIS_BIND_HOST", "127.0.0.1") in {"127.0.0.1", "::1"}:
             errors.append("REDIS_BIND_HOST must expose Redis to remote workers")
+        redis_port = setting(env, "REDIS_PORT")
+        advertised_url = setting(env, "CONTROL_REDIS_ADVERTISED_URL")
+        if redis_port and advertised_url:
+            try:
+                advertised_port = urlsplit(advertised_url).port or 6379
+                if advertised_port != int(redis_port):
+                    errors.append(
+                        "CONTROL_REDIS_ADVERTISED_URL port must match REDIS_PORT "
+                        f"({advertised_port} != {redis_port})"
+                    )
+            except ValueError:
+                errors.append("REDIS_PORT and CONTROL_REDIS_ADVERTISED_URL port must be valid")
     operator = setting(env, "CONTROL_OPERATOR_TOKEN")
     core = setting(env, "CONTROL_CORE_TOKEN")
     if operator and operator == core:
