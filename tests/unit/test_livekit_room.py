@@ -10,6 +10,7 @@ async def test_livekit_room_issues_separate_least_privilege_tokens() -> None:
     adapter = LiveKitMediaRoomAdapter("ws://media.test", "test-key", secret)
 
     provisioning = await adapter.provision("session-1", "user-1")
+    second_access = await adapter.issue_access("session-1", "user-1")
     public_access = await adapter.issue_public_access("session-1", "viewer-1")
 
     client_claims = jwt.decode(
@@ -36,7 +37,14 @@ async def test_livekit_room_issues_separate_least_privilege_tokens() -> None:
     assert client_claims["video"]["room"] == "avatar-session-1"
     assert client_claims["video"]["canPublish"] is False
     assert client_claims["video"]["canSubscribe"] is True
-    assert client_claims["sub"] == "user-user-1"
+    assert client_claims["sub"].startswith("user-user-1-")
+    second_claims = jwt.decode(
+        second_access.access_token,
+        secret,
+        algorithms=["HS256"],
+        issuer="test-key",
+    )
+    assert second_claims["sub"] != client_claims["sub"]
     assert publisher_claims["video"]["canPublish"] is True
     assert publisher_claims["video"]["canSubscribe"] is False
     assert public_claims["sub"] == "viewer-viewer-1"

@@ -1,4 +1,5 @@
 from datetime import timedelta
+from uuid import uuid4
 
 from livekit import api
 
@@ -41,7 +42,9 @@ class LiveKitMediaRoomAdapter:
         )
 
     async def issue_access(self, session_id: str, user_id: str) -> MediaAccess:
-        return self._viewer_access(session_id, f"user-{user_id}")
+        # LiveKit enforces one active participant per identity. A user may open
+        # multiple browsers/tabs, so every viewer token needs a unique suffix.
+        return self._viewer_access(session_id, f"user-{user_id}-{uuid4().hex}")
 
     async def issue_public_access(
         self,
@@ -72,12 +75,19 @@ class LiveKitMediaRoomAdapter:
             self._api_secret,
         )
         try:
-            await client.room.remove_participant(
-                api.RoomParticipantIdentity(
-                    room=f"avatar-{session_id}",
-                    identity=f"user-{user_id}",
-                )
+            room_name = f"avatar-{session_id}"
+            response = await client.room.list_participants(
+                api.ListParticipantsRequest(room=room_name)
             )
+            prefix = f"user-{user_id}"
+            for participant in response.participants:
+                if participant.identity == prefix or participant.identity.startswith(f"{prefix}-"):
+                    await client.room.remove_participant(
+                        api.RoomParticipantIdentity(
+                            room=room_name,
+                            identity=participant.identity,
+                        )
+                    )
         finally:
             await client.aclose()
 
@@ -100,7 +110,11 @@ class LiveKitMediaRoomAdapter:
             for participant in response.participants:
                 if (
                     not participant.identity.startswith("worker-")
-                    and participant.identity not in allowed_identities
+                    and not any(
+                        participant.identity == identity
+                        or participant.identity.startswith(f"{identity}-")
+                        for identity in allowed_identities
+                    )
                 ):
                     await client.room.remove_participant(
                         api.RoomParticipantIdentity(
