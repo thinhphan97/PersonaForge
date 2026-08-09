@@ -56,6 +56,7 @@ video { display: block; width: 100%; border-radius: 14px; background: #050812; }
 .video-shell.is-closed .state { z-index: 3; background: #7a3042; }
 .audio-toggle { position: absolute; left: 12px; bottom: 12px; }
 .connection { text-align: center; color: #9faaca; }
+.connection.migrating { color: #ffd27a; font-weight: 600; }
 .chat-panel { display: grid; grid-template-rows: auto auto minmax(180px, 1fr) auto; min-height: 0; }
 .chat-panel header { padding: 18px; border-bottom: 1px solid #26304c; display: flex; justify-content: space-between; gap: 12px; align-items: center; }
 h1 { margin: 0 0 5px; }

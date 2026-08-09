@@ -4,6 +4,14 @@ const sessionId = decodeURIComponent(location.pathname.split("/").filter(Boolean
 let room;
 let conversationActive = true;
 let sessionClosed = false;
+let migrating = false;
+let migrationTimer;
+let migrationAttempt = 0;
+let migrationInFlight = false;
+let migrationGeneration = 0;
+let intentionalDisconnect = false;
+let frameWatchdogTimer;
+let lastVideoFrameAt = 0;
 let messageCursor = { sequence: 0, revision: 0 };
 const messageStates = new Map();
 
@@ -37,6 +45,7 @@ async function connect() {
     { method: "POST" },
   );
   if (accessResponse.status === 409) {
+    if (migrating) throw new Error("Worker đang migrate hoặc chưa publish track");
     status.textContent = "Đang chờ owner khởi tạo stream…";
     setTimeout(() => connect().catch(showError), 2000);
     return;
@@ -45,29 +54,136 @@ async function connect() {
   const access = await accessResponse.json();
   await loadLiveKitClient();
   const { Room, RoomEvent } = window.LivekitClient;
-  room = new Room({ adaptiveStream: false, dynacast: false });
+  if (room) {
+    intentionalDisconnect = true;
+    await room.disconnect();
+    intentionalDisconnect = false;
+  }
+  const connectedRoom = new Room({ adaptiveStream: false, dynacast: false });
+  room = connectedRoom;
   const stream = new MediaStream();
-  room.on(RoomEvent.TrackSubscribed, (track) => {
+  connectedRoom.on(RoomEvent.TrackSubscribed, (track) => {
+    if (room !== connectedRoom) return;
     stream.addTrack(track.mediaStreamTrack);
     video.srcObject = stream;
+    if (String(track.kind) === "video") {
+      lastVideoFrameAt = performance.now();
+      track.mediaStreamTrack.onmute = () => {
+        if (room === connectedRoom) beginMigration("Video track bị mute, đang migrate stream…");
+      };
+      track.mediaStreamTrack.onunmute = () => {
+        lastVideoFrameAt = performance.now();
+      };
+      startFrameWatchdog();
+    }
+    finishMigration("Stream đã được migrate và hoạt động trở lại.");
   });
-  room.on(RoomEvent.ConnectionStateChanged, (state) => {
-    status.textContent = `LiveKit: ${state}`;
+  connectedRoom.on(RoomEvent.TrackUnsubscribed, (track) => {
+    if (room !== connectedRoom) return;
+    if (String(track.kind) === "video") stopFrameWatchdog();
+    beginMigration("Mất track avatar, đang migrate stream…");
   });
-  room.on(RoomEvent.Disconnected, () => {
-    status.textContent = sessionClosed
-      ? "Session đã đóng — stream đã kết thúc."
-      : "Stream đã ngắt hoặc session không còn public.";
+  connectedRoom.on(RoomEvent.ParticipantDisconnected, () => {
+    if (room === connectedRoom) beginMigration("Publisher đã ngắt kết nối, đang migrate stream…");
   });
-  await room.connect(access.server_url, access.access_token);
+  connectedRoom.on(RoomEvent.ConnectionStateChanged, (state) => {
+    if (room !== connectedRoom) return;
+    if (state === "reconnecting" || state === "disconnected") {
+      beginMigration("LiveKit đang kết nối lại stream…");
+    } else if (!migrating) {
+      status.textContent = `LiveKit: ${state}`;
+    }
+  });
+  connectedRoom.on(RoomEvent.Disconnected, () => {
+    if (room !== connectedRoom || intentionalDisconnect) return;
+    beginMigration("Stream đã ngắt, đang migrate…");
+  });
+  await connectedRoom.connect(access.server_url, access.access_token);
+  if (!migrating) {
+    status.textContent = "Đã kết nối stream; đang chờ video…";
+  }
+}
+
+function beginMigration(reason) {
+  if (sessionClosed) return;
+  migrating = true;
+  migrationGeneration += 1;
+  status.classList.add("migrating");
+  status.textContent = `Đang migrate stream… ${reason}`;
+  scheduleMigration(migrationGeneration, 0);
+}
+
+function startFrameWatchdog() {
+  stopFrameWatchdog();
+  const observeFrame = () => {
+    if (!video.requestVideoFrameCallback || migrating) return;
+    video.requestVideoFrameCallback(() => {
+      lastVideoFrameAt = performance.now();
+      observeFrame();
+    });
+  };
+  observeFrame();
+  frameWatchdogTimer = setInterval(() => {
+    if (document.hidden || migrating || !lastVideoFrameAt) return;
+    if (performance.now() - lastVideoFrameAt > 1800) {
+      beginMigration("Video không phát sinh frame mới, đang migrate stream…");
+    }
+  }, 500);
+}
+
+function stopFrameWatchdog() {
+  clearInterval(frameWatchdogTimer);
+  frameWatchdogTimer = undefined;
+  lastVideoFrameAt = 0;
+}
+
+function finishMigration(message) {
+  if (!migrating) return;
+  migrating = false;
+  migrationAttempt = 0;
+  migrationInFlight = false;
+  clearTimeout(migrationTimer);
+  status.classList.remove("migrating");
+  status.textContent = message;
+}
+
+function scheduleMigration(generation, delayMs) {
+  clearTimeout(migrationTimer);
+  migrationTimer = setTimeout(() => recoverMigration(generation), delayMs);
+}
+
+async function recoverMigration(generation) {
+  if (generation !== migrationGeneration || !migrating || migrationInFlight || sessionClosed) return;
+  migrationInFlight = true;
+  try {
+    if (room && String(room.state) === "connected") {
+      migrationAttempt += 1;
+      scheduleMigration(generation, Math.min(1000 * (2 ** migrationAttempt), 10000));
+      return;
+    }
+    await connect();
+    migrationAttempt = 0;
+  } catch (error) {
+    migrationAttempt += 1;
+    status.textContent = `Đang migrate stream… lần thử ${migrationAttempt}`;
+    scheduleMigration(generation, Math.min(1000 * (2 ** migrationAttempt), 10000));
+    console.warn("Public media migration retry failed", error);
+  } finally {
+    migrationInFlight = false;
+  }
 }
 
 function showPublicClosed() {
   if (sessionClosed) return;
   sessionClosed = true;
+  migrating = false;
+  migrationGeneration += 1;
+  clearTimeout(migrationTimer);
+  stopFrameWatchdog();
   document.querySelector("#public-avatar").closest(".video-shell").classList.add("is-closed");
   document.querySelector("#public-closed-overlay").hidden = false;
   document.querySelector("#public-audio").hidden = true;
+  status.classList.remove("migrating");
   status.textContent = "Session đã đóng — stream đã kết thúc.";
   room?.disconnect();
 }
@@ -151,6 +267,8 @@ document.querySelector("#public-audio").addEventListener("click", async () => {
 
 window.addEventListener("beforeunload", () => {
   conversationActive = false;
+  clearTimeout(migrationTimer);
+  intentionalDisconnect = true;
   room?.disconnect();
 });
 connect().catch(showError);

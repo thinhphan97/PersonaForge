@@ -595,3 +595,40 @@ Frontend
 - Không retry vô hạn.
 - Mọi recovery phải truy vết được bằng `session_id`, `recovery_id`,
   `runtime_generation`, `worker_id`, `gpu_uuid`.
+
+## 18. Trạng thái triển khai
+
+Các phần đã được nối vào pipeline hiện tại:
+
+- Redis Control Plane lưu `recovery-start` payload để có thể tạo lại runtime.
+- Reconciler phát hiện Worker mất heartbeat và kích hoạt migration.
+- Scheduler loại Worker lỗi và GPU lỗi khỏi candidate list.
+- Child failure được Worker ghi nhận bằng session failure marker có TTL.
+- Redis reconciler phát hiện marker và migrate Child sang GPU/Worker khác.
+- Recovery có distributed lock theo `session_id` để tránh tạo hai Child.
+- Khi chưa có capacity, recovery được lưu vào pending set và retry ở vòng sau.
+- Start payload có đủ runtime/resource metadata để rebuild `CompositeRequirement`.
+- Lease/generation cũ được release trước khi cấp assignment mới.
+- Frontend owner và public viewer phát hiện `TrackUnsubscribed`, publisher
+  disconnect hoặc LiveKit mất kết nối; trong lúc đó khóa ô gửi chat và hiển thị
+  `Đang migrate stream…`.
+- Frontend có watchdog dựa trên `requestVideoFrameCallback` và trạng thái
+  `MediaStreamTrack.mute`; nếu video đứng ở frame cuối quá khoảng 1,8 giây,
+  UI bắt đầu migrate ngay, không chờ LiveKit phát sự kiện unsubscribe.
+- Trong lúc viewer room vẫn còn `connected` nhưng publisher chưa publish lại,
+  frontend chỉ chờ và retry nhẹ; không disconnect/reconnect viewer liên tục,
+  tránh tạo churn và làm chậm track mới.
+- Owner có thể gọi endpoint `POST /api/sessions/{id}/media/recover` trong lúc
+  migrate. Endpoint idempotently rehydrate assignment/Child khi session vẫn
+  `READY` nhưng Redis lease đã hết hạn; viewer chỉ được cấp access token và
+  không tự kích hoạt workload.
+- Frontend tự gọi lại media-access với exponential backoff. Khi Child mới
+  publish track vào cùng room, UI tự gắn track mới và mở lại ô chat.
+
+Các phần vẫn cần hoàn thiện ở phase tiếp theo:
+
+- API công khai trả về recovery progress chi tiết cho Browser.
+- LiveKit participant identity theo `runtime_generation` và fencing phía client.
+- Circuit breaker và retry budget cho từng loại connection.
+- Persist recovery audit/history vào PostgreSQL.
+- GPU quarantine duration và health recheck chuyên biệt cho CUDA device loss.

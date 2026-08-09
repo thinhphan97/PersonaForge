@@ -44,6 +44,9 @@ class CompositeScheduler:
         self,
         requirement: CompositeRequirement,
         media_payload: dict[str, object],
+        *,
+        excluded_worker_id: str | None = None,
+        excluded_gpu_uuid: str | None = None,
     ) -> CompositeSlotLease:
         current = await self._assignments.get(requirement.session_id)
         now = self._clock.now()
@@ -67,6 +70,13 @@ class CompositeScheduler:
         candidates = await self._registry.candidates(requirement, now)
         evaluated = []
         for candidate in candidates:
+            if (
+                excluded_worker_id is not None
+                and candidate.registration.worker_id == excluded_worker_id
+            ):
+                continue
+            if excluded_gpu_uuid is not None and candidate.gpu.gpu_uuid == excluded_gpu_uuid:
+                continue
             resolution = await self._resolve_resources(requirement, candidate)
             normalized = _with_resolution(requirement, resolution)
             capability = next(
@@ -140,6 +150,54 @@ class CompositeScheduler:
             },
         )
         raise NoWorkerCapacity("No healthy worker can reserve the composite requirement")
+
+    async def recover(
+        self,
+        requirement: CompositeRequirement,
+        media_payload: dict[str, object],
+        failed_worker_id: str,
+        failed_gpu_uuid: str,
+    ) -> bool:
+        """Migrate a lost runtime to a different worker/GPU.
+
+        The old lease is fenced and released before allocating the replacement.
+        The caller persists the recovery payload and retries when no capacity is
+        available.
+        """
+        current = await self._assignments.get(requirement.session_id)
+        if current is not None:
+            if (
+                (failed_worker_id and current.worker_id != failed_worker_id)
+                or current.gpu_uuid != failed_gpu_uuid
+            ):
+                # Another recovery already replaced the failed assignment.
+                return True
+            await self._assignments.delete(
+                current.session_id,
+                current.lease_token,
+                current.generation,
+            )
+            await self._allocator.release(current)
+        try:
+            await self.provision(
+                requirement,
+                media_payload,
+                excluded_worker_id=failed_worker_id,
+                excluded_gpu_uuid=failed_gpu_uuid,
+            )
+        except NoWorkerCapacity:
+            return False
+        logger.info(
+            "Composite session migrated after worker failure",
+            extra={
+                "event": "control.session.recovery.migrated",
+                "session_id": requirement.session_id,
+                "failed_worker_id": failed_worker_id,
+                "failed_gpu_uuid": failed_gpu_uuid,
+                "outcome": "success",
+            },
+        )
+        return True
 
     async def _resolve_resources(
         self,

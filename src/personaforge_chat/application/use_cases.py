@@ -174,12 +174,33 @@ class ProvisionMedia:
     access: SessionAccessPolicy
     voices: VoiceCatalogPort
 
-    async def execute(self, actor_user_id: str, session_id: str) -> MediaAccess:
+    async def execute(
+        self,
+        actor_user_id: str,
+        session_id: str,
+        *,
+        ensure_runtime: bool = False,
+    ) -> MediaAccess:
         session = await _require_session(self.sessions, session_id)
         await self.access.require(actor_user_id, session, SessionAction.VIEW)
         _require_open_session(session)
-        if session.status is SessionStatus.READY:
+        if session.status is SessionStatus.READY and not ensure_runtime:
             return await self.rooms.issue_access(session_id, actor_user_id)
+        if ensure_runtime:
+            await self.access.require(actor_user_id, session, SessionAction.MANAGE)
+        if session.status is SessionStatus.READY and ensure_runtime:
+            voice = await self.voices.get(session.voice_id)
+            if voice is None:
+                raise RuntimeError(f"Configured voice is unavailable: {session.voice_id}")
+            provisioning = await self.rooms.provision(session_id, actor_user_id)
+            await self.avatar.start(
+                session_id=session.session_id,
+                character_id=session.character_id,
+                voice=voice,
+                room_name=provisioning.client.room_name,
+                publisher_token=provisioning.publisher_token,
+            )
+            return provisioning.client
         if session.status is SessionStatus.MEDIA_STARTING:
             raise SessionBusy(session_id)
         await self.access.require(actor_user_id, session, SessionAction.MANAGE)

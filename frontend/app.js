@@ -27,6 +27,15 @@ let sessionSyncTimer;
 let sessionClosePromise;
 let chatReady = false;
 let mediaReady = false;
+let mediaMigrating = false;
+let mediaRecoveryTimer;
+let mediaRecoveryAttempt = 0;
+let mediaRecoveryInFlight = false;
+let intentionalMediaDisconnect = false;
+let mediaRecoveryGeneration = 0;
+let mediaFrameWatchdogTimer;
+let lastVideoFrameAt = 0;
+const subscribedMediaKinds = new Set();
 let messageCursor = { sequence: 0, revision: 0 };
 const messageStates = new Map();
 const remoteStream = new MediaStream();
@@ -298,25 +307,170 @@ async function detectMediaProvider(session) {
 async function connectLiveKit(accessUrl) {
   await loadLiveKitClient();
   const access = await (await api(accessUrl, { method: "POST" }, true)).json();
+  await connectLiveKitWithAccess(access);
+}
+
+async function connectLiveKitWithAccess(access) {
   const { Room, RoomEvent } = window.LivekitClient;
-  livekitRoom = new Room({ adaptiveStream: false, dynacast: false });
-  livekitRoom.on(RoomEvent.TrackSubscribed, (track) => {
+  const previousRoom = livekitRoom;
+  if (previousRoom) {
+    intentionalMediaDisconnect = true;
+    await previousRoom.disconnect();
+    intentionalMediaDisconnect = false;
+  }
+  subscribedMediaKinds.clear();
+  for (const track of remoteStream.getTracks()) remoteStream.removeTrack(track);
+  const room = new Room({ adaptiveStream: false, dynacast: false });
+  livekitRoom = room;
+  room.on(RoomEvent.TrackSubscribed, (track) => {
+    if (livekitRoom !== room) return;
+    subscribedMediaKinds.add(String(track.kind));
     remoteStream.addTrack(track.mediaStreamTrack);
     video.srcObject = remoteStream;
+    if (String(track.kind) === "video") {
+      lastVideoFrameAt = performance.now();
+      track.mediaStreamTrack.onmute = () => {
+        if (livekitRoom === room) beginMediaMigration("Video track bị mute, đang migrate stream…");
+      };
+      track.mediaStreamTrack.onunmute = () => {
+        lastVideoFrameAt = performance.now();
+      };
+      startMediaFrameWatchdog();
+    }
+    mediaReady = true;
+    finishMediaMigration("Stream đã được kết nối lại.");
   });
-  livekitRoom.on(RoomEvent.TrackUnsubscribed, (track) => {
+  room.on(RoomEvent.TrackUnsubscribed, (track) => {
+    if (livekitRoom !== room) return;
     remoteStream.removeTrack(track.mediaStreamTrack);
+    subscribedMediaKinds.delete(String(track.kind));
+    if (String(track.kind) === "video") stopMediaFrameWatchdog();
+    beginMediaMigration("Mất track avatar, đang tìm child worker mới…");
   });
-  livekitRoom.on(RoomEvent.ConnectionStateChanged, (state) => {
-    connectionLabel.textContent = `LiveKit: ${state}`;
+  room.on(RoomEvent.ParticipantDisconnected, () => {
+    if (livekitRoom === room) beginMediaMigration("Publisher đã ngắt kết nối, đang migrate stream…");
   });
-  livekitRoom.on(RoomEvent.Disconnected, () => {
+  room.on(RoomEvent.ConnectionStateChanged, (state) => {
+    if (livekitRoom !== room) return;
+    if (state === "reconnecting" || state === "disconnected") {
+      beginMediaMigration("LiveKit đang kết nối lại stream…");
+    } else if (!mediaMigrating) {
+      connectionLabel.textContent = `LiveKit: ${state}`;
+    }
+  });
+  room.on(RoomEvent.Disconnected, () => {
+    if (livekitRoom !== room || intentionalMediaDisconnect) return;
     mediaReady = false;
-    updateControls();
+    beginMediaMigration("Stream đã ngắt, đang migrate…");
   });
-  await livekitRoom.connect(access.server_url, access.access_token);
+  await room.connect(access.server_url, access.access_token);
   setAvatarState(access.avatar_state || "idle");
-  mediaReady = true;
+  // A publisher may need a short interval to rejoin the room and republish.
+  if (!subscribedMediaKinds.size) {
+    beginMediaMigration("Đã vào lại room, đang chờ child worker publish track…");
+  }
+}
+
+function startMediaFrameWatchdog() {
+  stopMediaFrameWatchdog();
+  const observeFrame = () => {
+    if (!video.requestVideoFrameCallback || mediaMigrating) return;
+    video.requestVideoFrameCallback(() => {
+      lastVideoFrameAt = performance.now();
+      observeFrame();
+    });
+  };
+  observeFrame();
+  mediaFrameWatchdogTimer = setInterval(() => {
+    if (
+      document.hidden
+      || mediaMigrating
+      || !subscribedMediaKinds.has("video")
+      || !lastVideoFrameAt
+    ) return;
+    if (performance.now() - lastVideoFrameAt > 1800) {
+      beginMediaMigration("Video không phát sinh frame mới, đang migrate stream…");
+    }
+  }, 500);
+}
+
+function stopMediaFrameWatchdog() {
+  clearInterval(mediaFrameWatchdogTimer);
+  mediaFrameWatchdogTimer = undefined;
+  lastVideoFrameAt = 0;
+}
+
+function beginMediaMigration(reason) {
+  if (!currentSession || currentSession.status === "closed") return;
+  mediaMigrating = true;
+  mediaReady = false;
+  mediaRecoveryGeneration += 1;
+  connectionLabel.classList.add("migrating");
+  connectionLabel.textContent = `Đang migrate stream… ${reason}`;
+  stateLabel.textContent = "migrating";
+  updateControls();
+  scheduleMediaRecovery(mediaRecoveryGeneration, 0);
+}
+
+function finishMediaMigration(message) {
+  if (!mediaMigrating) return;
+  mediaMigrating = false;
+  mediaRecoveryAttempt = 0;
+  mediaRecoveryInFlight = false;
+  connectionLabel.classList.remove("migrating");
+  clearTimeout(mediaRecoveryTimer);
+  connectionLabel.classList.remove("migrating");
+  connectionLabel.textContent = message;
+  updateControls();
+}
+
+function scheduleMediaRecovery(generation, delayMs) {
+  clearTimeout(mediaRecoveryTimer);
+  mediaRecoveryTimer = setTimeout(() => recoverMedia(generation), delayMs);
+}
+
+async function recoverMedia(generation) {
+  if (
+    generation !== mediaRecoveryGeneration
+    || !mediaMigrating
+    || mediaRecoveryInFlight
+    || !currentSession
+    || currentSession.status === "closed"
+  ) return;
+  mediaRecoveryInFlight = true;
+  const sessionId = currentSession.session_id;
+  try {
+    const canRecoverRuntime = currentSession.owner_user_id === currentUser?.user_id;
+    const mediaPath = canRecoverRuntime
+      ? `/api/sessions/${sessionId}/media/recover`
+      : `/api/sessions/${sessionId}/media/access`;
+    const access = await (
+      await api(mediaPath, { method: "POST" }, true)
+    ).json();
+    if (currentSession?.session_id !== sessionId) return;
+    // A connected viewer room can wait for the new publisher. Reconnecting
+    // the viewer on every retry only creates churn and can delay track delivery.
+    if (livekitRoom && String(livekitRoom.state) === "connected") {
+      mediaRecoveryAttempt += 1;
+      scheduleMediaRecovery(generation, Math.min(1000 * (2 ** mediaRecoveryAttempt), 10000));
+      return;
+    }
+    await connectLiveKitWithAccess(access);
+    mediaRecoveryAttempt = 0;
+    // TrackSubscribed normally clears migration. Keep retrying if the child
+    // has not published yet, rather than leaving the UI falsely connected.
+    if (!subscribedMediaKinds.size) {
+      mediaRecoveryAttempt += 1;
+      scheduleMediaRecovery(generation, Math.min(1000 * (2 ** mediaRecoveryAttempt), 10000));
+    }
+  } catch (error) {
+    mediaRecoveryAttempt += 1;
+    connectionLabel.textContent = `Đang migrate stream… lần thử ${mediaRecoveryAttempt}`;
+    scheduleMediaRecovery(generation, Math.min(1000 * (2 ** mediaRecoveryAttempt), 10000));
+    console.warn("Media migration retry failed", error);
+  } finally {
+    mediaRecoveryInFlight = false;
+  }
 }
 
 async function loadLiveKitClient() {
@@ -407,6 +561,12 @@ function scheduleChatReconnect(chatPath) {
 async function disconnectCurrent() {
   clearTimeout(chatReconnectTimer);
   clearInterval(sessionSyncTimer);
+  clearTimeout(mediaRecoveryTimer);
+  stopMediaFrameWatchdog();
+  mediaRecoveryGeneration += 1;
+  mediaMigrating = false;
+  mediaRecoveryAttempt = 0;
+  mediaRecoveryInFlight = false;
   sessionSyncTimer = undefined;
   chatReconnectAttempt = 0;
   chatReady = false;
@@ -416,7 +576,11 @@ async function disconnectCurrent() {
   socket?.close();
   peer?.close();
   peer = undefined;
-  if (livekitRoom) await livekitRoom.disconnect();
+  if (livekitRoom) {
+    intentionalMediaDisconnect = true;
+    await livekitRoom.disconnect();
+    intentionalMediaDisconnect = false;
+  }
   livekitRoom = undefined;
   for (const track of remoteStream.getTracks()) remoteStream.removeTrack(track);
   video.srcObject = null;
@@ -453,7 +617,10 @@ async function catchUpHistory() {
 
 function updateControls() {
   const ready = Boolean(
-    currentSession?.status !== "closed" && currentSession?.can_chat && chatReady,
+    currentSession?.status !== "closed"
+      && currentSession?.can_chat
+      && chatReady
+      && !mediaMigrating,
   );
   input.disabled = !ready;
   submit.disabled = !ready;
@@ -533,6 +700,7 @@ function placeMessageInOrder(element, sequence) {
 }
 
 function setAvatarState(state) {
+  if (mediaMigrating) return;
   stateLabel.textContent = state;
 }
 
@@ -559,6 +727,8 @@ function renderSessionClosed() {
   if (!currentSession) return;
   currentSession.status = "closed";
   currentSession.can_chat = false;
+  mediaMigrating = false;
+  connectionLabel.classList.remove("migrating");
   videoShell.classList.add("is-closed");
   closedOverlay.hidden = false;
   $("#audio-toggle").hidden = true;

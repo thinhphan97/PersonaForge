@@ -85,6 +85,23 @@ def build_control_container(settings: ControlSettings) -> ControlContainer:
         retention_days=settings.telemetry_retention_days,
         retention_interval_seconds=settings.telemetry_retention_interval_seconds,
     )
+    scheduler = CompositeScheduler(
+        control_backend,
+        control_backend,
+        control_backend,
+        control_backend,
+        clock,
+        lease_ttl=timedelta(seconds=settings.slot_lease_seconds),
+        resource_profiles=telemetry_store,
+    )
+    control_backend.set_recovery_handler(
+        lambda requirement, payload, worker_id, gpu_uuid: scheduler.recover(
+            requirement,
+            payload,
+            worker_id,
+            gpu_uuid,
+        )
+    )
     return ControlContainer(
         enrollment=EnrollmentService(identity, token_adapter, secrets, clock),
         registration=WorkerRegistrationService(
@@ -97,15 +114,7 @@ def build_control_container(settings: ControlSettings) -> ControlContainer:
             registration_ttl=timedelta(seconds=settings.registration_ttl_seconds),
             credential_ttl=timedelta(seconds=settings.credential_ttl_seconds),
         ),
-        scheduler=CompositeScheduler(
-            control_backend,
-            control_backend,
-            control_backend,
-            control_backend,
-            clock,
-            lease_ttl=timedelta(seconds=settings.slot_lease_seconds),
-            resource_profiles=telemetry_store,
-        ),
+        scheduler=scheduler,
         worker_inventory=ListWorkerInventory(control_backend, clock),
         identity_repository=identity,
         credential_issuer=credentials,

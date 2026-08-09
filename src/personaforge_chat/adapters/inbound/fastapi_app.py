@@ -724,6 +724,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return _media_access_response(access)
 
     @router.post(
+        "/sessions/{session_id}/media/recover",
+        response_model=MediaAccessResponse,
+    )
+    async def recover_media(
+        session_id: str,
+        auth: MutationAuthDependency,
+        container: ContainerDependency,
+    ) -> MediaAccessResponse | JSONResponse:
+        """Rehydrate a READY session whose durable worker lease disappeared."""
+        if container.provision_media is None:
+            return JSONResponse(
+                status_code=409,
+                content={"detail": "Media recovery endpoint requires livekit mode"},
+            )
+        access = await container.provision_media.execute(
+            auth.user.user_id,
+            session_id,
+            ensure_runtime=True,
+        )
+        return _media_access_response(access)
+
+    @router.post(
         "/sessions/{session_id}/webrtc/offer",
         response_model=SessionDescriptionResponse,
     )

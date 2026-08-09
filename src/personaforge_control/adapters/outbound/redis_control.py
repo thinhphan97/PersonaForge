@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
@@ -100,6 +100,17 @@ class RedisControlPlane:
         self._redis: Redis = Redis.from_url(redis_url, decode_responses=True)
         self._slot_lease_ttl = timedelta(seconds=slot_lease_seconds)
         self._reconciler: asyncio.Task[None] | None = None
+        self._recovery_handler: Callable[
+            [CompositeRequirement, dict[str, object], str, str], Awaitable[bool]
+        ] | None = None
+
+    def set_recovery_handler(
+        self,
+        handler: Callable[
+            [CompositeRequirement, dict[str, object], str, str], Awaitable[bool]
+        ],
+    ) -> None:
+        self._recovery_handler = handler
 
     async def startup(self) -> None:
         await self._redis.ping()
@@ -399,8 +410,11 @@ class RedisControlPlane:
             "precision": requirement.precision,
             "isolation_mode": requirement.isolation_mode,
             "runtime": requirement.runtime,
+            "minimum_compute_capability": requirement.minimum_compute_capability,
             "resolution": requirement.resolution,
             "fps": requirement.fps,
+            "peak_vram_mb": requirement.peak_vram_mb,
+            "gpu_duty_cycle": requirement.gpu_duty_cycle,
         }
         ttl = max(1, round(self._slot_lease_ttl.total_seconds() * 2))
         await self._redis.set(
@@ -527,6 +541,15 @@ class RedisControlPlane:
                         continue
                     heartbeat_raw = await self._redis.get(_heartbeat_key(lease.worker_id))
                     if heartbeat_raw is not None:
+                        failure_raw = await self._redis.get(
+                            _session_failure_key(lease.worker_id, lease.session_id)
+                        )
+                        if failure_raw is not None:
+                            if await self._recover_lost_assignment(
+                                lease,
+                                failed_worker_id="",
+                            ):
+                                continue
                         renewed = await self.renew(
                             lease,
                             _utc_now(),
@@ -536,17 +559,154 @@ class RedisControlPlane:
                             await self.save(renewed)
                             await self._recover_for_worker_boot(renewed, heartbeat_raw)
                             continue
-                    await self.release(lease)
-                    await self.delete(
-                        lease.session_id,
-                        lease.lease_token,
-                        lease.generation,
-                    )
+                    if not await self._recover_lost_assignment(lease):
+                        await self.release(lease)
+                        await self.delete(
+                            lease.session_id,
+                            lease.lease_token,
+                            lease.generation,
+                        )
+                await self._retry_pending_recoveries()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("Composite slot reconciliation failed")
             await asyncio.sleep(interval)
+
+    async def _recover_lost_assignment(
+        self,
+        lease: CompositeSlotLease,
+        failed_worker_id: str | None = None,
+    ) -> bool:
+        if self._recovery_handler is None:
+            return False
+        start_raw = await self._redis.get(_recovery_start_key(lease.session_id))
+        if start_raw is None:
+            return False
+        lock_key = _recovery_lock_key(lease.session_id)
+        acquired = await self._redis.set(
+            lock_key,
+            "1",
+            nx=True,
+            ex=max(5, int(self._slot_lease_ttl.total_seconds())),
+        )
+        if not acquired:
+            return True
+        try:
+            payload = json.loads(start_raw)
+            if not isinstance(payload, dict):
+                return False
+            logger.warning(
+                "Starting composite session recovery",
+                extra={
+                    "event": "control.session.recovery.started",
+                    "session_id": lease.session_id,
+                    "failed_worker_id": lease.worker_id
+                    if failed_worker_id is None
+                    else failed_worker_id,
+                    "failed_gpu_uuid": lease.gpu_uuid,
+                    "reason": "worker_heartbeat_timeout"
+                    if failed_worker_id is None
+                    else "child_failure",
+                    "outcome": "started",
+                },
+            )
+            requirement = _requirement_from_recovery_payload(
+                lease.session_id,
+                payload,
+                default_peak_vram_mb=lease.reserved_vram_mb,
+                default_gpu_duty_cycle=lease.reserved_gpu_duty_cycle,
+            )
+            success = await self._recovery_handler(
+                requirement,
+                payload,
+                lease.worker_id if failed_worker_id is None else failed_worker_id,
+                lease.gpu_uuid,
+            )
+            if success:
+                await self._redis.delete(
+                    _session_failure_key(lease.worker_id, lease.session_id)
+                )
+                await self._redis.srem(_recovery_pending_set(), lease.session_id)
+                await self._redis.delete(_recovery_pending_key(lease.session_id))
+            else:
+                logger.warning(
+                    "Composite session recovery is pending capacity",
+                    extra={
+                        "event": "control.session.recovery.pending",
+                        "session_id": lease.session_id,
+                        "failed_worker_id": lease.worker_id
+                        if failed_worker_id is None
+                        else failed_worker_id,
+                        "failed_gpu_uuid": lease.gpu_uuid,
+                        "outcome": "pending",
+                    },
+                )
+                await self._redis.set(
+                    _recovery_pending_key(lease.session_id),
+                    json.dumps(
+                        {
+                            "payload": payload,
+                            "worker_id": lease.worker_id,
+                            "gpu_uuid": lease.gpu_uuid,
+                            "exclude_worker": bool(failed_worker_id),
+                            "default_peak_vram_mb": lease.reserved_vram_mb,
+                            "default_gpu_duty_cycle": lease.reserved_gpu_duty_cycle,
+                        }
+                    ),
+                    ex=max(60, int(self._slot_lease_ttl.total_seconds() * 10)),
+                )
+                await self._redis.sadd(_recovery_pending_set(), lease.session_id)
+            return True
+        finally:
+            await self._redis.delete(lock_key)
+
+    async def _retry_pending_recoveries(self) -> None:
+        if self._recovery_handler is None:
+            return
+        for session_id in await _smembers(self._redis, _recovery_pending_set()):
+            raw = await self._redis.get(_recovery_pending_key(session_id))
+            if raw is None:
+                await self._redis.srem(_recovery_pending_set(), session_id)
+                continue
+            data = json.loads(raw)
+            payload = data.get("payload")
+            if not isinstance(payload, dict):
+                await self._redis.srem(_recovery_pending_set(), session_id)
+                continue
+            lock_key = _recovery_lock_key(session_id)
+            if not await self._redis.set(
+                lock_key,
+                "1",
+                nx=True,
+                ex=max(5, int(self._slot_lease_ttl.total_seconds())),
+            ):
+                continue
+            try:
+                requirement = _requirement_from_recovery_payload(
+                    session_id,
+                    payload,
+                    default_peak_vram_mb=int(data.get("default_peak_vram_mb", 0)),
+                    default_gpu_duty_cycle=float(data.get("default_gpu_duty_cycle", 0)),
+                )
+                success = await self._recovery_handler(
+                    requirement,
+                    payload,
+                    (
+                        str(data.get("worker_id", ""))
+                        if bool(data.get("exclude_worker", True))
+                        else ""
+                    ),
+                    str(data.get("gpu_uuid", "")),
+                )
+                if success:
+                    await self._redis.delete(
+                        _session_failure_key(str(data.get("worker_id", "")), session_id)
+                    )
+                    await self._redis.srem(_recovery_pending_set(), session_id)
+                    await self._redis.delete(_recovery_pending_key(session_id))
+            finally:
+                await self._redis.delete(lock_key)
 
     async def _recover_for_worker_boot(
         self,
@@ -663,6 +823,61 @@ def _recovery_start_key(session_id: str) -> str:
 
 def _recovery_boot_key(session_id: str) -> str:
     return f"personaforge:control:recovery-boot:{session_id}"
+
+
+def _recovery_lock_key(session_id: str) -> str:
+    return f"personaforge:control:recovery-lock:{session_id}"
+
+
+def _recovery_pending_key(session_id: str) -> str:
+    return f"personaforge:control:recovery-pending:{session_id}"
+
+
+def _recovery_pending_set() -> str:
+    return "personaforge:control:recovery-pending"
+
+
+def _session_failure_key(worker_id: str, session_id: str) -> str:
+    return f"avatar:worker:{worker_id}:session-failure:{session_id}"
+
+
+def _requirement_from_recovery_payload(
+    session_id: str,
+    payload: dict[str, object],
+    *,
+    default_peak_vram_mb: int = 0,
+    default_gpu_duty_cycle: float = 0.0,
+) -> CompositeRequirement:
+    def text(name: str, default: str) -> str:
+        value = payload.get(name)
+        return value if isinstance(value, str) and value else default
+
+    def number(name: str, default: float) -> float:
+        value = payload.get(name)
+        return float(value) if isinstance(value, int | float) else default
+
+    def integer(name: str, default: int) -> int:
+        value = payload.get(name)
+        return int(value) if isinstance(value, int | float) else default
+
+    return CompositeRequirement(
+        session_id=session_id,
+        character_id=text("character_id", "default"),
+        avatar_model_id=text("avatar_model_id", "default"),
+        tts_model_id=text("tts_model_id", "default"),
+        runtime=text("runtime", "recorded"),
+        minimum_compute_capability=text("minimum_compute_capability", "0.0"),
+        resolution=text("resolution", "640x360"),
+        fps=number("fps", 25.0),
+        peak_vram_mb=integer("peak_vram_mb", default_peak_vram_mb),
+        gpu_duty_cycle=number("gpu_duty_cycle", default_gpu_duty_cycle),
+        voice_id=text("voice_id", "default"),
+        avatar_revision=text("avatar_revision", "default"),
+        tts_revision=text("tts_revision", "default"),
+        runtime_version=text("runtime_version", "default"),
+        precision=text("precision", "fp32"),
+        isolation_mode=text("isolation_mode", "subprocess"),
+    )
 
 
 def _boot_id_from_heartbeat(raw: str | None) -> str | None:

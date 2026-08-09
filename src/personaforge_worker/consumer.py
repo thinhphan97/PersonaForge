@@ -209,6 +209,28 @@ class RedisRenderWorker:
             approximate=True,
         )
         if event_type == "avatar.session.failed":
+            await self._require_redis().set(
+                f"avatar:worker:{self._worker_id}:session-failure:{session_id}",
+                json.dumps(
+                    {
+                        "session_id": session_id,
+                        "worker_id": self._worker_id,
+                        "gpu_uuid": command.get("gpu_uuid"),
+                        "generation": command.get("generation", 0),
+                        "detail": detail or "unknown failure",
+                    }
+                ),
+                ex=300,
+            )
+            logger.warning(
+                "Persisted session failure marker for Control recovery",
+                extra={
+                    "event": "worker.session.failure_marker.persisted",
+                    "session_id": session_id,
+                    "gpu_uuid": command.get("gpu_uuid"),
+                    "outcome": "failure",
+                },
+            )
             await self._publish_failure_telemetry(command, detail or "unknown failure")
 
     async def _publish_failure_telemetry(
