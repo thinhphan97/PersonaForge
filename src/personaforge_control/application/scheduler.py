@@ -50,6 +50,23 @@ class CompositeScheduler:
     ) -> CompositeSlotLease:
         current = await self._assignments.get(requirement.session_id)
         now = self._clock.now()
+        failed_gpu_lookup = getattr(self._assignments, "failed_gpu_uuid", None)
+        marked_failed_gpu = (
+            await failed_gpu_lookup(requirement.session_id)
+            if callable(failed_gpu_lookup)
+            else None
+        )
+        if marked_failed_gpu and current is not None and current.gpu_uuid == marked_failed_gpu:
+            # A recovery marker fences the current lease. Do not let a later
+            # idempotent provision request reissue start on the failed GPU.
+            await self._assignments.delete(
+                current.session_id,
+                current.lease_token,
+                current.generation,
+            )
+            await self._allocator.release(current)
+            current = None
+            excluded_gpu_uuid = excluded_gpu_uuid or marked_failed_gpu
         if current is not None and current.expires_at > now:
             # Provision is also a repair signal. Re-emitting the fenced start command is safe:
             # an existing Child treats the same lease/generation as idempotent, while a freshly

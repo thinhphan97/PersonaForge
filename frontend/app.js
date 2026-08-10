@@ -35,6 +35,9 @@ let intentionalMediaDisconnect = false;
 let mediaRecoveryGeneration = 0;
 let mediaFrameWatchdogTimer;
 let lastVideoFrameAt = 0;
+let lastVideoPlaybackTime = 0;
+let videoFrameStallChecks = 0;
+let watchedVideoTrack;
 const subscribedMediaKinds = new Set();
 let messageCursor = { sequence: 0, revision: 0 };
 const messageStates = new Map();
@@ -306,8 +309,24 @@ async function detectMediaProvider(session) {
 
 async function connectLiveKit(accessUrl) {
   await loadLiveKitClient();
-  const access = await (await api(accessUrl, { method: "POST" }, true)).json();
-  await connectLiveKitWithAccess(access);
+  // Media provisioning is asynchronous: the session can still be in
+  // MEDIA_STARTING while the worker loads TTS/model state. Treat the 409
+  // SessionBusy response as a transient state instead of a connection error.
+  const maxAttempts = 10;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      const access = await (await api(accessUrl, { method: "POST" }, true)).json();
+      await connectLiveKitWithAccess(access);
+      return;
+    } catch (error) {
+      const transientBusy = error?.status === 409
+        && /already handling a message|MEDIA_STARTING|already starting/i.test(error.message || "");
+      if (!transientBusy || attempt === maxAttempts - 1) throw error;
+      const delay = Math.min(500 * (2 ** attempt), 4000);
+      connectionLabel.textContent = `Đang khởi tạo media… lần thử ${attempt + 1}`;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
 }
 
 async function connectLiveKitWithAccess(access) {
@@ -328,12 +347,16 @@ async function connectLiveKitWithAccess(access) {
     remoteStream.addTrack(track.mediaStreamTrack);
     video.srcObject = remoteStream;
     if (String(track.kind) === "video") {
+      watchedVideoTrack = track.mediaStreamTrack;
       lastVideoFrameAt = performance.now();
+      lastVideoPlaybackTime = video.currentTime || 0;
+      videoFrameStallChecks = 0;
       track.mediaStreamTrack.onmute = () => {
         if (livekitRoom === room) beginMediaMigration("Video track bị mute, đang migrate stream…");
       };
       track.mediaStreamTrack.onunmute = () => {
         lastVideoFrameAt = performance.now();
+        videoFrameStallChecks = 0;
       };
       startMediaFrameWatchdog();
     }
@@ -388,8 +411,32 @@ function startMediaFrameWatchdog() {
       || !subscribedMediaKinds.has("video")
       || !lastVideoFrameAt
     ) return;
-    if (performance.now() - lastVideoFrameAt > 1800) {
-      beginMediaMigration("Video không phát sinh frame mới, đang migrate stream…");
+    // A decoder/browser can briefly stop invoking requestVideoFrameCallback
+    // while the LiveKit track is still healthy. Require multiple consecutive
+    // checks and verify the track/element are genuinely stalled before
+    // triggering recovery, avoiding false migration messages.
+    const trackHealthy = watchedVideoTrack
+      && watchedVideoTrack.readyState === "live"
+      && !watchedVideoTrack.muted;
+    const elementPlaying = !video.paused && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA;
+    const playbackAdvanced = (video.currentTime || 0) > lastVideoPlaybackTime + 0.01;
+    if (trackHealthy && elementPlaying && playbackAdvanced) {
+      lastVideoPlaybackTime = video.currentTime || lastVideoPlaybackTime;
+      lastVideoFrameAt = performance.now();
+      videoFrameStallChecks = 0;
+      return;
+    }
+    if (
+      performance.now() - lastVideoFrameAt > 3500
+      && trackHealthy
+      && elementPlaying
+    ) {
+      videoFrameStallChecks += 1;
+      if (videoFrameStallChecks >= 2) {
+        beginMediaMigration("Video không phát sinh frame mới, đang migrate stream…");
+      }
+    } else if (!trackHealthy || !elementPlaying) {
+      videoFrameStallChecks = 0;
     }
   }, 500);
 }
@@ -398,6 +445,9 @@ function stopMediaFrameWatchdog() {
   clearInterval(mediaFrameWatchdogTimer);
   mediaFrameWatchdogTimer = undefined;
   lastVideoFrameAt = 0;
+  lastVideoPlaybackTime = 0;
+  videoFrameStallChecks = 0;
+  watchedVideoTrack = undefined;
 }
 
 function beginMediaMigration(reason) {

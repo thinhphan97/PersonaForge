@@ -362,6 +362,18 @@ class RedisControlPlane:
         raw = await self._redis.get(_assignment_key(session_id))
         return None if raw is None else _lease_from_data(json.loads(raw))
 
+    async def failed_gpu_uuid(self, session_id: str) -> str | None:
+        """Return the GPU marked failed for an assignment, if any."""
+        lease = await self.get(session_id)
+        if lease is None:
+            return None
+        raw = await self._redis.get(_session_failure_key(lease.worker_id, session_id))
+        if raw is None:
+            return None
+        data = json.loads(raw)
+        gpu_uuid = data.get("gpu_uuid") if isinstance(data, dict) else None
+        return str(gpu_uuid) if gpu_uuid else lease.gpu_uuid
+
     async def save(self, lease: CompositeSlotLease) -> None:
         ttl = max(1, round((lease.expires_at - _utc_now()).total_seconds()))
         pipeline = self._redis.pipeline(transaction=True)

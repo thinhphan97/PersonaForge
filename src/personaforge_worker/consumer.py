@@ -241,13 +241,13 @@ class RedisRenderWorker:
         session_id = _required_string(command, "session_id")
         gpu_uuid = str(command.get("gpu_uuid") or self._settings.gpu_uuid)
         specification: dict[str, Any] = {}
-        recovery = await self._require_redis().get(
-            f"personaforge:control:recovery-start:{session_id}"
-        )
-        if recovery:
-            parsed = json.loads(recovery)
-            if isinstance(parsed, dict):
-                specification = parsed
+        # Worker Redis identities are intentionally restricted to the
+        # avatar:worker:{worker_id}:* namespace. Do not read Control Plane
+        # recovery keys here; the command payload already contains the
+        # durable runtime metadata needed for failure telemetry.
+        payload = command.get("payload")
+        if isinstance(payload, dict):
+            specification = dict(payload)
         gpu_payload = (
             []
             if self._resources is None
