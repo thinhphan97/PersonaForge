@@ -22,6 +22,17 @@ class SpeechSegment:
 
 
 @dataclass(frozen=True, slots=True)
+class SilenceSegment:
+    """A finite silence window injected into the same canonical audio timeline."""
+
+    session_id: str
+    turn_id: str
+    utterance_id: str
+    duration_ms: int = 500
+    sample_rate: int = 48_000
+
+
+@dataclass(frozen=True, slots=True)
 class NativeAudioChunk:
     utterance_id: str
     sequence: int
@@ -43,6 +54,7 @@ class CanonicalAudioChunk:
     sample_rate: int = 48_000
     channels: int = 1
     end_of_utterance: bool = False
+    is_silence: bool = False
 
     @property
     def samples_per_channel(self) -> int:

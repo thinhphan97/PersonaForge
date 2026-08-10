@@ -29,7 +29,8 @@ APP_PUBLIC_URL ?= http://localhost:$(shell $(DEVOPS) value APP_HTTP_PORT 8000)
 	wait-ready smoke-control \
 	logs logs-chat logs-agent logs-control logs-worker logs-livekit logs-errors \
 	worker-status capacity telemetry gpu-check migrate migration migration-check \
-	db-shell redis-cli down down-all clean clean-images reset-demo enroll-worker
+	db-shell redis-cli down down-all clean clean-images reset-demo enroll-worker \
+	third-party-fetch third-party-artifacts third-party-verify third-party-verify-strict
 
 help: ## Show all available targets
 	@awk 'BEGIN {FS = ":.*## "; printf "PersonaForge development commands\n\n"} /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-22s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -46,6 +47,18 @@ install: ## Install the project with development dependencies
 
 assets: ## Generate demo videos for all personas
 	bash scripts/generate_demo_videos.sh
+
+third-party-fetch: ## Fetch pinned upstream model source repositories
+	bash scripts/fetch_third_party_source.sh
+
+third-party-artifacts: ## Download and verify pinned model artifacts into the external cache
+	$(PYTHON) scripts/fetch_third_party_artifacts.py
+
+third-party-verify: ## Verify fetched third-party source and cached artifacts (non-strict)
+	$(PYTHON) scripts/verify_third_party.py
+
+third-party-verify-strict: ## Require every pinned source and model artifact to be present
+	$(PYTHON) scripts/verify_third_party.py --strict
 
 format: ## Format source and tests with Ruff
 	$(RUFF) format src tests scripts

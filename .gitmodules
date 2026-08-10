@@ -1,0 +1,11 @@
+[submodule "third_party/LAM"]
+	path = third_party/LAM
+	url = https://github.com/aigc3d/LAM.git
+
+[submodule "third_party/LAM_Audio2Expression"]
+	path = third_party/LAM_Audio2Expression
+	url = https://github.com/aigc3d/LAM_Audio2Expression.git
+
+[submodule "third_party/LAM_WebRender"]
+	path = third_party/LAM_WebRender
+	url = https://github.com/aigc3d/LAM_WebRender.git

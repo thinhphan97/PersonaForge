@@ -10,6 +10,11 @@ redis>=5.2,<7
 # installed with --no-deps in the Worker Dockerfiles so its Gradio/legacy stack
 # cannot leak into the production render image.
 numpy>=1.26,<3
+scipy>=1.11,<2
+librosa>=0.11,<1
+addict>=2.4,<3
+yapf>=0.40,<1
+termcolor>=2.4,<4
 sea-g2p>=0.7.31,<1
 onnxruntime>=1.20,<2
 soundfile>=0.12,<1

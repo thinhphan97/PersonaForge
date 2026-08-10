@@ -13,6 +13,10 @@ from personaforge.worker.v1 import child_control_pb2, child_control_pb2_grpc
 from personaforge_chat.domain.models import AvatarState
 from personaforge_observability import bind_context
 from personaforge_observability.context import context_from_mapping
+from personaforge_worker.adapters.outbound.avatar.lam_a2e import (
+    LamA2ESettings,
+    LamAudio2ExpressionRuntime,
+)
 from personaforge_worker.adapters.outbound.scripted_media import ScriptedToneTtsRuntime
 from personaforge_worker.adapters.outbound.vieneu_tts import VieNeuTtsSessionRuntime
 from personaforge_worker.ipc.messages import (
@@ -188,6 +192,11 @@ class CompositeChildRuntime:
         payload = required_mapping(command, "payload")
         tts_runtime = await self._create_tts_runtime(payload)
         try:
+            avatar_runtime = await self._create_avatar_runtime(payload)
+        except BaseException:
+            await tts_runtime.close()
+            raise
+        try:
             session = LiveKitRenderSession(
                 session_id=self._session_id,
                 character_id=required_string(payload, "character_id"),
@@ -195,9 +204,12 @@ class CompositeChildRuntime:
                 publisher_token=required_string(payload, "publisher_token"),
                 settings=self._settings,
                 tts_runtime=tts_runtime,
+                avatar_runtime=avatar_runtime,
             )
         except BaseException:
             await tts_runtime.close()
+            if avatar_runtime is not None:
+                await avatar_runtime.close()
             raise
         self._session = session
         self._session_task = asyncio.create_task(
@@ -243,6 +255,26 @@ class CompositeChildRuntime:
             frame_samples=round(settings.audio_sample_rate * settings.audio_frame_duration_seconds),
             apply_watermark=settings.vieneu_apply_watermark,
         )
+
+    async def _create_avatar_runtime(self, payload: dict[str, Any]) -> Any:
+        settings = self._settings
+        provider = str(payload.get("avatar_runtime_provider") or settings.avatar_runtime_provider)
+        if provider in {"recorded", "server-video", ""}:
+            return None
+        if provider != "lam-a2e":
+            raise ValueError(f"Unsupported avatar runtime provider: {provider}")
+        runtime = await LamAudio2ExpressionRuntime.create(
+            LamA2ESettings(
+                model_repo=settings.lam_a2e_model_repo,
+                model_revision=settings.lam_a2e_model_revision,
+                cache_dir=settings.lam_a2e_cache_dir,
+                allow_download=settings.lam_a2e_allow_download,
+                source_dir=settings.lam_a2e_source_dir,
+                device=settings.lam_a2e_device,
+                motion_fps=settings.lam_a2e_motion_fps,
+            )
+        )
+        return runtime
 
     def _change_state(self, command: dict[str, Any]) -> None:
         session = self._require_session()

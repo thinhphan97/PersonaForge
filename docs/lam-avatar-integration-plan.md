@@ -1,9 +1,9 @@
 # Kế hoạch tích hợp LAM Avatar và Custom Character
 
-> Trạng thái: design draft. Việc triển khai được chia thành hai giai đoạn giống chiến lược
-> VieNeu-TTS: trước hết chạy end-to-end với system default character, sau đó mới bổ sung custom
-> character, build job, phân quyền và quản lý artifact. Recorded-video mode tiếp tục được giữ để
-> tương thích ngược.
+> Trạng thái: design draft. Việc triển khai được chia thành ba lớp/ba milestone: quản lý source
+> third-party có provenance trước, public API ổn định cho từng model sau đó mới tích hợp vào
+> PersonaForge. Sau khi default character chạy end-to-end mới bổ sung custom character, build job,
+> phân quyền và quản lý artifact. Recorded-video mode tiếp tục được giữ để tương thích ngược.
 
 Upstream/reference chính thức:
 
@@ -136,6 +136,15 @@ Giai đoạn 2 bổ sung:
 - signed asset access;
 - checkpoint/model provenance;
 - upload/build/management UI.
+
+Hai giai đoạn sản phẩm trên được triển khai qua các technical phase ở mục 10:
+
+```text
+Phase 0   third-party source, model provenance và reproducible build
+Phase 1   public API/wrapper độc lập cho LAM, LAM-A2E và WebRender
+Phase 2   PersonaForge AvatarRuntime, presentation, transport và default character E2E
+Phase 3   custom character, builder worker, ACL và artifact lifecycle
+```
 
 Để hỗ trợ model khác LAM, build job không được hardcode thành reconstruction:
 
@@ -399,6 +408,92 @@ Thông số upstream hiện công bố có thể đối chiếu tại
 PersonaForge không xem config upstream là domain contract; adapter phải validate sample rate,
 expression dimension và motion FPS khi load model.
 
+FPS được cấu hình theo từng runtime, không dùng một giá trị global cho mọi avatar:
+
+```text
+server video runtime  → WORKER_VIDEO_FPS
+LAM-A2E motion        → LAM_A2E_MOTION_FPS (upstream hiện chỉ hỗ trợ 30 FPS)
+model khác            → motion_fps trong runtime descriptor của model đó
+```
+
+`LiveKit AudioTrack` vẫn dùng audio clock 48 kHz; FPS chỉ quyết định cadence của video frame
+hoặc motion frame. Không được ép LAM-A2E chạy 25 FPS bằng cách đổi biến môi trường, vì phần
+windowing/inference upstream được huấn luyện và tính toán ở 30 FPS; model hỗ trợ FPS khác phải
+có adapter riêng và tự khai báo cadence tương ứng.
+
+## 5.1. TTS và expression runtime trong cùng Composite session
+
+TTS và model expression phải thuộc cùng một Composite session và dùng chung audio được tạo từ
+TTS. Hai runtime không gọi trực tiếp hoặc chia sẻ mutable state; chúng giao tiếp qua
+`BoundedAudioTimeline` với các reader/queue độc lập:
+
+```text
+Composite Child
+    ├── TTS task → BoundedAudioTimeline
+    │                  ├── audio reader → LiveKit AudioTrack
+    │                  └── expression reader → 48k→16k → LAM-A2E
+    │                                               ↓
+    │                                         MotionQueue
+    │                                               ↓
+    └──────────────────────────────────────── LiveKit motion transport
+```
+
+“Cùng một thread” không phải là yêu cầu đồng thời; một thread có thể block cả hai inference.
+Thiết kế là cùng một Child/session nhưng có async task độc lập. Blocking inference chạy qua
+thread/executor hoặc model-engine process. `CompositeSpeechPipeline` chỉ phụ thuộc public API,
+không phụ thuộc implementation VieNeu hay LAM-A2E.
+
+Audio chunk giữ nguyên metadata timeline:
+
+```python
+CanonicalAudioChunk(
+    session_id, turn_id, utterance_id, sequence,
+    start_sample, samples, sample_rate=48000,
+)
+```
+
+Motion frame dùng cùng audio clock:
+
+```python
+TimedMotionFrame(
+    session_id=session_id,
+    utterance_id=utterance_id,
+    generation=generation,
+    sequence=sequence,
+    pts_sample=audio_start_sample,
+    duration_samples=1600,  # 30 FPS tại 48 kHz
+    sample_rate=48000,
+    schema="arkit52-v1",
+    values=weights,
+)
+```
+
+Audio sample index là master clock cho AudioTrack, server video và client motion. Không dùng
+packet arrival time hoặc thời điểm inference hoàn thành để đồng bộ.
+
+Queue policy:
+
+- `BoundedAudioTimeline` là single-writer, multi-reader; mỗi reader có cursor riêng.
+- Audio không được drop chunk; audio continuity có priority cao nhất.
+- MotionQueue có giới hạn kích thước và có thể drop frame cũ khi expression bị trễ.
+- Backpressure của expression không được lan ngược sang TTS hoặc AudioTrack.
+- Mỗi motion frame có `sequence`, `generation`, `pts_sample` và `schema`.
+- Khi expression lỗi, audio tiếp tục phát và branch motion chuyển neutral nếu có.
+
+Kết thúc utterance phải drain cả hai nhánh:
+
+```text
+TTS END_OF_UTTERANCE
+    → expression.flush()
+    → publish final motion frames
+    → audio và motion cùng drain
+    → state = idle
+```
+
+Không chuyển về `idle` ngay khi TTS ngừng sinh chunk. Khi migrate worker, tăng `generation`,
+reset timeline readers và bỏ mọi motion packet generation cũ ở browser trước khi Child mới
+load/warmup TTS và LAM-A2E.
+
 ## 6. Default character specification
 
 Giai đoạn 1 có thể seed một character:
@@ -553,18 +648,187 @@ failure_detail
 Update từ builder phải kèm fencing token để job process cũ không ghi đè kết quả sau khi lease đã
 được cấp lại.
 
-## 10. Trình tự triển khai
+## 10. Trình tự triển khai mới
 
-### Phase 0: feasibility
+Implementation phải đi theo ba lớp độc lập:
 
-- Pin upstream source, model và renderer revisions.
-- Review code/weight/package license.
-- Build A2E experimental GPU image.
-- Inspect default ZIP manifest.
-- Benchmark load, warmup, inference, VRAM và output `[T, 52]`.
-- Xác nhận LiveKit data API tương thích với server/Python/JavaScript SDK được pin.
+```text
+Third-party source/model
+        ↓
+Public model API adapters
+        ↓
+PersonaForge AvatarRuntime/pipeline
+```
 
-### Phase 1A: avatar domain compatibility
+Không import trực tiếp class của LAM, LAM-A2E hoặc renderer vào Core, CompositeSpeechPipeline
+hoặc frontend controller. Mỗi upstream phải được pin, bọc bằng API nội bộ và kiểm thử độc lập
+trước khi tích hợp vào pipeline.
+
+### Phase 0: third-party source và provenance
+
+Mục tiêu là đưa source code và model dependency về một boundary có thể kiểm soát, không để
+runtime tự tải `main`, `master` hoặc revision mới nhất.
+
+Directory đề xuất:
+
+```text
+third_party/
+    LAM/
+    LAM_Audio2Expression/
+    LAM_WebRender/
+    manifests/
+        lam.yaml
+        lam-a2e.yaml
+        lam-web-render.yaml
+```
+
+Tasks:
+
+- Clone hoặc git submodule các repository upstream vào `third_party/`.
+- Pin commit SHA, package version, model revision và license.
+- Tạo manifest checksum cho checkpoint, default `avatar.zip` và NPM bundle.
+- Không sửa trực tiếp upstream; mọi patch phải nằm trong `patches/` hoặc adapter riêng.
+- Tạo Docker build context riêng cho model runtime, không đưa dependency CUDA vào Core API.
+- Chuẩn bị volume/cache checkpoint ngoài container.
+- Ghi rõ model dtype, sample rate, motion FPS, expression dimension và GPU requirement.
+- Kiểm tra license trước khi đóng gói hoặc phân phối artifact.
+
+Acceptance:
+
+```text
+fresh checkout + pinned manifest
+    → build reproducible
+    → load checkpoint thành công
+    → checksum hợp lệ
+```
+
+### Phase 1: public API cho từng third-party model
+
+Trước khi nối PersonaForge, mỗi model phải có một API ổn định, model-agnostic ở phía gọi.
+
+#### 1A. LAM-A2E public API
+
+Implementation boundary trong PersonaForge:
+
+```text
+src/personaforge_worker/domain/avatar.py
+src/personaforge_worker/application/avatar_ports.py
+src/personaforge_worker/adapters/outbound/avatar/checkpoints.py
+src/personaforge_worker/adapters/outbound/avatar/lam_a2e.py
+src/personaforge_worker/adapters/outbound/avatar/lam_a2e_engine.py
+```
+
+`LamAudio2ExpressionRuntime.create()` resolve checkpoint bằng `huggingface_hub.snapshot_download`
+với `repo_id` và `revision` đã pin. Cache được mount ngoài container và có file-lock của
+Hugging Face để nhiều Child khởi động đồng thời không tải trùng. Runtime không tải lại nếu
+revision đã có trong cache.
+
+Trong UI, LAM WebRender là presentation mặc định khi mở session mới. Có thể kiểm tra lại mode
+video recorded cũ bằng URL `?renderer=video` hoặc `?renderer=recorded`; nếu WebGL không khởi tạo
+được, frontend tự động fallback về video track từ LiveKit.
+
+Bridge runtime được triển khai trong `lam_a2e_engine.py`. Bridge giải nén checkpoint streaming,
+cô lập import path của upstream, khởi tạo model trên GPU của Composite Child, warmup, chuyển đổi
+`AudioWindow` thành expression ARKit 52 và trả về các frame có PTS theo audio timeline. Nó không
+đưa dependency upstream vào Core/Control. Trước khi bật production cần chạy smoke test trong GPU
+image để xác nhận phiên bản `torch/transformers`, Wav2Vec2 weights và hai artifact `.tar` tương thích.
+
+Các biến môi trường:
+
+```env
+LAM_A2E_MODEL_REPO=3DAIGC/LAM_audio2exp
+LAM_A2E_MODEL_REVISION=0fe5f4dbb283ec7d9c01688681e6e4b6ac314858
+LAM_A2E_CACHE_DIR=/var/cache/personaforge/lam
+LAM_MODEL_CACHE_DIR=./.cache/lam
+LAM_A2E_ALLOW_DOWNLOAD=true
+LAM_A2E_SOURCE_DIR=/app/third_party/LAM_Audio2Expression
+LAM_A2E_DEVICE=cuda
+```
+
+`make third-party-artifacts` là lệnh chuẩn để prefetch và verify artifact trước khi chạy
+production; auto-download khi Child khởi tạo chỉ là fallback cho development.
+
+API tối thiểu:
+
+```python
+class Audio2ExpressionEngine(Protocol):
+    @property
+    def sample_rate(self) -> int: ...
+
+    @property
+    def motion_fps(self) -> int: ...
+
+    @property
+    def schema(self) -> str: ...
+
+    async def warmup(self) -> None: ...
+
+    async def process(
+        self,
+        audio: AudioWindow,
+    ) -> AsyncIterator[ExpressionFrame]: ...
+
+    async def flush(self) -> AsyncIterator[ExpressionFrame]: ...
+
+    async def close(self) -> None: ...
+```
+
+Adapter chịu trách nhiệm:
+
+- resample input về 16 kHz;
+- rolling context/window overlap;
+- deduplicate output frame;
+- validate `[T, 52]` và `arkit52-v1`;
+- map output về sample PTS;
+- không để code upstream rò ra ngoài adapter;
+- phát hiện model/device/checkpoint mismatch bằng typed error.
+
+#### 1B. LAM WebRender public API
+
+Frontend adapter không gọi trực tiếp package upstream:
+
+```typescript
+interface AvatarRenderer {
+  load(asset: AvatarAsset, spec: RendererSpec): Promise<void>;
+  pushMotion(frame: MotionFrame): void;
+  setState(state: AvatarState): void;
+  render(clock: AudioPlaybackClock): void;
+  close(): Promise<void>;
+}
+```
+
+`LamWebRendererAdapter` là implementation duy nhất biết package
+`gaussian-splat-renderer-for-lam`. Adapter phải hỗ trợ asset checksum, generation reset,
+WebGL context loss và cleanup.
+
+#### 1C. LAM reconstruction public API
+
+Chỉ được triển khai thực tế ở Phase 3, nhưng contract phải được định nghĩa sớm:
+
+```python
+class AvatarBuilderEngine(Protocol):
+    async def build(
+        self,
+        request: BuildRequest,
+    ) -> BuildResult: ...
+```
+
+LAM implementation dùng `RECONSTRUCT`; model khác có thể dùng `TRAIN` hoặc `IMPORT` mà không
+đổi Control Plane.
+
+Acceptance của Phase 1:
+
+```text
+model API test độc lập
+    → load/warmup
+    → infer fake input
+    → validate output
+    → close/release GPU
+```
+
+### Phase 2: integrate vào PersonaForge và chạy default character
+
+### Phase 2A: avatar domain compatibility
 
 - `AvatarOutputKind`, `RenderLocation`, `AvatarTransportKind`.
 - `TimedMotionFrame`, `AvatarRenderRequest`.
@@ -572,28 +836,46 @@ Update từ builder phải kèm fencing token để job process cũ không ghi �
 - Recorded runtime compatibility adapter.
 - Generalize completion từ video-specific sang avatar-output completion.
 
-### Phase 1B: runtime and presentation resolution
+### Phase 2B: runtime and presentation resolution
 
 - Truyền `AvatarRuntimeSpec` Core → Control → Redis → Master → Child.
 - Trả `PresentationSpec` cho browser.
 - Seed default recorded và LAM character.
 - Typed compatibility/admission errors.
 
-### Phase 1C: static client renderer
+### Phase 2C: static client renderer
 
 - Frontend build pipeline và pinned LAM renderer package.
 - Default `avatar.zip`.
 - Fake/static ARKit52.
 - State mapping, cleanup và WebGL fallback.
 
-### Phase 1D: realtime transport
+Development smoke test:
+
+```text
+http://<host>:<port>/?renderer=lam-webgl
+```
+
+PersonaForge serves the pinned default asset from:
+
+```text
+/assets/lam/default.zip
+/assets/lam/test_expression_1s.json
+```
+
+`LamWebRendererAdapter` dynamically loads the pinned
+`gaussian-splat-renderer-for-lam@0.0.9-alpha.2` module and loops the bundled ARKit expression
+fixture. This verifies asset loading and WebGL lifecycle only; realtime LiveKit motion replaces
+the fixture after the A2E DataTrack path is enabled.
+
+### Phase 2D: realtime transport
 
 - Fake motion generator có PTS/sequence/generation.
 - LiveKit data transport.
 - `ExpressionBuffer` và `AudioPlaybackClock`.
 - Loss, reconnect, restart, late-join tests.
 
-### Phase 1E: LAM-A2E
+### Phase 2E: LAM-A2E integration
 
 - Stateful 48 kHz → 16 kHz resampler.
 - Rolling context, overlap/dedup và async output.
@@ -602,19 +884,19 @@ Update từ builder phải kèm fencing token để job process cũ không ghi �
 - Optional thinking voice prompt.
 - A/V drift và first-motion benchmark.
 
-### Phase 2A: character resources
+### Phase 3A: character resources
 
 - Character DB entity, ACL và shares.
 - Artifact/version repositories.
 - Object storage và signed access.
 
-### Phase 2B: builder worker
+### Phase 3B: builder worker
 
 - `avatar-builder` worker capability.
 - Build scheduler, lease, fencing và retry.
 - FLAME, pretrained LAM, export, validation và upload.
 
-### Phase 2C: product lifecycle
+### Phase 3C: product lifecycle
 
 - Upload/build/progress UI.
 - Rebuild/version selection.
@@ -623,7 +905,18 @@ Update từ builder phải kèm fencing token để job process cũ không ghi �
 
 ## 11. Acceptance criteria
 
-Giai đoạn 1 chỉ hoàn thành khi:
+### Phase 0–1: third-party và public model API
+
+- Fresh checkout có thể build bằng các revision đã pin.
+- Checkpoint, package và artifact checksum được kiểm tra trước khi load.
+- LAM-A2E public API load/warmup/infer/flush/close độc lập với PersonaForge.
+- Output được validate sample rate, FPS, expression dimension và schema.
+- WebRender adapter load/close được default asset và xử lý checksum/context loss.
+- Model failure trả typed error, không làm sập Core API.
+
+### Phase 2: default character và realtime pipeline
+
+Giai đoạn default character chỉ hoàn thành khi:
 
 - Recorded character hiện tại vẫn chạy ở aiortc và LiveKit mode được support.
 - User chọn được system LAM character.
@@ -639,7 +932,9 @@ Giai đoạn 1 chỉ hoàn thành khi:
 - Master không tạo CUDA context.
 - Unit, contract và E2E tests pass.
 
-Giai đoạn 2 chỉ hoàn thành khi:
+### Phase 3: custom character và artifact lifecycle
+
+Giai đoạn custom character chỉ hoàn thành khi:
 
 - User upload portrait và theo dõi build progress.
 - Job retry không tạo artifact version trùng hoặc ghi đè artifact READY.

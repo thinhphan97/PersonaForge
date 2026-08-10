@@ -59,6 +59,14 @@ class WorkerSettings:
     vieneu_model_path: str
     vieneu_onnx_precision: str
     vieneu_apply_watermark: bool
+    lam_a2e_model_repo: str
+    lam_a2e_model_revision: str
+    lam_a2e_cache_dir: Path
+    lam_a2e_allow_download: bool
+    lam_a2e_source_dir: Path
+    lam_a2e_device: str
+    lam_a2e_motion_fps: int
+    avatar_runtime_provider: str
     scripted_tts_ms_per_character: int
     video_queue_size_ms: float
     av_sync_debug: bool
@@ -152,6 +160,22 @@ class WorkerSettings:
             vieneu_onnx_precision=os.getenv("TTS_VIENEU_ONNX_PRECISION", "fp32").lower(),
             vieneu_apply_watermark=os.getenv("TTS_VIENEU_APPLY_WATERMARK", "false").lower()
             in {"1", "true", "yes", "on"},
+            lam_a2e_model_repo=os.getenv("LAM_A2E_MODEL_REPO", "3DAIGC/LAM_audio2exp"),
+            lam_a2e_model_revision=os.getenv(
+                "LAM_A2E_MODEL_REVISION",
+                "0fe5f4dbb283ec7d9c01688681e6e4b6ac314858",
+            ),
+            lam_a2e_cache_dir=Path(
+                os.getenv("LAM_A2E_CACHE_DIR", "/var/cache/personaforge/lam")
+            ),
+            lam_a2e_allow_download=os.getenv("LAM_A2E_ALLOW_DOWNLOAD", "true").lower()
+            in {"1", "true", "yes", "on"},
+            lam_a2e_source_dir=Path(
+                os.getenv("LAM_A2E_SOURCE_DIR", root / "third_party" / "LAM_Audio2Expression")
+            ),
+            lam_a2e_device=os.getenv("LAM_A2E_DEVICE", "cuda"),
+            lam_a2e_motion_fps=int(os.getenv("LAM_A2E_MOTION_FPS", "30")),
+            avatar_runtime_provider=os.getenv("AVATAR_RUNTIME_PROVIDER", "recorded").lower(),
             scripted_tts_ms_per_character=int(os.getenv("SCRIPTED_TTS_MS_PER_CHARACTER", "40")),
             video_queue_size_ms=float(os.getenv("WORKER_VIDEO_QUEUE_MS", "80")),
             av_sync_debug=os.getenv("AV_SYNC_DEBUG", "false").lower() in {"1", "true", "yes", "on"},

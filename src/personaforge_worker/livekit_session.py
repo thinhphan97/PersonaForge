@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import json
 import logging
 import math
 import struct
@@ -29,6 +30,7 @@ from personaforge_worker.adapters.outbound.scripted_media import (
 from personaforge_worker.application.audio_timeline import BoundedAudioTimeline
 from personaforge_worker.application.media_ports import TtsSessionRuntimePort
 from personaforge_worker.application.speech_pipeline import CompositeSpeechPipeline
+from personaforge_worker.domain.avatar import TimedMotionFrame
 from personaforge_worker.domain.media import SpeechSegment, TimedVideoFrame
 from personaforge_worker.recorded_frames import LoopingRecordedFrameSource
 from personaforge_worker.settings import WorkerSettings
@@ -47,6 +49,7 @@ class LiveKitRenderSession:
         publisher_token: str,
         settings: WorkerSettings,
         tts_runtime: TtsSessionRuntimePort | None = None,
+        avatar_runtime: object | None = None,
     ) -> None:
         self.session_id = session_id
         self.character_id = character_id
@@ -89,9 +92,12 @@ class LiveKitRenderSession:
             self._media_publisher,
             video_fps=settings.video_fps,
             sample_rate=settings.audio_sample_rate,
+            avatar_runtime=avatar_runtime,
         )
         self._pipeline_started = False
         self._pipeline_stopped = False
+        self._state_audio_task: asyncio.Task[None] | None = None
+        self._silence_sequence = 0
         self._speech_lock = asyncio.Lock()
         self._observed_fps = 0.0
         self._av_drift_ms = 0.0
@@ -122,8 +128,14 @@ class LiveKitRenderSession:
             state.value,
             state_version,
         )
+        if self._pipeline_started and not self._pipeline_stopped:
+            self._restart_state_audio()
 
     async def stop(self) -> None:
+        if self._state_audio_task is not None:
+            self._state_audio_task.cancel()
+            await asyncio.gather(self._state_audio_task, return_exceptions=True)
+            self._state_audio_task = None
         if self._pipeline_started and not self._pipeline_stopped:
             await self._speech_pipeline.stop()
             self._pipeline_stopped = True
@@ -207,6 +219,7 @@ class LiveKitRenderSession:
             await self._speech_pipeline.start()
             self._pipeline_started = True
             await self._speech_pipeline.wait_ready()
+            self._restart_state_audio()
             first_frame = await asyncio.to_thread(
                 recorded.next_frame,
                 AvatarState.IDLE,
@@ -219,7 +232,15 @@ class LiveKitRenderSession:
                 self.session_id,
                 self.character_id,
             )
-            await self._publish_timeline(synchronizer, recorded, first_frame)
+            motion_task = asyncio.create_task(
+                self._publish_motion(room),
+                name=f"persona-motion-publisher-{self.session_id}",
+            )
+            try:
+                await self._publish_timeline(room, synchronizer, recorded, first_frame)
+            finally:
+                motion_task.cancel()
+                await asyncio.gather(motion_task, return_exceptions=True)
         except Exception as exc:
             self._startup_error = exc
             raise
@@ -239,6 +260,7 @@ class LiveKitRenderSession:
 
     async def _publish_timeline(
         self,
+        room: rtc.Room,
         synchronizer: rtc.AVSynchronizer,
         recorded: LoopingRecordedFrameSource,
         first_frame: AvVideoFrame,
@@ -361,6 +383,82 @@ class LiveKitRenderSession:
                 )
                 next_metrics_at += 5.0
 
+    async def _publish_motion(self, room: rtc.Room) -> None:
+        """Publish lossy motion independently of the audio media clock."""
+        while not self._stop.is_set():
+            delivery = self._media_publisher.pop_motion()
+            if delivery is None:
+                await asyncio.sleep(0.001)
+                continue
+            frame = delivery.frame
+            try:
+                await room.local_participant.publish_data(
+                    _encode_motion_frame(frame),
+                    reliable=False,
+                    topic="avatar-motion",
+                )
+                acknowledge(delivery)
+                if frame.sequence == 0 or frame.sequence % 30 == 0:
+                    logger.info(
+                        "Published avatar motion frame",
+                        extra={
+                            "event": "worker.avatar.motion.published",
+                            "session_id": self.session_id,
+                            "utterance_id": frame.utterance_id,
+                            "motion_sequence": frame.sequence,
+                            "motion_pts_sample": frame.pts_sample,
+                            "motion_schema": frame.schema,
+                            "motion_values": len(frame.values),
+                        },
+                    )
+            except asyncio.CancelledError:
+                reject(delivery, RuntimeError("Motion publisher cancelled"))
+                raise
+            except BaseException as exc:
+                # A transient DataTrack failure must not terminate audio/video.
+                reject(delivery, exc)
+                logger.warning(
+                    "Avatar motion packet dropped",
+                    extra={
+                        "event": "worker.avatar.motion.dropped",
+                        "session_id": self.session_id,
+                        "motion_sequence": frame.sequence,
+                        "exception_type": type(exc).__name__,
+                    },
+                )
+
+    def _restart_state_audio(self) -> None:
+        if self._state_audio_task is not None:
+            self._state_audio_task.cancel()
+        if self._state in {AvatarState.IDLE, AvatarState.THINKING}:
+            self._state_audio_task = asyncio.create_task(
+                self._feed_state_silence(),
+                name=f"persona-state-silence-{self.session_id}",
+            )
+        else:
+            self._state_audio_task = None
+
+    async def _feed_state_silence(self) -> None:
+        try:
+            while not self._stop.is_set() and self._state in {
+                AvatarState.IDLE,
+                AvatarState.THINKING,
+            }:
+                self._silence_sequence += 1
+                await self._speech_pipeline.append_silence(
+                    session_id=self.session_id,
+                    turn_id=f"state-{self._state.value}",
+                    utterance_id=f"{self.session_id}-silence-{self._silence_sequence}",
+                    # Short windows keep the transition to SPEAKING responsive;
+                    # any already queued silence is bounded to 100 ms.
+                    duration_ms=100,
+                )
+                await asyncio.sleep(0.08)
+        except asyncio.CancelledError:
+            raise
+        except (RuntimeError, asyncio.QueueFull):
+            logger.debug("State silence feeder stopped", exc_info=True)
+
     def _is_sync_pulse(self, media_time: float) -> bool:
         settings = self._settings
         return (
@@ -387,6 +485,26 @@ def _to_livekit_video_frame(frame: AvVideoFrame) -> rtc.VideoFrame:
         rtc.VideoBufferType.RGBA,
         raw,
     )
+
+
+def _encode_motion_frame(frame: TimedMotionFrame) -> bytes:
+    """Stable PoC wire format; replace with the versioned binary packet in production."""
+    return json.dumps(
+        {
+            "version": 1,
+            "session_id": frame.session_id,
+            "utterance_id": frame.utterance_id,
+            "generation": frame.generation,
+            "sequence": frame.sequence,
+            "pts_sample": frame.pts_sample,
+            "duration_samples": frame.duration_samples,
+            "sample_rate": frame.sample_rate,
+            "schema": frame.schema,
+            "flags": int(frame.flags),
+            "values": frame.values,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
 
 
 def _to_livekit_timed_video_frame(

@@ -1,0 +1,26 @@
+{
+  "name": "lam-a2e",
+  "source": {
+    "repository": "https://github.com/aigc3d/LAM_Audio2Expression.git",
+    "commit": "02a703c3ea7d8e360eb43098eca85ee98a083529",
+    "license_review": "pending"
+  },
+  "models": [
+    {
+      "repository": "https://huggingface.co/3DAIGC/LAM_audio2exp",
+      "revision": "0fe5f4dbb283ec7d9c01688681e6e4b6ac314858",
+      "files": [
+        {
+          "path": "LAM_audio2exp_streaming.tar",
+          "size_bytes": 373377643,
+          "sha256": "0877f419b1b7b6856479b743b71625ad478f97434404e91288f9f0d6d516b97a"
+        },
+        {
+          "path": "LAM_audio2exp_assets.tar",
+          "size_bytes": 32798496,
+          "sha256": "f5759f080ec1352d454d88d5a32f09c0fc8aeaf50b9ac1fd9c34a4acd82acfa1"
+        }
+      ]
+    }
+  ]
+}

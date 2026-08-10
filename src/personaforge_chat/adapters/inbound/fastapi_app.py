@@ -11,12 +11,13 @@ from fastapi import (
     Depends,
     FastAPI,
     Header,
+    HTTPException,
     Request,
     Response,
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from personaforge_chat.application.auth_use_cases import require_csrf
@@ -369,9 +370,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
         response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; "
-            "style-src 'self'; connect-src 'self' ws: wss:; media-src 'self' blob:; "
-            "img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'"
+            # LAM's sort worker compiles a small WASM module for Gaussian
+            # splat sorting. wasm-unsafe-eval is narrower than unsafe-eval and
+            # permits WebAssembly compilation without enabling string eval.
+            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; "
+            # gaussian-splat-renderer-for-lam creates its loading UI with
+            # element.style and loads the GLTF extracted from avatar.zip via
+            # blob URLs. Those are required by the third-party renderer and
+            # are restricted to the current document/CDN below.
+            "style-src 'self' 'unsafe-inline'; "
+            "connect-src 'self' https://cdn.jsdelivr.net ws: wss: blob:; "
+            "media-src 'self' blob:; img-src 'self' data: blob:; "
+            "worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'"
         )
         return response
 
@@ -909,6 +919,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         stylesheet = frontend.joinpath("styles.css").read_text()
         public_watch_html = frontend.joinpath("public-watch.html").read_text()
         public_watch_javascript = frontend.joinpath("public-watch.js").read_text()
+        lam_web_renderer_javascript = frontend.joinpath("lam_web_renderer.js").read_text()
 
         @app.get("/", include_in_schema=False)
         async def frontend_index() -> HTMLResponse:
@@ -917,6 +928,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         @app.get("/app.js", include_in_schema=False)
         async def frontend_javascript() -> Response:
             return Response(app_javascript, media_type="text/javascript")
+
+        @app.get("/lam_web_renderer.js", include_in_schema=False)
+        async def lam_web_renderer_script() -> Response:
+            return Response(lam_web_renderer_javascript, media_type="text/javascript")
 
         @app.get("/styles.css", include_in_schema=False)
         async def frontend_stylesheet() -> Response:
@@ -930,6 +945,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         @app.get("/public-watch.js", include_in_schema=False)
         async def public_watch_script() -> Response:
             return Response(public_watch_javascript, media_type="text/javascript")
+
+        lam_asset_root = resolved.project_root / "third_party" / "LAM_WebRender" / "asset"
+
+        @app.get("/assets/lam/default.zip", include_in_schema=False)
+        async def lam_default_asset() -> FileResponse:
+            asset = lam_asset_root / "arkit" / "p2-1.zip"
+            if not asset.is_file():
+                raise HTTPException(status_code=404, detail="LAM default asset is unavailable")
+            return FileResponse(asset, media_type="application/zip")
+
+        @app.get("/assets/lam/test_expression_1s.json", include_in_schema=False)
+        async def lam_default_expression() -> FileResponse:
+            expression = lam_asset_root / "test_expression_1s.json"
+            if not expression.is_file():
+                raise HTTPException(status_code=404, detail="LAM default expression is unavailable")
+            return FileResponse(expression, media_type="application/json")
 
     return app
 

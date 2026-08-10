@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import dataclass
 
+from personaforge_worker.domain.avatar import TimedMotionFrame
 from personaforge_worker.domain.media import CanonicalAudioChunk, TimedVideoFrame
 
 
@@ -16,6 +17,12 @@ class VideoDelivery:
     delivered: asyncio.Future[None]
 
 
+@dataclass(slots=True)
+class MotionDelivery:
+    frame: TimedMotionFrame
+    delivered: asyncio.Future[None]
+
+
 class QueuedMediaPublisher:
     """Bridge the application media pipeline to one clocked LiveKit publishing loop.
 
@@ -27,6 +34,7 @@ class QueuedMediaPublisher:
     def __init__(self) -> None:
         self._audio: asyncio.Queue[AudioDelivery] = asyncio.Queue(maxsize=1)
         self._video: asyncio.Queue[VideoDelivery] = asyncio.Queue(maxsize=1)
+        self._motion: asyncio.Queue[MotionDelivery] = asyncio.Queue(maxsize=32)
         self._closed = False
         self._error: BaseException | None = None
 
@@ -42,6 +50,19 @@ class QueuedMediaPublisher:
         await self._video.put(delivery)
         await delivery.delivered
 
+    async def publish_motion(self, frame: TimedMotionFrame) -> None:
+        delivery = MotionDelivery(frame, _delivery_future())
+        self._assert_open()
+        # Motion is an interpolatable/lossy stream. Never let a slow DataTrack
+        # publisher apply backpressure to the canonical audio timeline.
+        try:
+            self._motion.put_nowait(delivery)
+        except asyncio.QueueFull:
+            if not delivery.delivered.done():
+                delivery.delivered.set_result(None)
+            return
+        await delivery.delivered
+
     def pop_audio(self) -> AudioDelivery | None:
         try:
             return self._audio.get_nowait()
@@ -54,6 +75,12 @@ class QueuedMediaPublisher:
         except asyncio.QueueEmpty:
             return None
 
+    def pop_motion(self) -> MotionDelivery | None:
+        try:
+            return self._motion.get_nowait()
+        except asyncio.QueueEmpty:
+            return None
+
     async def close(self) -> None:
         self._closed = True
 
@@ -62,6 +89,7 @@ class QueuedMediaPublisher:
         self._error = error
         self._reject_pending(self._audio, error)
         self._reject_pending(self._video, error)
+        self._reject_pending(self._motion, error)
 
     def _assert_open(self) -> None:
         if self._closed:
@@ -69,7 +97,9 @@ class QueuedMediaPublisher:
 
     @staticmethod
     def _reject_pending(
-        queue: asyncio.Queue[AudioDelivery] | asyncio.Queue[VideoDelivery],
+        queue: asyncio.Queue[AudioDelivery]
+        | asyncio.Queue[VideoDelivery]
+        | asyncio.Queue[MotionDelivery],
         error: BaseException,
     ) -> None:
         while True:
@@ -81,12 +111,12 @@ class QueuedMediaPublisher:
                 delivery.delivered.set_exception(error)
 
 
-def acknowledge(delivery: AudioDelivery | VideoDelivery) -> None:
+def acknowledge(delivery: AudioDelivery | VideoDelivery | MotionDelivery) -> None:
     if not delivery.delivered.done():
         delivery.delivered.set_result(None)
 
 
-def reject(delivery: AudioDelivery | VideoDelivery, error: BaseException) -> None:
+def reject(delivery: AudioDelivery | VideoDelivery | MotionDelivery, error: BaseException) -> None:
     if not delivery.delivered.done():
         delivery.delivered.set_exception(error)
 

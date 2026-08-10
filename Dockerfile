@@ -17,6 +17,7 @@ COPY alembic.ini ./alembic.ini
 COPY migrations ./migrations
 COPY config ./config
 COPY frontend ./frontend
+COPY third_party/LAM_WebRender/asset ./third_party/LAM_WebRender/asset
 COPY scripts ./scripts
 RUN bash scripts/generate_demo_videos.sh
 

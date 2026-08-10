@@ -1,0 +1,16 @@
+{
+  "name": "lam-web-render",
+  "source": {
+    "repository": "https://github.com/aigc3d/LAM_WebRender.git",
+    "commit": "12174e944957fc6445f235c5e0ff7e3e16ba209a",
+    "license_review": "pending"
+  },
+  "packages": [
+    {
+      "name": "gaussian-splat-renderer-for-lam",
+      "registry": "https://registry.npmjs.org/",
+      "version": "0.0.9-alpha.2",
+      "integrity": "sha512-NCxRDmUyj5ltopvRT6LDWE8OUMJ9ZyZXH6CVgvkpedpmtlcGV2BL5JKE6y4MutnIsUomXM3j1xUkTuXZRilseA=="
+    }
+  ]
+}

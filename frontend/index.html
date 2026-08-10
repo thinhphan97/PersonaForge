@@ -60,10 +60,12 @@
         <section class="avatar-panel">
           <div class="video-shell">
             <video id="avatar" autoplay playsinline muted></video>
+            <div id="lam-avatar-renderer" class="lam-avatar-renderer" hidden></div>
             <div id="session-closed-overlay" class="session-closed-overlay" hidden>
               <strong>Session đã đóng</strong>
               <span>Stream đã kết thúc và phiên trò chuyện chuyển sang chế độ chỉ đọc.</span>
             </div>
+            <span id="stream-fps" class="stream-fps">FPS: --</span>
             <span id="state" class="state">chưa chọn session</span>
             <button id="audio-toggle" class="audio-toggle" type="button">
               Bật âm thanh kiểm tra

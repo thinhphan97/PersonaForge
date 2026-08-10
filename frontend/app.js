@@ -1,3 +1,5 @@
+import { isLamRendererRequested, LamWebRendererAdapter } from "/lam_web_renderer.js";
+
 const $ = (selector) => document.querySelector(selector);
 const authView = $("#auth-view");
 const appView = $("#app-view");
@@ -5,6 +7,7 @@ const video = $("#avatar");
 const videoShell = video.closest(".video-shell");
 const closedOverlay = $("#session-closed-overlay");
 const stateLabel = $("#state");
+const streamFpsLabel = $("#stream-fps");
 const connectionLabel = $("#connection");
 const messages = $("#messages");
 const form = $("#chat-form");
@@ -38,6 +41,11 @@ let lastVideoFrameAt = 0;
 let lastVideoPlaybackTime = 0;
 let videoFrameStallChecks = 0;
 let watchedVideoTrack;
+let lamRenderer;
+let streamFpsMode = "video";
+let streamFpsFrames = 0;
+let streamFpsWindowStartedAt = performance.now();
+let streamFpsTimer;
 const subscribedMediaKinds = new Set();
 let messageCursor = { sequence: 0, revision: 0 };
 const messageStates = new Map();
@@ -287,6 +295,24 @@ async function openSession(session) {
     return;
   }
   connectionLabel.textContent = "Đang kết nối media…";
+  if (isLamRendererRequested()) {
+    try {
+      const rendererContainer = $("#lam-avatar-renderer");
+      lamRenderer = new LamWebRendererAdapter(rendererContainer);
+      await lamRenderer.start();
+      lamRenderer.setAudioElement(video);
+      rendererContainer.hidden = false;
+      video.hidden = true;
+      connectionLabel.textContent = "LAM WebRender đang chạy (expression mặc định).";
+      resetStreamFps("motion");
+    } catch (error) {
+      console.warn("LAM WebRender unavailable; using video presentation", error);
+      lamRenderer = undefined;
+      resetStreamFps("video");
+    }
+  } else {
+    resetStreamFps("video");
+  }
   connectChat(`/api/sessions/${session.session_id}/chat`);
   try {
     const mediaProvider = await detectMediaProvider(session);
@@ -363,6 +389,17 @@ async function connectLiveKitWithAccess(access) {
     mediaReady = true;
     finishMediaMigration("Stream đã được kết nối lại.");
   });
+  room.on(RoomEvent.DataReceived, (payload, _participant, _kind, topic) => {
+    if (livekitRoom !== room) return;
+    try {
+      const packet = JSON.parse(new TextDecoder().decode(payload));
+      if (topic && topic !== "avatar-motion" && packet?.schema !== "arkit52-v1") return;
+      markStreamFrame("motion");
+      lamRenderer?.pushMotion(packet);
+    } catch (error) {
+      console.warn("Invalid avatar motion packet", error);
+    }
+  });
   room.on(RoomEvent.TrackUnsubscribed, (track) => {
     if (livekitRoom !== room) return;
     remoteStream.removeTrack(track.mediaStreamTrack);
@@ -400,6 +437,7 @@ function startMediaFrameWatchdog() {
     if (!video.requestVideoFrameCallback || mediaMigrating) return;
     video.requestVideoFrameCallback(() => {
       lastVideoFrameAt = performance.now();
+      markStreamFrame("video");
       observeFrame();
     });
   };
@@ -463,7 +501,14 @@ function beginMediaMigration(reason) {
 }
 
 function finishMediaMigration(message) {
-  if (!mediaMigrating) return;
+  // TrackSubscribed is also the normal first connection path. Do not leave
+  // a restored session stuck on the initial "connecting media" label when
+  // no migration was active.
+  if (!mediaMigrating) {
+    connectionLabel.classList.remove("migrating");
+    connectionLabel.textContent = message;
+    return;
+  }
   mediaMigrating = false;
   mediaRecoveryAttempt = 0;
   mediaRecoveryInFlight = false;
@@ -613,6 +658,7 @@ async function disconnectCurrent() {
   clearInterval(sessionSyncTimer);
   clearTimeout(mediaRecoveryTimer);
   stopMediaFrameWatchdog();
+  stopStreamFps();
   mediaRecoveryGeneration += 1;
   mediaMigrating = false;
   mediaRecoveryAttempt = 0;
@@ -624,6 +670,13 @@ async function disconnectCurrent() {
   const socket = chatSocket;
   chatSocket = undefined;
   socket?.close();
+  if (lamRenderer) {
+    await lamRenderer.close();
+    lamRenderer = undefined;
+  }
+  const lamContainer = $("#lam-avatar-renderer");
+  if (lamContainer) lamContainer.hidden = true;
+  video.hidden = false;
   peer?.close();
   peer = undefined;
   if (livekitRoom) {
@@ -635,6 +688,35 @@ async function disconnectCurrent() {
   for (const track of remoteStream.getTracks()) remoteStream.removeTrack(track);
   video.srcObject = null;
   updateControls();
+}
+
+function resetStreamFps(mode) {
+  stopStreamFps();
+  streamFpsMode = mode;
+  streamFpsFrames = 0;
+  streamFpsWindowStartedAt = performance.now();
+  streamFpsLabel.textContent = `FPS (${mode}): --`;
+  streamFpsTimer = setInterval(updateStreamFps, 1000);
+}
+
+function markStreamFrame(mode) {
+  if (mode !== streamFpsMode) return;
+  streamFpsFrames += 1;
+}
+
+function updateStreamFps() {
+  const now = performance.now();
+  const elapsed = Math.max(0.001, (now - streamFpsWindowStartedAt) / 1000);
+  const fps = streamFpsFrames / elapsed;
+  streamFpsLabel.textContent = `FPS (${streamFpsMode}): ${fps.toFixed(1)}`;
+  streamFpsFrames = 0;
+  streamFpsWindowStartedAt = now;
+}
+
+function stopStreamFps() {
+  clearInterval(streamFpsTimer);
+  streamFpsTimer = undefined;
+  if (streamFpsLabel) streamFpsLabel.textContent = "FPS: --";
 }
 
 function startSessionReconciliation() {
@@ -751,6 +833,7 @@ function placeMessageInOrder(element, sequence) {
 
 function setAvatarState(state) {
   if (mediaMigrating) return;
+  lamRenderer?.setState(state);
   stateLabel.textContent = state;
 }
 
