@@ -27,6 +27,7 @@ class LamA2ESettings:
     cache_dir: Path = Path("/var/cache/personaforge/lam")
     input_sample_rate: int = 16_000
     motion_fps: int = 30
+    inference_chunk_ms: int = 100
     schema: str = "arkit52-v1"
     generation: int = 0
     allow_download: bool = True
@@ -49,6 +50,7 @@ class LamAudio2ExpressionRuntime:
         self._settings = settings
         self._closed = False
         self._sequence = 0
+        self._last_audio_window: AudioWindow | None = None
 
     @classmethod
     async def create(cls, settings: LamA2ESettings) -> LamAudio2ExpressionRuntime:
@@ -92,6 +94,7 @@ class LamAudio2ExpressionRuntime:
     async def process(self, audio: AudioWindow) -> AsyncIterator[TimedMotionFrame]:
         if self._closed:
             raise RuntimeError("LAM-A2E runtime is closed")
+        self._last_audio_window = audio
         native = cast(Any, self._engine).process
         async for frame in native(audio):
             yield self._to_timed_frame(audio, frame)
@@ -102,13 +105,14 @@ class LamAudio2ExpressionRuntime:
         flush = getattr(self._engine, "flush", None)
         if flush is not None:
             async for frame in flush(utterance_id):
+                source = self._last_audio_window or AudioWindow(
+                    utterance_id=utterance_id,
+                    session_id="",
+                    start_sample=0,
+                    samples=b"",
+                )
                 yield self._to_timed_frame(
-                    AudioWindow(
-                        utterance_id=utterance_id,
-                        session_id="",
-                        start_sample=0,
-                        samples=b"",
-                    ),
+                    source,
                     frame,
                 )
 

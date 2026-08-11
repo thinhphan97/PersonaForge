@@ -46,6 +46,10 @@ class ExpressionBuffer {
     this.frames = [];
     this.lastSample = -1;
   }
+
+  firstSample() {
+    return this.frames.length ? this.frames[0].sample : undefined;
+  }
 }
 
 /** Client adapter for the pinned LAM WebRender package. */
@@ -56,6 +60,8 @@ export class LamWebRendererAdapter {
     this.expression = undefined;
     this.motion = new ExpressionBuffer();
     this.audioElement = undefined;
+    this.audioAnchorTime = undefined;
+    this.motionAnchorSample = undefined;
     this.startedAt = 0;
     this.state = "Idle";
   }
@@ -101,6 +107,18 @@ export class LamWebRendererAdapter {
 
   pushMotion(packet) {
     this.motion.push(packet);
+    // Worker PTS uses the session-wide audio clock; HTMLMediaElement.currentTime
+    // usually starts at zero when the subscriber joins. Anchor the clocks once
+    // so silence accumulated before speech does not put live frames in the
+    // future and force the renderer to use its fallback expression.
+    if (this.motionAnchorSample === undefined && this.audioElement) {
+      const sample = this.motion.firstSample();
+      const audioTime = Number(this.audioElement.currentTime);
+      if (Number.isFinite(sample) && Number.isFinite(audioTime)) {
+        this.motionAnchorSample = sample;
+        this.audioAnchorTime = audioTime;
+      }
+    }
   }
 
   setState(state) {
@@ -112,7 +130,10 @@ export class LamWebRendererAdapter {
     const names = this.expression?.names || [];
     if (!frames.length) return {};
     const audioSample = this.audioElement && Number.isFinite(this.audioElement.currentTime)
-      ? this.audioElement.currentTime * 48_000
+      ? (this.motionAnchorSample === undefined
+        ? this.audioElement.currentTime * 48_000
+        : this.motionAnchorSample
+          + (this.audioElement.currentTime - (this.audioAnchorTime || 0)) * 48_000)
       : ((performance.now() - this.startedAt) / 1000) * 48_000;
     const liveWeights = this.motion.sample(audioSample);
     const frameIndex = Math.floor(((performance.now() - this.startedAt) / 1000) * 30) % frames.length;
@@ -126,6 +147,8 @@ export class LamWebRendererAdapter {
     this.expression = undefined;
     this.motion.clear();
     this.audioElement = undefined;
+    this.audioAnchorTime = undefined;
+    this.motionAnchorSample = undefined;
     if (renderer?.dispose) await renderer.dispose();
     this.container.replaceChildren();
   }

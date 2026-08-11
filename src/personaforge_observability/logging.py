@@ -65,6 +65,13 @@ _SAFE_FIELDS = {
     "model_nonfinite_samples",
     "audio_underrun_frames",
     "audio_underrun_ms",
+    "media_fps",
+    "av_drift_ms",
+    "motion_sequence",
+    "motion_pts_sample",
+    "motion_schema",
+    "motion_values",
+    "motion_fps",
 }
 
 

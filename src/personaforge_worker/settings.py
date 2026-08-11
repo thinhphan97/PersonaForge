@@ -66,12 +66,14 @@ class WorkerSettings:
     lam_a2e_source_dir: Path
     lam_a2e_device: str
     lam_a2e_motion_fps: int
+    lam_a2e_inference_chunk_ms: int
     avatar_runtime_provider: str
     scripted_tts_ms_per_character: int
     video_queue_size_ms: float
     av_sync_debug: bool
     av_sync_interval_seconds: float
     av_sync_pulse_duration_seconds: float
+    media_metrics_log_interval_seconds: float
     characters_root: Path
     avatar_clips: dict[AvatarState, Path]
 
@@ -175,12 +177,18 @@ class WorkerSettings:
             ),
             lam_a2e_device=os.getenv("LAM_A2E_DEVICE", "cuda"),
             lam_a2e_motion_fps=int(os.getenv("LAM_A2E_MOTION_FPS", "30")),
+            lam_a2e_inference_chunk_ms=int(
+                os.getenv("LAM_A2E_INFERENCE_CHUNK_MS", "100")
+            ),
             avatar_runtime_provider=os.getenv("AVATAR_RUNTIME_PROVIDER", "recorded").lower(),
             scripted_tts_ms_per_character=int(os.getenv("SCRIPTED_TTS_MS_PER_CHARACTER", "40")),
             video_queue_size_ms=float(os.getenv("WORKER_VIDEO_QUEUE_MS", "80")),
             av_sync_debug=os.getenv("AV_SYNC_DEBUG", "false").lower() in {"1", "true", "yes", "on"},
             av_sync_interval_seconds=float(os.getenv("AV_SYNC_INTERVAL", "2.0")),
             av_sync_pulse_duration_seconds=float(os.getenv("AV_SYNC_PULSE_DURATION", "0.1")),
+            media_metrics_log_interval_seconds=float(
+                os.getenv("WORKER_MEDIA_LOG_INTERVAL_SECONDS", "5")
+            ),
             characters_root=Path(
                 os.getenv("AVATAR_CHARACTERS_ROOT", root / "assets" / "characters")
             ),

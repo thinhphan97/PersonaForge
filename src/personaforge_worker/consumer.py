@@ -109,7 +109,7 @@ class RedisRenderWorker:
                     )
                     redis = self._require_redis()
                     if await redis.exists(processed_key):
-                        logger.info(
+                        logger.debug(
                             "Duplicate render command acknowledged",
                             extra={
                                 "event": "worker.command.duplicate",
@@ -119,7 +119,13 @@ class RedisRenderWorker:
                         )
                         await redis.xack(self._stream, self._group, message_id)
                         return
-                    logger.info(
+                    command_log_level = (
+                        logging.DEBUG
+                        if command.get("type") in {"avatar.speech.synthesize", "avatar.state.set"}
+                        else logging.INFO
+                    )
+                    logger.log(
+                        command_log_level,
                         "Render command received",
                         extra={
                             "event": "worker.command.received",
@@ -130,7 +136,14 @@ class RedisRenderWorker:
                     await self._dispatch(command)
                     await redis.set(processed_key, "1", ex=86_400)
                     await redis.xack(self._stream, self._group, message_id)
-                    logger.info(
+                    completion_log_level = (
+                        logging.DEBUG
+                        if command.get("type")
+                        not in {"avatar.session.start", "avatar.session.stop"}
+                        else logging.INFO
+                    )
+                    logger.log(
+                        completion_log_level,
                         "Render command completed",
                         extra={
                             "event": "worker.command.completed",

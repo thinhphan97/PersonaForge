@@ -382,12 +382,12 @@ async def test_message_flow_changes_avatar_and_persists_history() -> None:
     assert len({event.message_id for event in assistant_events}) == 1
     assert [
         event.content for event in assistant_events if event.type is ChatEventType.ASSISTANT_CHUNK
-    ] == ["Xin ", "Xin chào"]
+    ] == ["Xin chào"]
     history = await conversations.list_recent(created.session_id, 10)
     assert [message.content for message in history] == ["Hello", "Xin chào"]
     assert [message.sequence for message in history] == [1, 2]
     assert history[1].status is ChatMessageStatus.COMPLETE
-    assert history[1].revision == 3
+    assert history[1].revision == 2
     session = await sessions.get(created.session_id)
     assert session is not None
     assert session.status is SessionStatus.READY
@@ -395,7 +395,7 @@ async def test_message_flow_changes_avatar_and_persists_history() -> None:
 
 
 @pytest.mark.asyncio
-async def test_assistant_cursor_completes_before_media_playback_drains() -> None:
+async def test_assistant_cursor_waits_for_media_playback_to_drain() -> None:
     sessions = InMemorySessionRepository()
     conversations = InMemoryConversationRepository()
     ids = SequentialIds()
@@ -420,19 +420,24 @@ async def test_assistant_cursor_completes_before_media_playback_drains() -> None
         access,
     ).execute(USER_ID, created.session_id, "Hello")
 
+    first = asyncio.create_task(anext(stream))
+    await asyncio.wait_for(avatar.playback_started.wait(), timeout=1)
+    await asyncio.sleep(0)
+    assert not first.done()
+    history = await conversations.list_recent(created.session_id, 10)
+    assert history[-1].content == ""
+    assert history[-1].status is ChatMessageStatus.STREAMING
+
+    avatar.release_playback.set()
+    event = await asyncio.wait_for(first, timeout=1)
     while True:
-        event = await anext(stream)
         if event.type is ChatEventType.ASSISTANT_COMPLETE:
             break
+        event = await asyncio.wait_for(anext(stream), timeout=1)
 
     history = await conversations.list_recent(created.session_id, 10)
     assert history[-1].status is ChatMessageStatus.COMPLETE
-    playback = asyncio.create_task(anext(stream))
-    await asyncio.wait_for(avatar.playback_started.wait(), timeout=1)
-    assert not playback.done()
-
-    avatar.release_playback.set()
-    idle = await asyncio.wait_for(playback, timeout=1)
+    idle = await asyncio.wait_for(anext(stream), timeout=1)
     assert idle.type is ChatEventType.AVATAR_STATE
     assert idle.avatar_state is AvatarState.IDLE
 

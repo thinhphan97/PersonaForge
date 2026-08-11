@@ -4,6 +4,8 @@ import json
 import logging
 import math
 import struct
+import time
+from collections import deque
 
 from av import VideoFrame as AvVideoFrame
 from livekit import rtc
@@ -100,10 +102,27 @@ class LiveKitRenderSession:
         self._silence_sequence = 0
         self._speech_lock = asyncio.Lock()
         self._observed_fps = 0.0
+        self._motion_observed_fps = 0.0
+        self._motion_target_fps = (
+            float(settings.lam_a2e_motion_fps) if avatar_runtime is not None else 0.0
+        )
+        self._motion_base_pts: int | None = None
+        self._motion_base_wall: float | None = None
+        self._motion_send_times: deque[float] = deque(maxlen=61)
         self._av_drift_ms = 0.0
+        self._last_motion_log_at = 0.0
+        self._media_log_interval = max(
+            1.0,
+            settings.media_metrics_log_interval_seconds,
+        )
 
     def media_metrics(self) -> tuple[float, float]:
-        return self._observed_fps, self._av_drift_ms
+        return (
+            self._motion_target_fps
+            or self._motion_observed_fps
+            or self._observed_fps,
+            self._av_drift_ms,
+        )
 
     def set_state(self, state: AvatarState, state_version: int) -> None:
         if state not in {
@@ -113,7 +132,9 @@ class LiveKitRenderSession:
         }:
             raise ValueError(f"Unsupported render state: {state.value}")
         if state_version <= self._state_version:
-            logger.info(
+            # State updates are replayed by the control plane during reconnects;
+            # stale versions are expected and should not flood INFO logs.
+            logger.debug(
                 "Ignoring stale avatar state session=%s version=%s current_version=%s",
                 self.session_id,
                 state_version,
@@ -350,20 +371,21 @@ class LiveKitRenderSession:
             if audio_delivery is not None:
                 acknowledge(audio_delivery)
                 if audio_delivery.frame.end_of_utterance:
-                    logger.info(
-                        "LiveKit utterance playback drained",
-                        extra={
-                            "event": "worker.media.audio.playback.completed",
-                            "utterance_id": audio_delivery.frame.utterance_id,
-                            "audio_underrun_frames": audio_underrun_frames,
-                            "audio_underrun_ms": round(
-                                audio_underrun_frames
-                                * settings.audio_frame_duration_seconds
-                                * 1_000,
-                                2,
-                            ),
-                        },
-                    )
+                    if not audio_delivery.frame.is_silence:
+                        logger.info(
+                            "LiveKit utterance playback drained",
+                            extra={
+                                "event": "worker.media.audio.playback.completed",
+                                "utterance_id": audio_delivery.frame.utterance_id,
+                                "audio_underrun_frames": audio_underrun_frames,
+                                "audio_underrun_ms": round(
+                                    audio_underrun_frames
+                                    * settings.audio_frame_duration_seconds
+                                    * 1_000,
+                                    2,
+                                ),
+                            },
+                        )
                     active_audio_utterance = None
                     audio_underrun_frames = 0
                 # ``publish_audio`` waits for this acknowledgement before it can
@@ -380,8 +402,14 @@ class LiveKitRenderSession:
                     self.session_id,
                     synchronizer.actual_fps,
                     drift_ms,
+                    extra={
+                        "event": "worker.media.cadence",
+                        "session_id": self.session_id,
+                        "media_fps": round(synchronizer.actual_fps, 2),
+                        "av_drift_ms": round(drift_ms, 2),
+                    },
                 )
-                next_metrics_at += 5.0
+                next_metrics_at += self._media_log_interval
 
     async def _publish_motion(self, room: rtc.Room) -> None:
         """Publish lossy motion independently of the audio media clock."""
@@ -392,23 +420,52 @@ class LiveKitRenderSession:
                 continue
             frame = delivery.frame
             try:
+                if self._motion_base_pts is None:
+                    self._motion_base_pts = frame.pts_sample
+                    self._motion_base_wall = time.monotonic()
+                assert self._motion_base_wall is not None
+                target_wall = self._motion_base_wall + (
+                    frame.pts_sample - self._motion_base_pts
+                ) / max(1, frame.sample_rate)
+                delay = target_wall - time.monotonic()
+                if delay > 0:
+                    await asyncio.sleep(delay)
                 await room.local_participant.publish_data(
                     _encode_motion_frame(frame),
                     reliable=False,
                     topic="avatar-motion",
                 )
                 acknowledge(delivery)
-                if frame.sequence == 0 or frame.sequence % 30 == 0:
+                now = time.monotonic()
+                self._motion_send_times.append(now)
+                if len(self._motion_send_times) >= 2:
+                    measured = (
+                        (len(self._motion_send_times) - 1)
+                        / max(0.001, self._motion_send_times[-1] - self._motion_send_times[0])
+                    )
+                    configured = frame.sample_rate / max(1, frame.duration_samples)
+                    self._motion_observed_fps = min(measured, configured)
+                # Motion is published at video cadence (25/30 FPS). Logging every
+                # Nth frame created a continuous one-line-per-second stream per
+                # session, which is not useful in production. Keep the first
+                # packet and emit a periodic health sample instead.
+                if (
+                    frame.sequence == 0
+                    or now - self._last_motion_log_at
+                    >= self._media_log_interval
+                ):
+                    self._last_motion_log_at = now
                     logger.info(
-                        "Published avatar motion frame",
+                        "Avatar motion cadence sample",
                         extra={
-                            "event": "worker.avatar.motion.published",
+                            "event": "worker.avatar.motion.cadence",
                             "session_id": self.session_id,
                             "utterance_id": frame.utterance_id,
                             "motion_sequence": frame.sequence,
                             "motion_pts_sample": frame.pts_sample,
                             "motion_schema": frame.schema,
                             "motion_values": len(frame.values),
+                            "motion_fps": round(self._motion_observed_fps, 2),
                         },
                     )
             except asyncio.CancelledError:

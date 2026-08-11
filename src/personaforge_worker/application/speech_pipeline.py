@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import time
 from dataclasses import replace
 
 from personaforge_worker.application.media_ports import (
@@ -16,6 +18,8 @@ from personaforge_worker.domain.media import (
     SilenceSegment,
     SpeechSegment,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class CompositeSpeechPipeline:
@@ -51,6 +55,10 @@ class CompositeSpeechPipeline:
         self._audio_done: set[str] = set()
         self._video_done: set[str] = set()
         self._playback_events: dict[str, asyncio.Event] = {}
+        self._utterance_started_at: dict[str, float] = {}
+        self._first_audio_logged: set[str] = set()
+        self._first_video_logged: set[str] = set()
+        self._first_motion_logged: set[str] = set()
 
     async def start(self) -> None:
         if self._tasks:
@@ -88,6 +96,7 @@ class CompositeSpeechPipeline:
         if not segment.text.strip():
             raise ValueError("Speech segment text cannot be empty")
         self._playback_events.setdefault(segment.utterance_id, asyncio.Event())
+        self._utterance_started_at.setdefault(segment.utterance_id, time.perf_counter())
         await self._speech.put(segment)
 
     async def append_silence(
@@ -101,6 +110,7 @@ class CompositeSpeechPipeline:
         """Queue silence without bypassing the single-writer timeline invariant."""
         if not self._tasks or self._stopped:
             raise RuntimeError("Composite speech pipeline is not running")
+        self._utterance_started_at.setdefault(utterance_id, time.perf_counter())
         await self._speech.put(
             SilenceSegment(
                 session_id=session_id,
@@ -180,6 +190,23 @@ class CompositeSpeechPipeline:
                 chunk = await reader.read()
                 if chunk is None:
                     return
+                if not chunk.is_silence and chunk.utterance_id not in self._first_audio_logged:
+                    self._first_audio_logged.add(chunk.utterance_id)
+                    logger.info(
+                        "First canonical audio chunk published",
+                        extra={
+                            "event": "worker.media.first_audio",
+                            "utterance_id": chunk.utterance_id,
+                            "latency_ms": round(
+                                (time.perf_counter()
+                                 - self._utterance_started_at.get(
+                                     chunk.utterance_id, time.perf_counter()
+                                 ))
+                                * 1_000,
+                                2,
+                            ),
+                        },
+                    )
                 await self._publisher.publish_audio(chunk)
                 if chunk.end_of_utterance:
                     self._audio_done.add(chunk.utterance_id)
@@ -212,6 +239,26 @@ class CompositeSpeechPipeline:
                                 sample_rate=chunk.sample_rate,
                             )
                         )
+                        if (
+                            not chunk.is_silence
+                            and chunk.utterance_id not in self._first_video_logged
+                        ):
+                            self._first_video_logged.add(chunk.utterance_id)
+                            logger.info(
+                                "First video frame published",
+                                extra={
+                                    "event": "worker.media.first_video",
+                                    "utterance_id": chunk.utterance_id,
+                                    "latency_ms": round(
+                                        (time.perf_counter()
+                                         - self._utterance_started_at.get(
+                                             chunk.utterance_id, time.perf_counter()
+                                         ))
+                                        * 1_000,
+                                        2,
+                                    ),
+                                },
+                            )
                         await self._publisher.publish_video(frame)
                         frame_index += 1
                     next_video_sample += samples_per_video_frame
@@ -276,11 +323,41 @@ class CompositeSpeechPipeline:
                     channels=chunk.channels,
                 )
                 async for frame in self._avatar_runtime.process(window):
+                    # Runtime adapters may receive 20 ms audio chunks while a
+                    # model is configured for 25/30 FPS. Normalize every
+                    # output to the configured audio-sample cadence here so
+                    # DataTrack packets never claim overlapping or 50 FPS PTS.
+                    if frame.pts_sample < next_motion_sample:
+                        continue
+                    output_pts = next_motion_sample
+                    next_motion_sample += motion_samples
+                    if window.utterance_id not in self._first_motion_logged:
+                        self._first_motion_logged.add(window.utterance_id)
+                        logger.info(
+                            "First motion frame published",
+                            extra={
+                                "event": "worker.media.first_motion",
+                                "utterance_id": window.utterance_id,
+                                "latency_ms": round(
+                                    (time.perf_counter()
+                                     - self._utterance_started_at.get(
+                                         window.utterance_id, time.perf_counter()
+                                     ))
+                                    * 1_000,
+                                    2,
+                                ),
+                            },
+                        )
                     await self._publisher.publish_motion(
-                        replace(frame, sequence=motion_sequence)
+                        replace(
+                            frame,
+                            sequence=motion_sequence,
+                            pts_sample=output_pts,
+                            duration_samples=motion_samples,
+                            sample_rate=self._sample_rate,
+                        )
                     )
                     motion_sequence += 1
-                next_motion_sample = max(next_motion_sample, chunk.end_sample)
                 if chunk.end_of_utterance:
                     async for frame in self._avatar_runtime.flush(chunk.utterance_id):
                         await self._publisher.publish_motion(

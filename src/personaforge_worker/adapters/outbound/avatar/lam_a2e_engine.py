@@ -161,6 +161,18 @@ class LamA2EEngine:
     def __init__(self, model: Any, torch: Any, device: Any, settings: Any) -> None:
         self.model, self.torch, self.device = model, torch, device
         self.settings = settings
+        # The released LAM-A2E weights are trained at 30 FPS. Keep the value
+        # configurable so runtimes with a compatible checkpoint can publish at
+        # another cadence without changing the audio clock.
+        self.motion_fps = max(1, int(getattr(settings, "motion_fps", 30)))
+        self.inference_chunk_ms = max(
+            20, int(getattr(settings, "inference_chunk_ms", 100))
+        )
+        self._pending_audio = bytearray()
+        self._pending_start_sample: int | None = None
+        self._pending_sample_rate = 48_000
+        self._pending_session_id = ""
+        self._pending_utterance_id = ""
         self.context: dict[str, Any] = {
             "is_initial_input": True,
             "previous_audio": None,
@@ -196,8 +208,8 @@ class LamA2EEngine:
         # (about 2.13 s at 30 FPS), then only the newly arrived frames are
         # emitted. There is intentionally no future-frame lookahead.
         max_frame_length = 64
-        frame_length = math.ceil(len(audio) / sample_rate * 30)
-        hop_length = max(1, int(sample_rate / 30))
+        frame_length = math.ceil(len(audio) / sample_rate * self.motion_fps)
+        hop_length = max(1, int(sample_rate / self.motion_fps))
         volume = librosa.feature.rms(
             y=audio,
             frame_length=min(hop_length, max(1, len(audio))),
@@ -215,8 +227,8 @@ class LamA2EEngine:
         else:
             audio = audio.astype(np.float32, copy=False)
 
-        start_frame = int(max_frame_length - len(audio) / 16_000 * 30)
-        target_samples = 16_000 * max_frame_length // 30
+        start_frame = int(max_frame_length - len(audio) / 16_000 * self.motion_fps)
+        target_samples = 16_000 * max_frame_length // self.motion_fps
         previous = self.context.get("previous_audio")
         prefix_length = max(0, target_samples - len(audio))
         prefix = (
@@ -276,10 +288,10 @@ class LamA2EEngine:
         )[-max_frame_length:]
         return values
 
-    async def process(self, audio: AudioWindow):
+    async def _process_batch(self, audio: AudioWindow):
         array = np.frombuffer(audio.samples, dtype=np.int16).astype(np.float32) / 32768.0
         values = await asyncio.to_thread(self._infer, array, audio.sample_rate)
-        duration = max(1, round(audio.sample_rate / 30))
+        duration = max(1, round(audio.sample_rate / self.motion_fps))
         for index, row in enumerate(values):
             yield ExpressionFrame(
                 index,
@@ -289,9 +301,53 @@ class LamA2EEngine:
                 tuple(row.tolist()),
             )
 
+    async def process(self, audio: AudioWindow):
+        if self._pending_utterance_id and self._pending_utterance_id != audio.utterance_id:
+            async for frame in self.flush(self._pending_utterance_id):
+                yield frame
+        if self._pending_start_sample is None:
+            self._pending_start_sample = audio.start_sample
+            self._pending_sample_rate = audio.sample_rate
+            self._pending_session_id = audio.session_id
+            self._pending_utterance_id = audio.utterance_id
+        self._pending_audio.extend(audio.samples)
+        batch_bytes = max(
+            1,
+            round(
+                audio.sample_rate
+                * self.inference_chunk_ms
+                / 1_000
+            )
+            * 2,
+        )
+        if len(self._pending_audio) < batch_bytes:
+            return
+        batch = AudioWindow(
+            session_id=self._pending_session_id,
+            utterance_id=self._pending_utterance_id,
+            start_sample=self._pending_start_sample,
+            samples=bytes(self._pending_audio),
+            sample_rate=self._pending_sample_rate,
+        )
+        self._pending_audio.clear()
+        self._pending_start_sample = None
+        async for frame in self._process_batch(batch):
+            yield frame
+
     async def flush(self, utterance_id: str):
-        return
-        yield  # keep this method an async generator
+        if self._pending_utterance_id != utterance_id or not self._pending_audio:
+            return
+        pending = AudioWindow(
+            session_id=self._pending_session_id,
+            utterance_id=utterance_id,
+            start_sample=self._pending_start_sample or 0,
+            samples=bytes(self._pending_audio),
+            sample_rate=self._pending_sample_rate,
+        )
+        self._pending_audio.clear()
+        self._pending_start_sample = None
+        async for frame in self._process_batch(pending):
+            yield frame
 
     async def close(self) -> None:
         self.model = None

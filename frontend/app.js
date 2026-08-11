@@ -42,6 +42,9 @@ let lastVideoPlaybackTime = 0;
 let videoFrameStallChecks = 0;
 let watchedVideoTrack;
 let lamRenderer;
+let pendingAvatarState;
+let avatarStateTimer;
+let lastActiveMotionAt = 0;
 let streamFpsMode = "video";
 let streamFpsFrames = 0;
 let streamFpsWindowStartedAt = performance.now();
@@ -394,6 +397,9 @@ async function connectLiveKitWithAccess(access) {
     try {
       const packet = JSON.parse(new TextDecoder().decode(payload));
       if (topic && topic !== "avatar-motion" && packet?.schema !== "arkit52-v1") return;
+      if (packet?.values?.some((value) => Math.abs(Number(value)) > 0.01)) {
+        lastActiveMotionAt = performance.now();
+      }
       markStreamFrame("motion");
       lamRenderer?.pushMotion(packet);
     } catch (error) {
@@ -490,6 +496,8 @@ function stopMediaFrameWatchdog() {
 
 function beginMediaMigration(reason) {
   if (!currentSession || currentSession.status === "closed") return;
+  clearTimeout(avatarStateTimer);
+  pendingAvatarState = undefined;
   mediaMigrating = true;
   mediaReady = false;
   mediaRecoveryGeneration += 1;
@@ -659,6 +667,9 @@ async function disconnectCurrent() {
   clearTimeout(mediaRecoveryTimer);
   stopMediaFrameWatchdog();
   stopStreamFps();
+  clearTimeout(avatarStateTimer);
+  pendingAvatarState = undefined;
+  lastActiveMotionAt = 0;
   mediaRecoveryGeneration += 1;
   mediaMigrating = false;
   mediaRecoveryAttempt = 0;
@@ -831,10 +842,46 @@ function placeMessageInOrder(element, sequence) {
   messages.insertBefore(element, next || null);
 }
 
-function setAvatarState(state) {
+function applyAvatarState(state) {
   if (mediaMigrating) return;
   lamRenderer?.setState(state);
   stateLabel.textContent = state;
+}
+
+function setAvatarState(state) {
+  if (mediaMigrating) return;
+  clearTimeout(avatarStateTimer);
+  pendingAvatarState = undefined;
+  if (state === "speaking") {
+    // Core announces speaking when the first text token arrives, while TTS
+    // still needs to produce PCM. Wait for an active emotion packet when the
+    // client renderer is enabled; use a short bounded delay for video mode.
+    pendingAvatarState = state;
+    const audioBaseline = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+    const deadline = performance.now() + (lamRenderer ? 3000 : 350);
+    const waitForMedia = () => {
+      if (mediaMigrating || pendingAvatarState !== "speaking") return;
+      const audioStarted = (video.currentTime || 0) > audioBaseline + 0.02;
+      if ((audioStarted && (!lamRenderer || lastActiveMotionAt > 0))
+          || performance.now() >= deadline) {
+        applyAvatarState("speaking");
+        pendingAvatarState = undefined;
+        return;
+      }
+      avatarStateTimer = setTimeout(waitForMedia, 40);
+    };
+    waitForMedia();
+    return;
+  }
+  if (state === "idle" && lastActiveMotionAt > performance.now() - 250) {
+    pendingAvatarState = state;
+    avatarStateTimer = setTimeout(() => {
+      pendingAvatarState = undefined;
+      applyAvatarState("idle");
+    }, 250);
+    return;
+  }
+  applyAvatarState(state);
 }
 
 function renderSessionActive() {

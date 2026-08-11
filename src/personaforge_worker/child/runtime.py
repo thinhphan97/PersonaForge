@@ -128,7 +128,7 @@ class CompositeChildRuntime:
                     await self._failed(message.meta.message_id, str(exc))
                     self._finished.set()
                     return
-                logger.info(
+                logger.debug(
                     "Composite child command completed",
                     extra={
                         "event": "worker.child.command.completed",
@@ -272,6 +272,7 @@ class CompositeChildRuntime:
                 source_dir=settings.lam_a2e_source_dir,
                 device=settings.lam_a2e_device,
                 motion_fps=settings.lam_a2e_motion_fps,
+                inference_chunk_ms=settings.lam_a2e_inference_chunk_ms,
             )
         )
         return runtime

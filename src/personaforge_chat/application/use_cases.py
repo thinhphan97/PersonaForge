@@ -285,6 +285,9 @@ class HandleMessage:
     access: SessionAccessPolicy
     history_limit: int = 30
     thinking_min_duration_seconds: float = 0
+    speech_minimum_characters: int = 12
+    speech_target_characters: int = 40
+    speech_maximum_characters: int = 120
     authorization: AgentAuthorizationPort | None = None
     turn_locks: SessionTurnLockPort | None = None
     _locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False)
@@ -318,7 +321,9 @@ class HandleMessage:
                 assistant_message: ChatMessage | None = None
                 agent_turn: AgentTurn | None = None
                 speech_task: asyncio.Task[None] | None = None
-                speech_queue: asyncio.Queue[tuple[int, str] | None] | None = None
+                speech_queue: asyncio.Queue[
+                    tuple[int, str, asyncio.Future[None]] | None
+                ] | None = None
                 try:
                     await _transition_session(
                         self.sessions,
@@ -439,13 +444,21 @@ class HandleMessage:
                             item = await speech_queue.get()
                             if item is None:
                                 return
-                            segment_sequence, segment_text = item
-                            await self.avatar.speak(
-                                session_id,
-                                speech_turn_id,
-                                f"{speech_message_id}:{segment_sequence}",
-                                segment_text,
-                            )
+                            segment_sequence, segment_text, completion = item
+                            try:
+                                await self.avatar.speak(
+                                    session_id,
+                                    speech_turn_id,
+                                    f"{speech_message_id}:{segment_sequence}",
+                                    segment_text,
+                                )
+                            except BaseException as exc:
+                                if not completion.done():
+                                    completion.set_exception(exc)
+                                raise
+                            else:
+                                if not completion.done():
+                                    completion.set_result(None)
 
                     speech_task = asyncio.create_task(
                         stream_speech(),
@@ -454,12 +467,19 @@ class HandleMessage:
 
                     async def enqueue_speech(
                         item: tuple[int, str] | None,
-                    ) -> None:
+                    ) -> asyncio.Future[None] | None:
                         """Apply backpressure without hanging if media playback fails."""
 
                         assert speech_queue is not None
                         assert speech_task is not None
-                        put_task = asyncio.create_task(speech_queue.put(item))
+                        completion: asyncio.Future[None] | None = None
+                        queued_item: tuple[int, str, asyncio.Future[None]] | None
+                        if item is None:
+                            queued_item = None
+                        else:
+                            completion = asyncio.get_running_loop().create_future()
+                            queued_item = (item[0], item[1], completion)
+                        put_task = asyncio.create_task(speech_queue.put(queued_item))
                         done, _pending = await asyncio.wait(
                             {put_task, speech_task},
                             return_when=asyncio.FIRST_COMPLETED,
@@ -473,14 +493,21 @@ class HandleMessage:
                                 raise RuntimeError(
                                     "Speech pipeline stopped before accepting all segments"
                                 )
-                            return
+                            return completion
                         await put_task
+                        return completion
 
-                    text_segmenter = StreamingTextSegmenter()
+                    text_segmenter = StreamingTextSegmenter(
+                        minimum_characters=self.speech_minimum_characters,
+                        target_characters=self.speech_target_characters,
+                        maximum_characters=self.speech_maximum_characters,
+                    )
                     speech_sequence = 0
                     chunks: list[str] = []
+                    visible_reply_parts: list[str] = []
                     speaking = False
                     completed = False
+                    pending_speech: list[asyncio.Future[None]] = []
                     async for event in self.agent.stream_turn(request, delegation_token):
                         if distributed_lease is not None:
                             await distributed_lease.ensure_valid()
@@ -518,33 +545,56 @@ class HandleMessage:
                                 avatar_state=AvatarState.SPEAKING,
                             )
                         chunks.append(event.text)
-                        for speech_text in text_segmenter.feed(event.text):
-                            await enqueue_speech((speech_sequence, speech_text))
+                        emitted_segments = text_segmenter.feed(event.text)
+                        for speech_text in emitted_segments:
+                            completion = await enqueue_speech(
+                                (speech_sequence, speech_text)
+                            )
+                            if completion is not None:
+                                pending_speech.append(completion)
                             speech_sequence += 1
-                        expected_revision = assistant_message.revision
-                        assistant_message = replace(
-                            assistant_message,
-                            content="".join(chunks),
-                            revision=expected_revision + 1,
-                            updated_at=self.clock.now(),
-                        )
-                        assistant_message = await self.conversations.update(
-                            assistant_message,
-                            expected_revision,
-                        )
-                        yield ChatOutputEvent(
-                            type=ChatEventType.ASSISTANT_CHUNK,
-                            content=assistant_message.content,
-                            message_id=assistant_message.message_id,
-                            sequence=assistant_message.sequence,
-                            revision=assistant_message.revision,
-                        )
+                        # Do not let the assistant transcript run ahead of the
+                        # media clock.  A segment is exposed to the UI only after
+                        # its corresponding audio/lipsync playback has completed.
+                        # This keeps text, audio and expression output monotonic
+                        # even when token generation is much faster than TTS.
+                        if pending_speech:
+                            await asyncio.gather(*pending_speech)
+                            pending_speech.clear()
+                            visible_reply_parts.extend(emitted_segments)
+                        if emitted_segments:
+                            visible_content = " ".join(visible_reply_parts).strip()
+                            expected_revision = assistant_message.revision
+                            assistant_message = replace(
+                                assistant_message,
+                                content=visible_content,
+                                revision=expected_revision + 1,
+                                updated_at=self.clock.now(),
+                            )
+                            assistant_message = await self.conversations.update(
+                                assistant_message,
+                                expected_revision,
+                            )
+                            yield ChatOutputEvent(
+                                type=ChatEventType.ASSISTANT_CHUNK,
+                                content=visible_content,
+                                message_id=assistant_message.message_id,
+                                sequence=assistant_message.sequence,
+                                revision=assistant_message.revision,
+                            )
 
                     if not completed:
                         raise RuntimeError("Agent stream ended before turn completion")
                     tail = text_segmenter.flush()
                     if tail:
-                        await enqueue_speech((speech_sequence, tail))
+                        completion = await enqueue_speech((speech_sequence, tail))
+                        if completion is not None:
+                            pending_speech.append(completion)
+                    if pending_speech:
+                        await asyncio.gather(*pending_speech)
+                        pending_speech.clear()
+                    if tail:
+                        visible_reply_parts.append(tail)
                     await enqueue_speech(None)
                     if distributed_lease is not None:
                         await distributed_lease.ensure_valid()
@@ -582,8 +632,17 @@ class HandleMessage:
                         },
                     )
 
-                    # Text streaming is complete when the Agent finishes. Do not keep the UI
-                    # cursor alive while the independent media pipeline drains playback.
+                    # The completion event is deliberately emitted only after the
+                    # speech queue has drained. Consumers can therefore treat it
+                    # as the single point where text and media are both complete.
+                    if tail:
+                        yield ChatOutputEvent(
+                            type=ChatEventType.ASSISTANT_CHUNK,
+                            content=" ".join(visible_reply_parts).strip(),
+                            message_id=assistant_message.message_id,
+                            sequence=assistant_message.sequence,
+                            revision=assistant_message.revision,
+                        )
                     yield ChatOutputEvent(
                         type=ChatEventType.ASSISTANT_COMPLETE,
                         content=full_reply,

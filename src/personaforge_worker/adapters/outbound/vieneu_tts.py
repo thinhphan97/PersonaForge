@@ -163,7 +163,7 @@ class VieNeuTtsSessionRuntime:
         started_at = time.perf_counter()
         first_audio_at: float | None = None
         emitted_frames = 0
-        logger.info(
+        logger.debug(
             "VieNeu synthesis started",
             extra={
                 "event": "worker.tts.synthesis.started",
@@ -173,8 +173,8 @@ class VieNeuTtsSessionRuntime:
             },
         )
         pending = bytearray()
-        ready_frame: bytes | None = None
         sequence = 0
+        last_frame: bytes | None = None
         inference_started_at = time.perf_counter()
         model_metrics: dict[str, Any] = {}
         model_chunk_count = 0
@@ -192,18 +192,18 @@ class VieNeuTtsSessionRuntime:
             while len(pending) >= frame_bytes:
                 samples = bytes(pending[:frame_bytes])
                 del pending[:frame_bytes]
-                if ready_frame is not None:
+                if last_frame is not None:
                     first_audio_at = first_audio_at or time.perf_counter()
                     emitted_frames += 1
                     yield NativeAudioChunk(
                         utterance_id=segment.utterance_id,
                         sequence=sequence,
-                        samples=ready_frame,
+                        samples=last_frame,
                         sample_rate=48_000,
                         channels=1,
                     )
                     sequence += 1
-                ready_frame = samples
+                last_frame = samples
         model_metrics = _finalize_model_metrics(model_metrics, model_chunk_count)
         logger.info(
             "VieNeu model output validated",
@@ -227,40 +227,40 @@ class VieNeuTtsSessionRuntime:
         while len(pending) >= frame_bytes:
             samples = bytes(pending[:frame_bytes])
             del pending[:frame_bytes]
-            if ready_frame is not None:
+            if last_frame is not None:
                 first_audio_at = first_audio_at or time.perf_counter()
                 emitted_frames += 1
                 yield NativeAudioChunk(
                     utterance_id=segment.utterance_id,
                     sequence=sequence,
-                    samples=ready_frame,
+                    samples=last_frame,
                     sample_rate=48_000,
                     channels=1,
                 )
                 sequence += 1
-            ready_frame = samples
+            last_frame = samples
         if pending:
             pending.extend(b"\0" * (self._frame_samples * 2 - len(pending)))
-            if ready_frame is not None:
+            if last_frame is not None:
                 first_audio_at = first_audio_at or time.perf_counter()
                 emitted_frames += 1
                 yield NativeAudioChunk(
                     utterance_id=segment.utterance_id,
                     sequence=sequence,
-                    samples=ready_frame,
+                    samples=last_frame,
                     sample_rate=48_000,
                     channels=1,
                 )
                 sequence += 1
-            ready_frame = bytes(pending)
-        if ready_frame is None:
+            last_frame = bytes(pending)
+        if last_frame is None:
             raise RuntimeError("VieNeu returned audio without a complete PCM frame")
         first_audio_at = first_audio_at or time.perf_counter()
         emitted_frames += 1
         yield NativeAudioChunk(
             utterance_id=segment.utterance_id,
             sequence=sequence,
-            samples=ready_frame,
+            samples=last_frame,
             sample_rate=48_000,
             channels=1,
             end_of_utterance=segment.is_final,

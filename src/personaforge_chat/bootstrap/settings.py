@@ -33,6 +33,9 @@ class Settings:
     reply_provider: str
     reply_chunk_delay_seconds: float
     thinking_min_duration_seconds: float
+    speech_minimum_characters: int
+    speech_target_characters: int
+    speech_maximum_characters: int
     reply_http_url: str | None
     reply_http_token: str | None
     agent_runtime_provider: str
@@ -111,6 +114,9 @@ class Settings:
             reply_provider=os.getenv("REPLY_PROVIDER", "scripted"),
             reply_chunk_delay_seconds=float(os.getenv("REPLY_CHUNK_DELAY", "0.25")),
             thinking_min_duration_seconds=float(os.getenv("THINKING_MIN_DURATION", "1.0")),
+            speech_minimum_characters=int(os.getenv("SPEECH_MINIMUM_CHARACTERS", "12")),
+            speech_target_characters=int(os.getenv("SPEECH_TARGET_CHARACTERS", "40")),
+            speech_maximum_characters=int(os.getenv("SPEECH_MAXIMUM_CHARACTERS", "120")),
             reply_http_url=os.getenv("REPLY_HTTP_URL"),
             reply_http_token=os.getenv("REPLY_HTTP_TOKEN"),
             agent_runtime_provider=os.getenv("AGENT_RUNTIME_PROVIDER", "local").lower(),
