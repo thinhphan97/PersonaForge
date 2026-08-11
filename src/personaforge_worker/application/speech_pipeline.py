@@ -272,9 +272,8 @@ class CompositeSpeechPipeline:
         """Forward canonical timeline windows to a client-render avatar runtime."""
         if self._avatar_runtime is None:
             return
-        motion_fps = int(
-            getattr(getattr(self._avatar_runtime, "_settings", None), "motion_fps", 30)
-        )
+        runtime_settings = getattr(self._avatar_runtime, "_settings", None)
+        motion_fps = int(getattr(runtime_settings, "publish_fps", 30))
         motion_schema = str(
             getattr(getattr(self._avatar_runtime, "_settings", None), "schema", "arkit52-v1")
         )

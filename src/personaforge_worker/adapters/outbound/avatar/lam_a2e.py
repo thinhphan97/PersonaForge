@@ -26,7 +26,8 @@ class LamA2ESettings:
     model_revision: str = "0fe5f4dbb283ec7d9c01688681e6e4b6ac314858"
     cache_dir: Path = Path("/var/cache/personaforge/lam")
     input_sample_rate: int = 16_000
-    motion_fps: int = 30
+    model_fps: int = 30
+    publish_fps: int = 30
     inference_chunk_ms: int = 100
     schema: str = "arkit52-v1"
     generation: int = 0
@@ -53,8 +54,13 @@ class LamAudio2ExpressionRuntime:
         self._last_audio_window: AudioWindow | None = None
 
     @classmethod
-    async def create(cls, settings: LamA2ESettings) -> LamAudio2ExpressionRuntime:
-        if settings.motion_fps != 30:
+    async def create(
+        cls,
+        settings: LamA2ESettings,
+        *,
+        warmup: bool = True,
+    ) -> LamAudio2ExpressionRuntime:
+        if settings.model_fps != 30:
             raise ValueError(
                 "LAM-A2E upstream runtime supports 30 FPS; use a model-specific "
                 "adapter for another output FPS"
@@ -67,7 +73,8 @@ class LamAudio2ExpressionRuntime:
         )
         engine = await cls._load_engine(checkpoint, settings)
         runtime = cls(engine, settings)
-        await runtime.warmup()
+        if warmup:
+            await runtime.warmup()
         return runtime
 
     @staticmethod

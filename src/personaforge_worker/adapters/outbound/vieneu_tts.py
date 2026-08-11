@@ -44,8 +44,10 @@ class VieNeuTtsSessionRuntime:
         backend: str,
         model_path: str,
         onnx_precision: str,
+        torch_dtype: str = "auto",
         frame_samples: int,
         apply_watermark: bool,
+        warmup: bool = True,
     ) -> "VieNeuTtsSessionRuntime":
         def load() -> tuple[Any, dict[str, Any]]:
             import numpy as np
@@ -59,6 +61,13 @@ class VieNeuTtsSessionRuntime:
                 "backend": "onnx" if runtime_backend == "onnx-gpu" else runtime_backend,
                 "device": device,
             }
+            if runtime_backend == "pytorch":
+                dtype = torch_dtype.strip().lower()
+                if dtype not in {"auto", "float32", "float16", "bfloat16"}:
+                    raise ValueError(
+                        "TTS_VIENEU_TORCH_DTYPE must be auto, float32, float16, or bfloat16"
+                    )
+                kwargs["dtype"] = dtype
             if model_path:
                 kwargs["backbone_repo"] = model_path
             if runtime_backend in {"onnx", "onnx-gpu"}:
@@ -86,6 +95,9 @@ class VieNeuTtsSessionRuntime:
                 "tts_onnx_precision": (
                     onnx_precision if _normalize_backend(backend) in {"onnx", "onnx-gpu"} else None
                 ),
+                "tts_torch_dtype": (
+                    torch_dtype if _normalize_backend(backend) == "pytorch" else None
+                ),
             },
         )
         runtime = cls(
@@ -94,11 +106,12 @@ class VieNeuTtsSessionRuntime:
             frame_samples=frame_samples,
             apply_watermark=apply_watermark,
         )
-        try:
-            await runtime.warmup()
-        except BaseException:
-            await runtime.close()
-            raise
+        if warmup:
+            try:
+                await runtime.warmup()
+            except BaseException:
+                await runtime.close()
+                raise
         return runtime
 
     async def warmup(self) -> None:

@@ -58,6 +58,7 @@ class WorkerSettings:
     vieneu_backend: str
     vieneu_model_path: str
     vieneu_onnx_precision: str
+    vieneu_torch_dtype: str
     vieneu_apply_watermark: bool
     lam_a2e_model_repo: str
     lam_a2e_model_revision: str
@@ -65,7 +66,8 @@ class WorkerSettings:
     lam_a2e_allow_download: bool
     lam_a2e_source_dir: Path
     lam_a2e_device: str
-    lam_a2e_motion_fps: int
+    lam_a2e_model_fps: int
+    lam_a2e_publish_fps: int
     lam_a2e_inference_chunk_ms: int
     avatar_runtime_provider: str
     scripted_tts_ms_per_character: int
@@ -160,6 +162,7 @@ class WorkerSettings:
             vieneu_backend=os.getenv("TTS_VIENEU_BACKEND", "onnx").lower(),
             vieneu_model_path=os.getenv("TTS_VIENEU_MODEL_PATH", "pnnbao-ump/VieNeu-TTS-v3-Turbo"),
             vieneu_onnx_precision=os.getenv("TTS_VIENEU_ONNX_PRECISION", "fp32").lower(),
+            vieneu_torch_dtype=os.getenv("TTS_VIENEU_TORCH_DTYPE", "float16").lower(),
             vieneu_apply_watermark=os.getenv("TTS_VIENEU_APPLY_WATERMARK", "false").lower()
             in {"1", "true", "yes", "on"},
             lam_a2e_model_repo=os.getenv("LAM_A2E_MODEL_REPO", "3DAIGC/LAM_audio2exp"),
@@ -176,7 +179,10 @@ class WorkerSettings:
                 os.getenv("LAM_A2E_SOURCE_DIR", root / "third_party" / "LAM_Audio2Expression")
             ),
             lam_a2e_device=os.getenv("LAM_A2E_DEVICE", "cuda"),
-            lam_a2e_motion_fps=int(os.getenv("LAM_A2E_MOTION_FPS", "30")),
+            lam_a2e_model_fps=int(os.getenv("LAM_A2E_MODEL_FPS", "30")),
+            lam_a2e_publish_fps=int(
+                os.getenv("LAM_A2E_PUBLISH_FPS", os.getenv("LAM_A2E_MOTION_FPS", "30"))
+            ),
             lam_a2e_inference_chunk_ms=int(
                 os.getenv("LAM_A2E_INFERENCE_CHUNK_MS", "100")
             ),

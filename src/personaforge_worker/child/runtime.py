@@ -252,6 +252,7 @@ class CompositeChildRuntime:
             backend=settings.vieneu_backend,
             model_path=settings.vieneu_model_path,
             onnx_precision=settings.vieneu_onnx_precision,
+            torch_dtype=settings.vieneu_torch_dtype,
             frame_samples=round(settings.audio_sample_rate * settings.audio_frame_duration_seconds),
             apply_watermark=settings.vieneu_apply_watermark,
         )
@@ -271,7 +272,8 @@ class CompositeChildRuntime:
                 allow_download=settings.lam_a2e_allow_download,
                 source_dir=settings.lam_a2e_source_dir,
                 device=settings.lam_a2e_device,
-                motion_fps=settings.lam_a2e_motion_fps,
+                model_fps=settings.lam_a2e_model_fps,
+                publish_fps=settings.lam_a2e_publish_fps,
                 inference_chunk_ms=settings.lam_a2e_inference_chunk_ms,
             )
         )

@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import importlib
 import logging
+import math
 import sys
 import tarfile
 import types
@@ -146,11 +147,34 @@ def _load_sync(checkpoint: Path, settings: Any) -> LamA2EEngine:
         device_name = getattr(settings, "device", "cuda")
         device = torch.device(device_name if torch.cuda.is_available() else "cpu")
         model.to(device).eval()
+        # Resolve inference-only dependencies once while the upstream source
+        # path is active. `_infer` is called for every audio batch; importing
+        # here avoids repeated module lookups without importing LAM/Torch in
+        # recorded or CPU-only workers.
+        import librosa
+        import torch.nn.functional as functional
+        from models.utils import (
+            apply_frame_blending,
+            apply_random_eye_blinks_context,
+            apply_savitzky_golay_smoothing,
+            smooth_mouth_movements,
+            symmetrize_blendshapes,
+        )
+
+        inference_dependencies = {
+            "librosa": librosa,
+            "functional": functional,
+            "apply_frame_blending": apply_frame_blending,
+            "apply_random_eye_blinks_context": apply_random_eye_blinks_context,
+            "apply_savitzky_golay_smoothing": apply_savitzky_golay_smoothing,
+            "smooth_mouth_movements": smooth_mouth_movements,
+            "symmetrize_blendshapes": symmetrize_blendshapes,
+        }
     logger.info(
         "LAM-A2E engine loaded",
         extra={"event": "worker.avatar.lam_a2e.loaded", "device": str(device)},
     )
-    return LamA2EEngine(model, torch, device, settings)
+    return LamA2EEngine(model, torch, device, settings, inference_dependencies)
 
 
 async def load_engine(checkpoint: Path, settings: Any) -> LamA2EEngine:
@@ -158,13 +182,23 @@ async def load_engine(checkpoint: Path, settings: Any) -> LamA2EEngine:
 
 
 class LamA2EEngine:
-    def __init__(self, model: Any, torch: Any, device: Any, settings: Any) -> None:
+    def __init__(
+        self,
+        model: Any,
+        torch: Any,
+        device: Any,
+        settings: Any,
+        inference_dependencies: dict[str, Any],
+    ) -> None:
         self.model, self.torch, self.device = model, torch, device
         self.settings = settings
+        self._inference_dependencies = inference_dependencies
         # The released LAM-A2E weights are trained at 30 FPS. Keep the value
         # configurable so runtimes with a compatible checkpoint can publish at
         # another cadence without changing the audio clock.
-        self.motion_fps = max(1, int(getattr(settings, "motion_fps", 30)))
+        # The released checkpoint is a 30 FPS model. Publish cadence is handled
+        # later by the speech pipeline using PTS-based temporal downsampling.
+        self.motion_fps = max(1, int(getattr(settings, "model_fps", 30)))
         self.inference_chunk_ms = max(
             20, int(getattr(settings, "inference_chunk_ms", 100))
         )
@@ -191,17 +225,17 @@ class LamA2EEngine:
         }
 
     def _infer(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
-        import math
-
-        import librosa
-        import torch.nn.functional as F
-        from models.utils import (
-            apply_frame_blending,
-            apply_random_eye_blinks_context,
-            apply_savitzky_golay_smoothing,
-            smooth_mouth_movements,
-            symmetrize_blendshapes,
-        )
+        librosa = self._inference_dependencies["librosa"]
+        functional = self._inference_dependencies["functional"]
+        apply_frame_blending = self._inference_dependencies["apply_frame_blending"]
+        apply_random_eye_blinks_context = self._inference_dependencies[
+            "apply_random_eye_blinks_context"
+        ]
+        apply_savitzky_golay_smoothing = self._inference_dependencies[
+            "apply_savitzky_golay_smoothing"
+        ]
+        smooth_mouth_movements = self._inference_dependencies["smooth_mouth_movements"]
+        symmetrize_blendshapes = self._inference_dependencies["symmetrize_blendshapes"]
 
         # Keep this calculation aligned with engines.infer.InferBase
         # infer_streaming_audio. The model receives a 64-frame rolling window
@@ -238,7 +272,7 @@ class LamA2EEngine:
         )
         model_audio = np.concatenate([prefix, audio])
         with self.torch.no_grad():
-            identity = F.one_hot(
+            identity = functional.one_hot(
                 self.torch.tensor(getattr(self.settings, "identity_index", 0), device=self.device),
                 12,
             ).float()[None, ...]

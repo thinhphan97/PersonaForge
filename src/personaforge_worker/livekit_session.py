@@ -104,7 +104,7 @@ class LiveKitRenderSession:
         self._observed_fps = 0.0
         self._motion_observed_fps = 0.0
         self._motion_target_fps = (
-            float(settings.lam_a2e_motion_fps) if avatar_runtime is not None else 0.0
+            float(settings.lam_a2e_publish_fps) if avatar_runtime is not None else 0.0
         )
         self._motion_base_pts: int | None = None
         self._motion_base_wall: float | None = None
