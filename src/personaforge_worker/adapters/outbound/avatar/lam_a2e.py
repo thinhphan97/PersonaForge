@@ -111,17 +111,18 @@ class LamAudio2ExpressionRuntime:
             raise RuntimeError("LAM-A2E runtime is closed")
         flush = getattr(self._engine, "flush", None)
         if flush is not None:
+            source = self._last_audio_window or AudioWindow(
+                utterance_id=utterance_id,
+                session_id="",
+                start_sample=0,
+                samples=b"",
+            )
             async for frame in flush(utterance_id):
-                source = self._last_audio_window or AudioWindow(
-                    utterance_id=utterance_id,
-                    session_id="",
-                    start_sample=0,
-                    samples=b"",
-                )
-                yield self._to_timed_frame(
-                    source,
-                    frame,
-                )
+                yield self._to_timed_frame(source, frame)
+        reset = getattr(self._engine, "reset_stream", None)
+        if callable(reset):
+            reset()
+        self._last_audio_window = None
 
     async def close(self) -> None:
         if self._closed:
@@ -132,6 +133,13 @@ class LamAudio2ExpressionRuntime:
             result = close()
             if hasattr(result, "__await__"):
                 await result
+
+    def reset_stream(self) -> None:
+        """Reset context for state silence/discontinuity without closing the model."""
+        reset = getattr(self._engine, "reset_stream", None)
+        if callable(reset):
+            reset()
+        self._last_audio_window = None
 
     def _to_timed_frame(self, audio: AudioWindow, frame: ExpressionFrame) -> TimedMotionFrame:
         sequence = self._sequence

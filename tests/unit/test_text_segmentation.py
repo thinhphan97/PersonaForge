@@ -17,3 +17,12 @@ def test_segmenter_uses_word_boundary_for_long_unpunctuated_text() -> None:
 
     assert segments
     assert all(segment and not segment.startswith(" ") for segment in segments)
+
+
+def test_segmenter_does_not_split_sentence_on_comma_or_target_length() -> None:
+    segmenter = StreamingTextSegmenter(target_characters=20, maximum_characters=160)
+
+    assert segmenter.feed("Xin chào bạn, hôm nay tôi sẽ phân tích hệ thống") == ()
+    assert segmenter.feed(" này.") == (
+        "Xin chào bạn, hôm nay tôi sẽ phân tích hệ thống này.",
+    )

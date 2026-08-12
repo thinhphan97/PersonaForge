@@ -289,6 +289,9 @@ class CompositeSpeechPipeline:
                     # Idle/thinking silence keeps the shared audio clock alive,
                     # but must not spend GPU time in LAM-A2E. Emit neutral
                     # expression frames directly instead.
+                    reset = getattr(self._avatar_runtime, "reset_stream", None)
+                    if callable(reset):
+                        reset()
                     while next_motion_sample < chunk.end_sample:
                         if next_motion_sample >= chunk.start_sample:
                             await self._publisher.publish_motion(

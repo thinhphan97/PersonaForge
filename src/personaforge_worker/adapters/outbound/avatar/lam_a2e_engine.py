@@ -382,6 +382,20 @@ class LamA2EEngine:
         self._pending_start_sample = None
         async for frame in self._process_batch(pending):
             yield frame
+        self.reset_stream()
+
+    def reset_stream(self) -> None:
+        """Reset transient A2E state at an explicit speech-stream boundary."""
+        self._pending_audio.clear()
+        self._pending_start_sample = None
+        self._pending_session_id = ""
+        self._pending_utterance_id = ""
+        self.context = {
+            "is_initial_input": True,
+            "previous_audio": None,
+            "previous_expression": None,
+            "previous_volume": None,
+        }
 
     async def close(self) -> None:
         self.model = None
